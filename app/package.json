@@ -1,0 +1,24 @@
+{
+  "name": "chess-companion-app",
+  "version": "1.0.0",
+  "description": "Companion app for autonomous chessboard",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test:physical-planner": "node scripts/physical-planner-regression.js",
+    "test:physical-state": "node scripts/physical-state-regression.js",
+    "test:physical": "npm run test:physical-planner && npm run test:physical-state"
+  },
+  "dependencies": {
+    "@google/genai": "*",
+    "chess.js": "^1.4.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "google-tts-api": "^2.0.2",
+    "socket.io": "^4.8.1",
+    "stockfish": "^18.0.8",
+    "ws": "^8.21.0"
+  }
+}

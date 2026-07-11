@@ -1,0 +1,68 @@
+# Local secrets
+.env
+.env.*
+!*.env.example
+app/.env
+
+# Dependency folders
+node_modules/
+app/node_modules/
+app/client/node_modules/
+
+# Build outputs and generated firmware artifacts
+build/
+tmp/
+dist/
+app/client/dist/
+**/build/
+*.bin
+*.elf
+*.map
+*.partitions.bin
+*.merged.bin
+
+# Runtime logs
+logs/
+app/logs/
+*.log
+*.jsonl
+
+# Downloaded tools and generated audio captures
+tools/ffmpeg/
+tools/audio-relay/*.mp3
+
+# Audio test assets. Keep public repos free of copyrighted songs.
+*.mp3
+*.wav
+*.m4a
+*.flac
+*.aac
+
+# Personal/private working documents and media exports
+docs_and_media/*.docx
+docs_and_media/*.pptx
+docs_and_media/*.mp4
+docs_and_media/handoff.pdf
+hardware/*.docx
+
+# Local handoff/scratch notes. Keep polished summaries in docs/ instead.
+codex.md
+antigravity.md
+graveyard.txt
+handoff_speaker_gemini.txt
+
+# Arduino/IDE noise
+*.tmp
+*.bak
+*.orig
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+
+# Codex/local automation workspace state
+.agents/
+.codex/
