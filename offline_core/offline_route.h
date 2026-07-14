@@ -30,6 +30,7 @@ struct BoardRouteRequest {
   std::optional<Occupancy> sensedOccupancy;
   std::vector<std::string> ignoredSquares;
   bool directWhenClear = false;
+  bool preferClearLine = true;
 };
 
 struct BoardRouteResult {

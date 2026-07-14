@@ -5401,6 +5401,7 @@ module.exports = {
     normalizeGraveyardSlots,
     withPhysicalPlanningContext,
     buildBoardTransferPlan,
+    planCapturedPieceRemoval,
     buildRobotMoveCommand,
     summarizeMotionPlan,
     legalMoveMatchesUci,

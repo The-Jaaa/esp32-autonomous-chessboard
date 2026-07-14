@@ -314,7 +314,7 @@ BoardRouteResult OfflineBoardRoutePlanner::plan(const BoardRouteRequest& request
     return result;
   }
 
-  std::optional<SearchPath> path = line;
+  std::optional<SearchPath> path = request.preferClearLine ? line : std::nullopt;
   if (!path) path = findPath(request, occupancy, ignored, true);
   if (!path) path = findPath(request, occupancy, ignored, false);
   if (!path) {

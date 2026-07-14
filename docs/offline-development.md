@@ -90,7 +90,7 @@ Set-Location .\app
 npm run test:offline-physical
 ```
 
-`npm run test:foundation` includes the online physical regressions plus the host rules, physical interpreter, engine, turn coordinator, quick integration, and board-route regressions. The complete foundation verification passed on 2026-07-14. Client lint retained the same eight existing warnings, and the unlinked firmware remained exactly 1,095,735 bytes flash and 51,856 bytes static RAM.
+`npm run test:foundation` includes the online physical regressions plus the host rules, physical interpreter, engine, turn coordinator, quick integration, board-route, and external-route regressions. The complete foundation verification passed on 2026-07-14. Client lint retained the same eight existing warnings, and the unlinked firmware remained exactly 1,095,735 bytes flash and 51,856 bytes static RAM.
 
 The controller assumes snapshots are already debounced. It does not perform setup calibration or infer a promotion identity from occupancy. Binary occupancy also cannot distinguish a restored captured piece from the attacker after the capture square has first been observed empty; the controller therefore enforces the intended ordered capture workflow and treats exact restoration as cancellation.
 
@@ -214,3 +214,35 @@ The 2026-07-14 acceptance run passed 16 exact C++/JavaScript parity fixtures and
 The 100-game offline soak, complete `npm run test:foundation`, and `tools/verify-foundation.ps1` all passed. The client production build passed, lint retained only the same eight existing warnings, and the unlinked ESP32 firmware remained exactly 1,095,735 bytes flash and 51,856 bytes static RAM.
 
 This milestone deliberately returns `NoBoardPath` when the 8x8 board has no route. Z/I lanes, graveyards, capture staging/removal, castling choreography, LED previews, motor commands, coordinator wiring, and ESP32 integration remain deferred. The next isolated milestone will add host-only Z/I lane and graveyard routing on top of this accepted board-route API.
+
+## Host-Only Z/I Lane And Graveyard Routing
+
+`offline_core/offline_external_route.h/.cpp` builds a portable external-routing layer on the accepted board planner. It remains host-only and is not connected to the physical interpreter, turn coordinator, backend runtime, client, or ESP32 firmware.
+
+The module provides:
+
+- normalized Z/I slot metadata with the current 16 default coordinates;
+- square and external-coordinate route targets;
+- board-first transfer planning with optional forced-lane routing;
+- direct Z/I and lane-to-board re-entry routes;
+- robot graveyard removal previews with full candidate scoring and failure details;
+- pure, case-insensitive, idempotent reserve/release helpers for caller-owned slot keys.
+
+Transfer routing first uses `OfflineBoardRoutePlanner`. Only `NoBoardPath`, or an explicit forced-lane request, permits an external route. Lane preference, rank-distance ordering, occupied-slot exclusion, lane-transit checks, sensed board occupancy, target deduplication, and route costs match the online JavaScript planner. Direct lane routes retain the online `1000 + targetCount * 100` cost; lane-board routes retain `1200 + rankDistance * 12 + boardPathCost`.
+
+Graveyard routing evaluates every free, routable slot. Z slots exit through `a1-a8` and I slots through `h1-h8`. Candidate scores preserve online board-path cost, adjacent-piece crowding multiplied by 12, middle-out ordering `4, 5, 3, 6, 2, 7, 1, 8`, and the I-side `0.5` preference offset. A piece already on its selected edge square uses the online zero-length board path before moving off-board.
+
+Unlike the online session's current mutable preview, the host planner never reserves a slot while planning. A successful result proposes a slot key; a later coordinator/choreography milestone will call `reserveVerifiedSlot` only after hardware occupancy verification. Failed and abandoned previews therefore consume no graveyard capacity.
+
+Run the external-route regressions directly with:
+
+```powershell
+Set-Location .\app
+npm run test:offline-external-route
+```
+
+The 2026-07-14 parity run passed 22 shared C++/JavaScript fixtures covering board preference, direct pawn passthrough, Z/I and opposite-lane selection, lane-board re-entry, sensed obstruction, occupied transit, malformed/full slots, default coordinates, normalization, middle-out and safety-weighted graveyard choices, edge-square removal, deterministic repetition, and exact failure details. C++ checks also enforce immutable inputs, valid/deduplicated targets, no partial failed routes, and transactional reservation behavior.
+
+The 100-game soak, complete foundation suite, client production build, and final `tools/verify-foundation.ps1` run passed. Client lint retained the same eight existing warnings, and the unlinked firmware remained exactly 1,095,735 bytes flash and 51,856 bytes static RAM. One earlier full-verifier attempt encountered a transient timeout in the unchanged host engine executable; the engine suite passed immediately when rerun and the complete verifier then passed normally.
+
+Complete capture/castling choreography, coordinator integration, LEDs, firmware motion commands, server switching, persistence, and ESP32 linking remain deferred. The next milestone will compose the accepted board and external route primitives into host-only capture and castling choreography.
