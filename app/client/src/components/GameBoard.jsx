@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo, useLayoutEffect } from 'react';
 import { Chess } from 'chess.js';
 import { Chessboard } from 'react-chessboard';
-import { useSocket } from '../context/SocketContext';
+import { useSocket } from '../context/useSocket';
 import { Link } from 'react-router-dom';
 
 const PROFILE_OPTIONS = [
@@ -282,7 +282,9 @@ export default function GameBoard() {
           try {
             g.move(parsed);
             return true;
-          } catch (e) {}
+          } catch (error) {
+            console.warn('[Engine fallback] Cached best move could not be applied:', best, error);
+          }
         }
       }
 
@@ -367,7 +369,7 @@ export default function GameBoard() {
   }, [updateEvaluation, makeEngineMove]);
 
   // ── Drag & drop handler ──
-  const getKingSquare = () => {
+  const getKingSquare = useCallback(() => {
     const g = gameRef.current;
     if (!g.isCheck() && !g.isCheckmate()) return null;
     const board = g.board();
@@ -381,7 +383,40 @@ export default function GameBoard() {
       }
     }
     return null;
-  };
+  }, []);
+
+  const onDrop = useCallback((args) => {
+    if (physicalModeRef.current) return false;
+
+    setOptionSquares({});
+    // react-chessboard v5 passes an object
+    const { sourceSquare, targetSquare } = args;
+    const g = gameRef.current;
+    console.log(`[onDrop] Attempting ${sourceSquare} -> ${targetSquare}`);
+    console.log(`[onDrop] isThinking: ${isThinkingRef.current}, gameOver: ${g.isGameOver()}, turn: ${g.turn()}`);
+
+    // Block if engine is thinking or it's not white's turn
+    if (isThinkingRef.current || g.isGameOver() || g.turn() !== 'w') {
+      console.log('[onDrop] Blocked by state check');
+      return false;
+    }
+
+    try {
+      const move = g.move({ from: sourceSquare, to: targetSquare, promotion: 'q' });
+      if (!move) {
+        console.log('[onDrop] move() returned falsy');
+        return false;
+      }
+
+      console.log('[onDrop] Move valid!', move.san);
+      syncDisplay();
+      onUserMove(move.san);
+      return true;
+    } catch (error) {
+      console.error('[onDrop] Caught error during move:', error);
+      return false;
+    }
+  }, [syncDisplay, onUserMove]);
 
   const onSquareClick = useCallback(({ square }) => {
     if (physicalModeRef.current) return;
@@ -430,46 +465,13 @@ export default function GameBoard() {
     } else {
       setOptionSquares({});
     }
-  }, [optionSquares]);
+  }, [onDrop, optionSquares]);
 
   const onPieceDrag = useCallback(({ square }) => {
     // Show possible moves as soon as the user starts dragging the piece
     if (!square) return;
     onSquareClick({ square });
   }, [onSquareClick]);
-
-  const onDrop = useCallback((args) => {
-    if (physicalModeRef.current) return false;
-
-    setOptionSquares({});
-    // react-chessboard v5 passes an object
-    const { sourceSquare, targetSquare } = args;
-    const g = gameRef.current;
-    console.log(`[onDrop] Attempting ${sourceSquare} -> ${targetSquare}`);
-    console.log(`[onDrop] isThinking: ${isThinkingRef.current}, gameOver: ${g.isGameOver()}, turn: ${g.turn()}`);
-
-    // Block if engine is thinking or it's not white's turn
-    if (isThinkingRef.current || g.isGameOver() || g.turn() !== 'w') {
-      console.log('[onDrop] Blocked by state check');
-      return false;
-    }
-
-    try {
-      const move = g.move({ from: sourceSquare, to: targetSquare, promotion: 'q' });
-      if (!move) {
-        console.log('[onDrop] move() returned falsy');
-        return false;
-      }
-
-      console.log('[onDrop] Move valid!', move.san);
-      syncDisplay();
-      onUserMove(move.san);
-      return true;
-    } catch (e) {
-      console.error('[onDrop] Caught error during move:', e);
-      return false;
-    }
-  }, [syncDisplay, onUserMove]);
 
   const applyPhysicalState = useCallback((nextState = {}) => {
     setPhysicalState(prev => ({ ...prev, ...nextState }));
@@ -610,7 +612,11 @@ export default function GameBoard() {
       const next = [...prev];
       const undone = next.pop();
       for (let i = undone.length - 1; i >= 0; i--) {
-        try { g.move(undone[i]); } catch (e) {}
+        try {
+          g.move(undone[i]);
+        } catch (error) {
+          console.error('[Redo] Failed to replay move:', undone[i], error);
+        }
       }
       syncDisplay();
       updateEvaluation(g.fen());
@@ -916,7 +922,7 @@ export default function GameBoard() {
       lightSquareStyle: { backgroundColor: '#e2e8f0' },
       squareStyles: styles
     };
-  }, [fen, onDrop, onPieceDrag, onSquareClick, optionSquares, physicalState, gameRef.current.history().length]);
+  }, [fen, getKingSquare, onDrop, onPieceDrag, onSquareClick, optionSquares, physicalState]);
 
   return (
     <div className="app-container">

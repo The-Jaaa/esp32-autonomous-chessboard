@@ -1,9 +1,59 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Chess } from 'chess.js';
 import { Chessboard } from 'react-chessboard';
-import { useSocket } from '../context/SocketContext';
+import { useSocket } from '../context/useSocket';
 import { Mic, MicOff, MessageSquare, Volume2, ArrowLeft } from 'lucide-react';
 import { Link } from 'react-router-dom';
+
+const extractSampleRate = (mimeType) => {
+  const match = /rate=(\d+)/i.exec(mimeType || '');
+  return match ? parseInt(match[1], 10) : null;
+};
+
+const base64ToBytes = (base64Str) => {
+  const binaryString = window.atob(base64Str);
+  const bytes = new Uint8Array(binaryString.length);
+  for (let index = 0; index < binaryString.length; index++) {
+    bytes[index] = binaryString.charCodeAt(index);
+  }
+  return bytes;
+};
+
+const pcm16ToAudioBuffer = (audioCtx, base64Str, sampleRate) => {
+  const bytes = base64ToBytes(base64Str);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const sampleCount = Math.floor(bytes.byteLength / 2);
+  const audioBuffer = audioCtx.createBuffer(1, sampleCount, sampleRate);
+  const channelData = audioBuffer.getChannelData(0);
+
+  for (let index = 0; index < sampleCount; index++) {
+    channelData[index] = view.getInt16(index * 2, true) / 32768;
+  }
+
+  return audioBuffer;
+};
+
+const fetchEngineContext = async (positionFen) => {
+  const response = await fetch(`/api/evaluate?fen=${encodeURIComponent(positionFen)}&depth=5`);
+  const data = await response.json();
+  if (!data.success) throw new Error(data.error || 'Engine evaluation failed');
+
+  return {
+    evaluation: data.evaluation,
+    bestMove: data.bestmove ? data.bestmove.split(' ')[1] : null,
+    mate: data.mate
+  };
+};
+
+const getGamePhase = (gameCopy) => {
+  if (gameCopy.isCheckmate()) return 'checkmate';
+  if (gameCopy.isDraw()) return 'draw';
+  if (gameCopy.isGameOver()) return 'game over';
+  const ply = gameCopy.history().length;
+  if (ply < 16) return 'opening';
+  if (ply < 50) return 'middlegame';
+  return 'endgame';
+};
 
 export default function LiveMentor() {
   const socket = useSocket();
@@ -28,6 +78,7 @@ export default function LiveMentor() {
   const silentGainRef = useRef(null);
   const chatEndRef = useRef(null);
   const socketRef = useRef(null);
+  const gameRef = useRef(game);
   const isMentorActiveRef = useRef(false);
   const currentEvaluationRef = useRef(null);
   const bestMoveRef = useRef(null);
@@ -40,12 +91,263 @@ export default function LiveMentor() {
     socketRef.current = socket;
   }, [socket]);
 
+  useEffect(() => {
+    gameRef.current = game;
+  }, [game]);
+
   // Auto-scroll chat panel to bottom on new messages
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Handle Socket events
+  const addLogMessage = useCallback((role, text) => {
+    const sender = role === 'system'
+      ? 'System'
+      : role === 'user'
+        ? 'Player'
+        : role === 'voice'
+          ? 'Player Voice'
+          : 'Gemini Coach';
+
+    setMessages((prev) => [
+      ...prev,
+      {
+        role,
+        sender,
+        text,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      }
+    ]);
+  }, []);
+
+  // Toggle Live Mentor Mode
+  const toggleMentorMode = () => {
+    if (!socket) return;
+    
+    if (!isMentorActive) {
+      setIsMentorActive(true);
+      isMentorActiveRef.current = true;
+      outputPlaybackTimeRef.current = 0;
+      setStatusText('Connecting to Gemini Live...');
+      setMessages([]);
+      addLogMessage('system', 'Starting Live Mentor Session...');
+      fetchEngineContext(fen)
+        .then((context) => {
+          currentEvaluationRef.current = context.evaluation;
+          bestMoveRef.current = context.bestMove;
+        })
+        .catch((err) => {
+          console.warn('Initial Live mentor engine context unavailable:', err);
+        });
+      socket.emit('start-live-mentor');
+    } else {
+      setIsMentorActive(false);
+      isMentorActiveRef.current = false;
+      setStatusText('Disconnected');
+      socket.emit('stop-live-mentor');
+      stopMicrophoneStreaming();
+      stopBrowserAudio();
+      addLogMessage('system', 'Stopped Live Mentor Session.');
+    }
+  };
+
+  // Microphone capture and streaming
+  const startMicrophoneStreaming = useCallback(async () => {
+    try {
+      if (micStreamRef.current) return;
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        },
+        video: false
+      });
+      micStreamRef.current = stream;
+
+      const micContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+      if (micContext.state === 'suspended') await micContext.resume();
+      micContextRef.current = micContext;
+
+      const source = micContext.createMediaStreamSource(stream);
+      micSourceRef.current = source;
+      const processorNode = micContext.createScriptProcessor(4096, 1, 1);
+      processorNodeRef.current = processorNode;
+      const silentGain = micContext.createGain();
+      silentGain.gain.value = 0;
+      silentGainRef.current = silentGain;
+
+      processorNode.onaudioprocess = (e) => {
+        const activeSocket = socketRef.current;
+        if (!activeSocket || !isMentorActiveRef.current) return;
+        const inputData = e.inputBuffer.getChannelData(0);
+        const pcmVal = new Int16Array(inputData.length);
+        
+        for (let i = 0; i < inputData.length; i++) {
+          const s = Math.max(-1, Math.min(1, inputData[i]));
+          pcmVal[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+        }
+
+        const buffer = pcmVal.buffer;
+        const base64PCM = btoa(String.fromCharCode.apply(null, new Uint8Array(buffer)));
+        activeSocket.emit('live-mentor-audio-chunk', base64PCM);
+      };
+
+      source.connect(processorNode);
+      processorNode.connect(silentGain);
+      silentGain.connect(micContext.destination);
+      addLogMessage('system', 'Microphone active. Voice streaming enabled.');
+    } catch (err) {
+      console.error("Failed to access mic:", err);
+      addLogMessage('system', 'Failed to access mic. Verify system permissions.');
+      setIsMentorActive(false);
+      isMentorActiveRef.current = false;
+      setStatusText('Microphone Access Error');
+      socketRef.current?.emit('stop-live-mentor');
+    }
+  }, [addLogMessage]);
+
+  const stopMicrophoneStreaming = useCallback(() => {
+    if (micStreamRef.current) {
+      micStreamRef.current.getTracks().forEach((track) => track.stop());
+      micStreamRef.current = null;
+    }
+    if (micSourceRef.current) {
+      micSourceRef.current.disconnect();
+      micSourceRef.current = null;
+    }
+    if (processorNodeRef.current) {
+      processorNodeRef.current.onaudioprocess = null;
+      processorNodeRef.current.disconnect();
+      processorNodeRef.current = null;
+    }
+    if (silentGainRef.current) {
+      silentGainRef.current.disconnect();
+      silentGainRef.current = null;
+    }
+    if (micContextRef.current) {
+      micContextRef.current.close();
+      micContextRef.current = null;
+    }
+  }, []);
+
+  const stopBrowserAudio = useCallback(() => {
+    outputPlaybackTimeRef.current = 0;
+
+    if (animationRef.current) {
+      cancelAnimationFrame(animationRef.current);
+      animationRef.current = null;
+    }
+    if (analyserRef.current) {
+      try {
+        analyserRef.current.disconnect();
+      } catch {}
+      analyserRef.current = null;
+    }
+    if (audioCtxRef.current) {
+      audioCtxRef.current.close().catch(() => {});
+      audioCtxRef.current = null;
+    }
+  }, []);
+
+  const drawVisualizer = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !analyserRef.current) return;
+    const canvasCtx = canvas.getContext('2d');
+    const analyser = analyserRef.current;
+
+    analyser.fftSize = 512;
+    const bufferLength = analyser.frequencyBinCount;
+    const dataArray = new Uint8Array(bufferLength);
+
+    if (animationRef.current) return;
+
+    const renderFrame = () => {
+      if (!canvasRef.current) return;
+      animationRef.current = requestAnimationFrame(renderFrame);
+
+      analyser.getByteFrequencyData(dataArray);
+
+      canvasCtx.fillStyle = 'rgba(15, 23, 42, 0.2)';
+      canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
+
+      const barWidth = (canvas.width / bufferLength) * 2;
+      let barHeight;
+      let x = 0;
+
+      for (let i = 0; i < bufferLength; i++) {
+        barHeight = dataArray[i] / 1.5;
+        // Gradient color effect
+        canvasCtx.fillStyle = `rgb(${barHeight + 60}, 120, 246)`;
+        canvasCtx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+        x += barWidth + 1;
+      }
+    };
+
+    renderFrame();
+  }, []);
+
+  const playLiveAudio = useCallback(async (base64Str, sampleRate = 24000) => {
+    try {
+      if (!audioCtxRef.current) {
+        audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      const audioCtx = audioCtxRef.current;
+      if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+      if (!analyserRef.current) {
+        analyserRef.current = audioCtx.createAnalyser();
+      }
+      const analyser = analyserRef.current;
+
+      const decodedData = pcm16ToAudioBuffer(audioCtx, base64Str, sampleRate);
+      const source = audioCtx.createBufferSource();
+      source.buffer = decodedData;
+
+      source.connect(analyser);
+      analyser.connect(audioCtx.destination);
+
+      const startAt = Math.max(audioCtx.currentTime, outputPlaybackTimeRef.current);
+      source.start(startAt);
+      outputPlaybackTimeRef.current = startAt + decodedData.duration;
+
+      drawVisualizer();
+    } catch (error) {
+      console.error('Live audio playback error:', error);
+    }
+  }, [drawVisualizer]);
+
+  const sendMoveContext = useCallback(async (moveObj, gameCopy) => {
+    const previousEvaluation = currentEvaluationRef.current;
+    const context = {
+      move: moveObj.san,
+      fen: gameCopy.fen(),
+      pgn: gameCopy.pgn(),
+      previousEvaluation,
+      bestMove: bestMoveRef.current,
+      turn: gameCopy.turn() === 'w' ? 'White' : 'Black',
+      gamePhase: getGamePhase(gameCopy)
+    };
+
+    try {
+      const engineContext = await fetchEngineContext(gameCopy.fen());
+      context.evaluation = engineContext.evaluation;
+      context.bestMove = engineContext.bestMove;
+      context.mate = engineContext.mate;
+      currentEvaluationRef.current = engineContext.evaluation;
+      bestMoveRef.current = engineContext.bestMove;
+    } catch (err) {
+      console.warn('Live mentor engine context unavailable:', err);
+      addLogMessage('system', 'Engine context unavailable; sent move and FEN only.');
+    }
+
+    if (socketRef.current && isMentorActiveRef.current) {
+      socketRef.current.emit('live-mentor-move', context);
+    }
+  }, [addLogMessage]);
+
+  // Keep one stable subscription per socket while reading the latest game from a ref.
   useEffect(() => {
     if (!socket) return;
 
@@ -65,17 +367,17 @@ export default function LiveMentor() {
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
           };
           return updated;
-        } else {
-          return [
-            ...prev,
-            {
-              role: 'model',
-              sender: 'Gemini Coach',
-              text: text,
-              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-            }
-          ];
         }
+
+        return [
+          ...prev,
+          {
+            role: 'model',
+            sender: 'Gemini Coach',
+            text,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+          }
+        ];
       });
     };
 
@@ -121,29 +423,29 @@ export default function LiveMentor() {
       addLogMessage('system', 'Gemini Live Session Closed.');
     };
 
-    const handleError = (err) => {
-      console.error("[Live Mentor Socket Error]", err);
+    const handleError = (error) => {
+      console.error('[Live Mentor Socket Error]', error);
       setStatusText('Connection Error');
-      addLogMessage('system', `Gemini Live error: ${err}`);
+      addLogMessage('system', `Gemini Live error: ${error}`);
     };
 
     const handleEspMove = (move) => {
-      // Synchronize ESP32 move with game state
       const from = move.substring(0, 2);
       const to = move.substring(2, 4);
       const promotion = move.length > 4 ? move.substring(4, 5) : 'q';
 
       try {
-        const gameCopy = new Chess(game.fen());
+        const gameCopy = new Chess(gameRef.current.fen());
         const moveObj = gameCopy.move({ from, to, promotion });
         if (moveObj) {
+          gameRef.current = gameCopy;
           setGame(gameCopy);
           setFen(gameCopy.fen());
           addLogMessage('user', `Physical Move: ${moveObj.san}`);
           sendMoveContext(moveObj, gameCopy);
         }
-      } catch (e) {
-        console.error("Invalid move from ESP32:", move, e);
+      } catch (error) {
+        console.error('Invalid move from ESP32:', move, error);
       }
     };
 
@@ -164,304 +466,15 @@ export default function LiveMentor() {
       socket.off('live-mentor-error', handleError);
       socket.off('esp-move', handleEspMove);
     };
-  }, [socket, game]);
-
-  const addLogMessage = (role, text) => {
-    const sender = role === 'system'
-      ? 'System'
-      : role === 'user'
-        ? 'Player'
-        : role === 'voice'
-          ? 'Player Voice'
-          : 'Gemini Coach';
-
-    setMessages((prev) => [
-      ...prev,
-      {
-        role,
-        sender,
-        text,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-      }
-    ]);
-  };
-
-  // Toggle Live Mentor Mode
-  const toggleMentorMode = () => {
-    if (!socket) return;
-    
-    if (!isMentorActive) {
-      setIsMentorActive(true);
-      isMentorActiveRef.current = true;
-      outputPlaybackTimeRef.current = 0;
-      setStatusText('Connecting to Gemini Live...');
-      setMessages([]);
-      addLogMessage('system', 'Starting Live Mentor Session...');
-      fetchEngineContext(fen)
-        .then((context) => {
-          currentEvaluationRef.current = context.evaluation;
-          bestMoveRef.current = context.bestMove;
-        })
-        .catch((err) => {
-          console.warn('Initial Live mentor engine context unavailable:', err);
-        });
-      socket.emit('start-live-mentor');
-    } else {
-      setIsMentorActive(false);
-      isMentorActiveRef.current = false;
-      setStatusText('Disconnected');
-      socket.emit('stop-live-mentor');
-      stopMicrophoneStreaming();
-      stopBrowserAudio();
-      addLogMessage('system', 'Stopped Live Mentor Session.');
-    }
-  };
-
-  // Microphone capture and streaming
-  const startMicrophoneStreaming = async () => {
-    try {
-      if (micStreamRef.current) return;
-
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        },
-        video: false
-      });
-      micStreamRef.current = stream;
-
-      const micContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-      if (micContext.state === 'suspended') await micContext.resume();
-      micContextRef.current = micContext;
-
-      const source = micContext.createMediaStreamSource(stream);
-      micSourceRef.current = source;
-      const processorNode = micContext.createScriptProcessor(4096, 1, 1);
-      processorNodeRef.current = processorNode;
-      const silentGain = micContext.createGain();
-      silentGain.gain.value = 0;
-      silentGainRef.current = silentGain;
-
-      processorNode.onaudioprocess = (e) => {
-        if (!socket || !isMentorActiveRef.current) return;
-        const inputData = e.inputBuffer.getChannelData(0);
-        const pcmVal = new Int16Array(inputData.length);
-        
-        for (let i = 0; i < inputData.length; i++) {
-          const s = Math.max(-1, Math.min(1, inputData[i]));
-          pcmVal[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-        }
-
-        const buffer = pcmVal.buffer;
-        const base64PCM = btoa(String.fromCharCode.apply(null, new Uint8Array(buffer)));
-        socket.emit('live-mentor-audio-chunk', base64PCM);
-      };
-
-      source.connect(processorNode);
-      processorNode.connect(silentGain);
-      silentGain.connect(micContext.destination);
-      addLogMessage('system', 'Microphone active. Voice streaming enabled.');
-    } catch (err) {
-      console.error("Failed to access mic:", err);
-      addLogMessage('system', 'Failed to access mic. Verify system permissions.');
-      setIsMentorActive(false);
-      isMentorActiveRef.current = false;
-      setStatusText('Microphone Access Error');
-      if (socket) socket.emit('stop-live-mentor');
-    }
-  };
-
-  const stopMicrophoneStreaming = () => {
-    if (micStreamRef.current) {
-      micStreamRef.current.getTracks().forEach((track) => track.stop());
-      micStreamRef.current = null;
-    }
-    if (micSourceRef.current) {
-      micSourceRef.current.disconnect();
-      micSourceRef.current = null;
-    }
-    if (processorNodeRef.current) {
-      processorNodeRef.current.onaudioprocess = null;
-      processorNodeRef.current.disconnect();
-      processorNodeRef.current = null;
-    }
-    if (silentGainRef.current) {
-      silentGainRef.current.disconnect();
-      silentGainRef.current = null;
-    }
-    if (micContextRef.current) {
-      micContextRef.current.close();
-      micContextRef.current = null;
-    }
-  };
-
-  const stopBrowserAudio = () => {
-    outputPlaybackTimeRef.current = 0;
-
-    if (animationRef.current) {
-      cancelAnimationFrame(animationRef.current);
-      animationRef.current = null;
-    }
-    if (analyserRef.current) {
-      try {
-        analyserRef.current.disconnect();
-      } catch (e) {}
-      analyserRef.current = null;
-    }
-    if (audioCtxRef.current) {
-      audioCtxRef.current.close().catch(() => {});
-      audioCtxRef.current = null;
-    }
-  };
-
-  const extractSampleRate = (mimeType) => {
-    const match = /rate=(\d+)/i.exec(mimeType || '');
-    return match ? parseInt(match[1], 10) : null;
-  };
-
-  const base64ToBytes = (base64Str) => {
-    const binaryString = window.atob(base64Str);
-    const bytes = new Uint8Array(binaryString.length);
-    for (let j = 0; j < binaryString.length; j++) {
-      bytes[j] = binaryString.charCodeAt(j);
-    }
-    return bytes;
-  };
-
-  const pcm16ToAudioBuffer = (audioCtx, base64Str, sampleRate) => {
-    const bytes = base64ToBytes(base64Str);
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const sampleCount = Math.floor(bytes.byteLength / 2);
-    const audioBuffer = audioCtx.createBuffer(1, sampleCount, sampleRate);
-    const channelData = audioBuffer.getChannelData(0);
-
-    for (let i = 0; i < sampleCount; i++) {
-      channelData[i] = view.getInt16(i * 2, true) / 32768;
-    }
-
-    return audioBuffer;
-  };
-
-  const playLiveAudio = async (base64Str, sampleRate = 24000) => {
-    try {
-      if (!audioCtxRef.current) {
-        audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
-      }
-      const audioCtx = audioCtxRef.current;
-      if (audioCtx.state === 'suspended') await audioCtx.resume();
-
-      if (!analyserRef.current) {
-        analyserRef.current = audioCtx.createAnalyser();
-      }
-      const analyser = analyserRef.current;
-
-      const decodedData = pcm16ToAudioBuffer(audioCtx, base64Str, sampleRate);
-      const source = audioCtx.createBufferSource();
-      source.buffer = decodedData;
-
-      source.connect(analyser);
-      analyser.connect(audioCtx.destination);
-
-      const startAt = Math.max(audioCtx.currentTime, outputPlaybackTimeRef.current);
-      source.start(startAt);
-      outputPlaybackTimeRef.current = startAt + decodedData.duration;
-
-      drawVisualizer();
-    } catch (e) {
-      console.error('Live audio playback error:', e);
-    }
-  };
-
-  const drawVisualizer = () => {
-    const canvas = canvasRef.current;
-    if (!canvas || !analyserRef.current) return;
-    const canvasCtx = canvas.getContext('2d');
-    const analyser = analyserRef.current;
-
-    analyser.fftSize = 512;
-    const bufferLength = analyser.frequencyBinCount;
-    const dataArray = new Uint8Array(bufferLength);
-
-    if (animationRef.current) return;
-
-    const renderFrame = () => {
-      if (!canvasRef.current) return;
-      animationRef.current = requestAnimationFrame(renderFrame);
-
-      analyser.getByteFrequencyData(dataArray);
-
-      canvasCtx.fillStyle = 'rgba(15, 23, 42, 0.2)';
-      canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
-
-      const barWidth = (canvas.width / bufferLength) * 2;
-      let barHeight;
-      let x = 0;
-
-      for (let i = 0; i < bufferLength; i++) {
-        barHeight = dataArray[i] / 1.5;
-        // Gradient color effect
-        canvasCtx.fillStyle = `rgb(${barHeight + 60}, 120, 246)`;
-        canvasCtx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
-        x += barWidth + 1;
-      }
-    };
-
-    renderFrame();
-  };
-
-  const fetchEngineContext = async (positionFen) => {
-    const response = await fetch(`/api/evaluate?fen=${encodeURIComponent(positionFen)}&depth=5`);
-    const data = await response.json();
-    if (!data.success) throw new Error(data.error || 'Engine evaluation failed');
-
-    const bestMove = data.bestmove ? data.bestmove.split(' ')[1] : null;
-    return {
-      evaluation: data.evaluation,
-      bestMove,
-      mate: data.mate
-    };
-  };
-
-  const getGamePhase = (gameCopy) => {
-    if (gameCopy.isCheckmate()) return 'checkmate';
-    if (gameCopy.isDraw()) return 'draw';
-    if (gameCopy.isGameOver()) return 'game over';
-    const ply = gameCopy.history().length;
-    if (ply < 16) return 'opening';
-    if (ply < 50) return 'middlegame';
-    return 'endgame';
-  };
-
-  const sendMoveContext = async (moveObj, gameCopy) => {
-    const previousEvaluation = currentEvaluationRef.current;
-    const context = {
-      move: moveObj.san,
-      fen: gameCopy.fen(),
-      pgn: gameCopy.pgn(),
-      previousEvaluation,
-      bestMove: bestMoveRef.current,
-      turn: gameCopy.turn() === 'w' ? 'White' : 'Black',
-      gamePhase: getGamePhase(gameCopy)
-    };
-
-    try {
-      const engineContext = await fetchEngineContext(gameCopy.fen());
-      context.evaluation = engineContext.evaluation;
-      context.bestMove = engineContext.bestMove;
-      context.mate = engineContext.mate;
-      currentEvaluationRef.current = engineContext.evaluation;
-      bestMoveRef.current = engineContext.bestMove;
-    } catch (err) {
-      console.warn('Live mentor engine context unavailable:', err);
-      addLogMessage('system', 'Engine context unavailable; sent move and FEN only.');
-    }
-
-    if (socket && isMentorActiveRef.current) {
-      socket.emit('live-mentor-move', context);
-    }
-  };
+  }, [
+    addLogMessage,
+    playLiveAudio,
+    sendMoveContext,
+    socket,
+    startMicrophoneStreaming,
+    stopBrowserAudio,
+    stopMicrophoneStreaming
+  ]);
 
   // Digital Board drag-and-drop move
   const onDrop = (dropArgs, maybeTargetSquare) => {
@@ -489,7 +502,7 @@ export default function LiveMentor() {
       sendMoveContext(move, gameCopy);
 
       return true;
-    } catch (e) {
+    } catch {
       return false;
     }
   };
@@ -501,7 +514,7 @@ export default function LiveMentor() {
       stopBrowserAudio();
       if (socketRef.current) socketRef.current.emit('stop-live-mentor');
     };
-  }, []);
+  }, [stopBrowserAudio, stopMicrophoneStreaming]);
 
   return (
     <div className="app-container" style={{ flexDirection: 'column', gap: '1rem', height: '92vh', maxWidth: '1600px', width: '95%' }}>
