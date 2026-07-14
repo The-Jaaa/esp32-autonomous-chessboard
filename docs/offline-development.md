@@ -90,7 +90,7 @@ Set-Location .\app
 npm run test:offline-physical
 ```
 
-`npm run test:foundation` includes the online physical regressions plus the host rules, physical interpreter, engine, turn coordinator, quick integration, board-route, and external-route regressions. The complete foundation verification passed on 2026-07-14. Client lint retained the same eight existing warnings, and the unlinked firmware remained exactly 1,095,735 bytes flash and 51,856 bytes static RAM.
+`npm run test:foundation` includes the online physical regressions plus the host rules, physical interpreter, engine, turn coordinator, quick integration, board-route, external-route, motion choreography, and motion-execution regressions. The complete foundation verification passed on 2026-07-14. Client lint retained the same eight existing warnings, and the unlinked firmware remained exactly 1,095,735 bytes flash and 51,856 bytes static RAM.
 
 The controller assumes snapshots are already debounced. It does not perform setup calibration or infer a promotion identity from occupancy. Binary occupancy also cannot distinguish a restored captured piece from the attacker after the capture square has first been observed empty; the controller therefore enforces the intended ordered capture workflow and treats exact restoration as cancellation.
 
@@ -282,3 +282,26 @@ The 2026-07-14 acceptance run passed 20 shared C++/JavaScript fixtures. Coverage
 The 100-game soak passed 7,952 plies with 1,257 captures, 42 castling moves, 4 en-passant moves, and 54 promotions in the unchanged coordinator/rules simulation. The complete foundation suite and `tools/verify-foundation.ps1` passed. Client build succeeded, lint retained the same eight existing warnings, and firmware remained exactly 1,095,735 bytes flash and 51,856 bytes static RAM.
 
 Still deferred: coordinator-to-motion integration, pending/verified graveyard reservation state, motor primitives, LED choreography, undo/redo motion plans, promotion choreography, persistence, online/offline switching, and ESP32 linking. The next isolated milestone should connect staged opponent moves to this planner through a host-only execution transaction, without adding firmware control yet.
+
+## Host-Only Motion Execution Transactions
+
+`OfflineTurnCoordinator` now connects engine results to `OfflineMotionPlanner` while `OfflinePhysicalController` remains the only owner of authoritative chess state. Engine results are checked against the latest stable sensed occupancy before routing. The coordinator tries the preferred move and unique ranked root candidates, rejects illegal and unsupported promotion candidates explicitly, and selects the strongest routable move. For non-mate candidates within five centipawns, route cost and then UCI order provide deterministic physical tie-breaking; mate rank is never traded for route convenience.
+
+Each selected move creates a `MotionExecutionTransaction` containing the engine generation, transaction ID, preferred and selected moves, engine score, fallback reason, complete motion plan, current/verified phases, rejected candidates, and graveyard reservation state. Quiet moves, captures, en passant, and castling execute through their existing abstract phase sequence. A phase advances only after a successful hardware report whose occupancy exactly matches that phase's expected after-state. Failed unchanged phases are retryable, ambiguous occupancy enters recoverable `SyncWarning`, stale/out-of-order reports are rejected, and duplicate verified reports are idempotent.
+
+Robot graveyard state is now transactional. A selected capture owns its proposed slot as `Pending` without adding it to occupied capacity. A successful `CapturedRemoval` report changes it to `Occupied`. If a later phase fails and the complete pre-move board is restored, the slot remains occupied until the caller explicitly confirms that the captured piece was removed from the unsensored graveyard. The transaction then returns to `Pending` for retry. The compatibility `completeOpponentExecution` path remains available as an explicit atomic hardware-success adapter and verifies all phases at once.
+
+The rules FEN, side to move, history, and outcome remain unchanged during planning and every intermediate physical phase. Only the final verified phase commits the selected move. A completed move opens the human turn or enters `GameOver`. If every ranked candidate is physically blocked, the coordinator retains the engine result in `OpponentMotionBlocked` so the same result can be replanned after board or route recovery.
+
+Run the dedicated regressions with:
+
+```powershell
+Set-Location .\app
+npm run test:offline-motion-execution
+```
+
+The 2026-07-14 acceptance run covered sensed-occupancy guards, strongest-routable fallback, the five-centipawn tie window, mate priority, quiet moves, direct/staged captures, en passant, all four castling directions, phase retry and confirmation, stale/duplicate reports, exact state immutability, graveyard `Free/Pending/Occupied` behavior, restored-piece release confirmation, full-graveyard fallback, atomic compatibility completion, checkmate, and explicit opponent-promotion blocking.
+
+The 100-game soak passed 6,429 committed plies with 1,110 captures, 32 castling moves, 7 en-passant moves, and 17 completed human promotions. Sixteen games reached a clean `OpponentMotionBlocked` boundary because the engine's completed root set contained only promotions; no promotion was silently applied or converted into an illegal physical move. The complete foundation suite and `tools/verify-foundation.ps1` passed. Client build succeeded, lint retained the same eight existing warnings, and firmware remained exactly 1,095,735 bytes flash and 51,856 bytes static RAM.
+
+Still deferred: opponent promotion choreography, firmware phase-report integration, motor and LED adapters, persistence, undo/redo motion transactions, and online/offline ownership switching. The next isolated milestone should add explicit host-only opponent promotion choreography before firmware integration.

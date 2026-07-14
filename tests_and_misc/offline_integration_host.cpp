@@ -56,6 +56,7 @@ struct Metrics {
   std::uint64_t humanCancellations = 0;
   std::uint64_t humanDisturbanceRecoveries = 0;
   std::uint64_t duplicateReports = 0;
+  std::uint64_t deferredOpponentPromotions = 0;
   std::uint64_t engineNodes = 0;
 };
 
@@ -301,8 +302,32 @@ OfflineTurnResult simulateOpponentMove(
 
   const std::string beforeStage = coordinator.physical().game().fen();
   OfflineTurnResult staged = coordinator.submitEngineResult(request->generation, search);
+  if (staged.phase == OfflineTurnPhase::OpponentMotionBlocked) {
+    require(staged.motionTransaction && staged.opponentPlan == std::nullopt &&
+                !staged.motionTransaction->rejectedCandidates.empty() &&
+                std::all_of(
+                    staged.motionTransaction->rejectedCandidates.begin(),
+                    staged.motionTransaction->rejectedCandidates.end(),
+                    [](const offline::MotionCandidateFailure& failure) {
+                      return failure.status == offline::MotionPlanStatus::UnsupportedPromotion;
+                    }) &&
+                coordinator.physical().game().fen() == oracle.fen(),
+            context + ": motion-blocked engine result was not an explicit deferred promotion.");
+    ++metrics.deferredOpponentPromotions;
+    return staged;
+  }
   require(staged.phase == OfflineTurnPhase::OpponentMoveReady && staged.opponentPlan,
-          context + ": legal engine result did not stage an opponent move.");
+          context + ": legal engine result did not stage an opponent move; phase=" +
+              offline::offlineTurnPhaseName(staged.phase) + " fen=" + request->fen +
+              " best=" + search.bestMove + " rejected=" +
+              (staged.motionTransaction
+                   ? std::to_string(staged.motionTransaction->rejectedCandidates.size())
+                   : "none") +
+              " first_reason=" +
+              (staged.motionTransaction &&
+                       !staged.motionTransaction->rejectedCandidates.empty()
+                   ? staged.motionTransaction->rejectedCandidates.front().reason
+                   : "none"));
   const OpponentMovePlan plan = *staged.opponentPlan;
   require(plan.beforeFen == oracle.fen() && beforeStage == oracle.fen(),
           context + ": staged plan has the wrong pre-move FEN.");
@@ -421,7 +446,9 @@ void runGame(
       const std::string uci = legal[random.index(legal.size())];
       simulateHumanMove(coordinator, oracle, uci, faults, metrics, context);
     } else if (coordinator.phase() == OfflineTurnPhase::EngineSearchNeeded) {
-      simulateOpponentMove(coordinator, oracle, engine, faults, metrics, context);
+      const OfflineTurnResult opponent = simulateOpponentMove(
+          coordinator, oracle, engine, faults, metrics, context);
+      if (opponent.phase == OfflineTurnPhase::OpponentMotionBlocked) break;
     } else {
       throw std::runtime_error(
           context + ": simulator encountered unfinished phase " +
@@ -433,6 +460,7 @@ void runGame(
   requireSynchronized(coordinator, oracle, "game " + std::to_string(gameIndex) + " final");
   require(coordinator.phase() == OfflineTurnPhase::HumanTurn ||
               coordinator.phase() == OfflineTurnPhase::EngineSearchNeeded ||
+              coordinator.phase() == OfflineTurnPhase::OpponentMotionBlocked ||
               coordinator.phase() == OfflineTurnPhase::GameOver,
           "Game ended its ply budget in an unstable transaction phase.");
 }
@@ -563,6 +591,7 @@ void printMetrics(const Options& options, const Metrics& metrics, std::int64_t e
             << ",\"humanCancellations\":" << metrics.humanCancellations
             << ",\"humanDisturbanceRecoveries\":" << metrics.humanDisturbanceRecoveries
             << ",\"duplicateReports\":" << metrics.duplicateReports
+            << ",\"deferredOpponentPromotions\":" << metrics.deferredOpponentPromotions
             << ",\"engineNodes\":" << metrics.engineNodes
             << ",\"elapsedMs\":" << elapsedMs << "}" << std::endl;
 }

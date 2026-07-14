@@ -56,9 +56,17 @@ OfflineTurnResult performQuietHumanMove(
 }
 
 OfflineTurnResult executeStagedMove(OfflineTurnCoordinator& coordinator) {
+  const OfflineTurnResult before = coordinator.currentState();
   OfflineTurnResult started = coordinator.beginOpponentExecution();
   require(started.phase == OfflineTurnPhase::OpponentMoveExecuting,
-          "Staged opponent move did not start execution.");
+          std::string("Staged opponent move did not start execution: phase=") +
+              offline::offlineTurnPhaseName(started.phase) + " preferred=" +
+              (before.motionTransaction ? before.motionTransaction->preferredMove : "none") +
+              " reason=" +
+              (before.motionTransaction && !before.motionTransaction->rejectedCandidates.empty()
+                   ? before.motionTransaction->rejectedCandidates.front().reason
+                   : "none") +
+              " message=" + started.message);
   require(started.opponentPlan.has_value(), "Started execution is missing its move plan.");
   return coordinator.completeOpponentExecution(started.opponentPlan->expectedOccupancy);
 }
@@ -192,29 +200,20 @@ void verifyPromotions() {
   OfflineTurnCoordinator opponentPromotion;
   require(opponentPromotion.loadFen("7k/8/8/8/8/8/p6P/4K3 b - - 0 1"),
           "Opponent promotion fixture must load.");
-  OfflineTurnResult staged = submitMove(opponentPromotion, "a2a1n");
-  require(staged.opponentPlan && staged.opponentPlan->move.promotion == "n",
-          "Opponent promotion metadata must retain the selected piece.");
   const std::string before = opponentPromotion.physical().game().fen();
-  result = executeStagedMove(opponentPromotion);
-  require(result.phase == OfflineTurnPhase::OpponentPromotionPending &&
-              result.event == OfflineTurnEvent::OpponentPromotionRequired,
-          "Matching promotion occupancy must wait for identity confirmation.");
+  result = submitMove(opponentPromotion, "a2a1n");
+  require(result.phase == OfflineTurnPhase::OpponentMotionBlocked &&
+              result.event == OfflineTurnEvent::OpponentMotionBlocked &&
+              result.motionTransaction &&
+              result.motionTransaction->rejectedCandidates.size() == 1 &&
+              result.motionTransaction->rejectedCandidates.front().status ==
+                  offline::MotionPlanStatus::UnsupportedPromotion,
+          "Opponent promotion must be rejected explicitly by motion planning.");
   require(opponentPromotion.physical().game().fen() == before,
-          "Opponent promotion must remain uncommitted before identity confirmation.");
-  result = opponentPromotion.completeOpponentExecution(staged.opponentPlan->expectedOccupancy);
-  require(result.event == OfflineTurnEvent::None &&
-              result.phase == OfflineTurnPhase::OpponentPromotionPending,
-          "Duplicate promotion completion must be idempotent.");
-
-  result = opponentPromotion.confirmOpponentPromotion('q');
-  require(result.event == OfflineTurnEvent::PromotionConfirmationRejected &&
-              result.phase == OfflineTurnPhase::OpponentPromotionPending,
-          "Wrong opponent promotion identity must be rejected without leaving the pending phase.");
-  result = opponentPromotion.confirmOpponentPromotion('N');
-  require(result.event == OfflineTurnEvent::OpponentMoveVerified &&
-              opponentPromotion.physical().game().pieceAt("a1") == "n",
-          "Matching opponent promotion identity must commit the promoted piece.");
+          "Rejected opponent promotion must leave the authoritative game unchanged.");
+  result = opponentPromotion.confirmOpponentPromotion('n');
+  require(result.event == OfflineTurnEvent::PromotionConfirmationRejected,
+          "Deferred opponent promotion must not expose the old identity-confirmation path.");
 }
 
 void verifyExecutionRecoveryAndIdempotency() {
@@ -325,6 +324,8 @@ void verifyGameOverTransitions() {
   }
 
   OfflineTurnCoordinator repetition;
+  require(repetition.loadFen("r3k1n1/8/8/8/8/8/8/R3K1N1 w - - 0 1"),
+          "Sparse repetition fixture must load.");
   for (int cycle = 0; cycle < 2; ++cycle) {
     result = performQuietHumanMove(repetition, "g1", "f3");
     require(result.phase == OfflineTurnPhase::EngineSearchNeeded,
