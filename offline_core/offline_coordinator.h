@@ -40,6 +40,8 @@ enum class OfflineTurnEvent {
   OpponentRetryReady,
   OpponentMoveVerified,
   OpponentPromotionRequired,
+  OpponentPromotionReplacementInProgress,
+  OpponentPromotionConfirmationReady,
   PromotionConfirmationRejected,
   GameEnded,
   RestoreRequired,
@@ -146,12 +148,15 @@ class OfflineTurnCoordinator {
   OfflineTurnResult beginOpponentExecution();
   OfflineTurnResult completeOpponentPhase(const OpponentPhaseReport& report);
   OfflineTurnResult completeOpponentExecution(const Occupancy& finalOccupancy);
+  OfflineTurnResult processOpponentPromotionSnapshot(const Occupancy& occupancy);
   OfflineTurnResult processRecoverySnapshot(const Occupancy& occupancy);
   OfflineTurnResult confirmGraveyardSlotReleased(
       std::uint32_t transactionId,
       std::string_view slotKey,
       const Occupancy& restoredOccupancy);
   OfflineTurnResult confirmOpponentPromotion(char promotionPiece);
+  OfflineTurnResult confirmOpponentPromotion(
+      char promotionPiece, const Occupancy& occupancy);
 
   [[nodiscard]] OfflineTurnResult currentState() const;
   [[nodiscard]] OfflineTurnPhase phase() const { return phase_; }
@@ -169,7 +174,8 @@ class OfflineTurnCoordinator {
     HumanMove,
     MotionPlanning,
     OpponentExecution,
-    OpponentPhase
+    OpponentPhase,
+    OpponentPromotion
   };
 
   void initializePhase();
@@ -181,6 +187,8 @@ class OfflineTurnCoordinator {
   OfflineTurnResult handleHumanResult(SnapshotResult result);
   OfflineTurnResult handleOpponentOccupancy(const Occupancy& occupancy);
   OfflineTurnResult handlePhaseRecovery(const Occupancy& occupancy);
+  OfflineTurnResult handleOpponentPromotionSnapshot(const Occupancy& occupancy);
+  OfflineTurnResult finishVerifiedOpponentMotion(const Occupancy& occupancy);
   OfflineTurnResult commitOpponentMove();
   void clearOpponentTransaction();
   void resetTransactionForRetry();
@@ -199,6 +207,8 @@ class OfflineTurnCoordinator {
   std::uint32_t retainedSearchGeneration_ = 0;
   std::vector<std::string> occupiedGraveyardKeys_;
   std::optional<Occupancy> verifiedPromotionOccupancy_;
+  std::optional<char> lastConfirmedOpponentPromotion_;
+  std::optional<Occupancy> lastConfirmedPromotionOccupancy_;
 };
 
 const char* offlineTurnPhaseName(OfflineTurnPhase phase);

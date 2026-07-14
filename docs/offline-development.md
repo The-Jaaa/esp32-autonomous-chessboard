@@ -266,7 +266,7 @@ Each phase owns exactly one accepted transfer or graveyard route and records its
 
 Quiet moves delegate to the external route planner. Captures preserve the online order: direct removal followed by the attacker, stage-first when necessary, remove-first board/lane fallback, then the final board-staging fallback. En passant removes the pawn from `MoveInfo.capturedSquare`. Graveyard selection is a proposal only; planning never modifies the caller's occupied-slot keys. Castling moves the king first, plans the rook against the intermediate king position, and supports White/Black on both sides with board, lane, and lane-board routes.
 
-Illegal UCI moves and promotions are rejected without mutating the supplied game. Promotion choreography remains deferred even though the host rules layer already understands Q/R/B/N promotions.
+Illegal UCI moves are rejected without mutating the supplied game. Legal promotions now retain `MoveInfo::promotion` and reuse the accepted quiet-transfer or capture choreography. `MotionPlanStatus::UnsupportedPromotion` remains in the public enum for source compatibility, but the planner no longer returns it for a legal, routable Q/R/B/N promotion.
 
 The online JavaScript planner received one narrowly scoped correction in its deepest capture fallback: every stale undefined `removal` reference now uses the selected `fallbackRemoval`, and that same slot is reserved when the online fallback becomes executable. The branch was extracted into a test-exported composition helper so the previously latent failure is exercised directly; production strategy order and call sites are unchanged.
 
@@ -277,15 +277,15 @@ Set-Location .\app
 npm run test:offline-motion
 ```
 
-The 2026-07-14 acceptance run passed 20 shared C++/JavaScript fixtures. Coverage includes direct and lane quiet moves, sensed-occupancy route changes, efficient direct capture, staged capture, remove-first fallback, capture with an attacker lane route, en passant, full and blocked graveyards, all four castling directions, crowded rook lane re-entry, unsafe rook-route rejection, illegal moves, promotion rejection, exact phase occupancy, graveyard candidates, rejected strategy order/reason categories, deterministic repetition, immutable inputs, and the corrected deepest online fallback.
+The current 2026-07-14 acceptance run passes 30 shared C++/JavaScript fixtures. Coverage includes direct and lane quiet moves, sensed-occupancy route changes, efficient direct capture, staged capture, remove-first fallback, capture with an attacker lane route, en passant, full and blocked graveyards, all four castling directions, crowded rook lane re-entry, unsafe rook-route rejection, White/Black Q/R/B/N quiet promotions, capture promotions, blocked promotion routes, illegal moves, exact phase occupancy, graveyard candidates, rejected strategy order/reason categories, deterministic repetition, immutable inputs, and the corrected deepest online fallback.
 
 The 100-game soak passed 7,952 plies with 1,257 captures, 42 castling moves, 4 en-passant moves, and 54 promotions in the unchanged coordinator/rules simulation. The complete foundation suite and `tools/verify-foundation.ps1` passed. Client build succeeded, lint retained the same eight existing warnings, and firmware remained exactly 1,095,735 bytes flash and 51,856 bytes static RAM.
 
-Still deferred: coordinator-to-motion integration, pending/verified graveyard reservation state, motor primitives, LED choreography, undo/redo motion plans, promotion choreography, persistence, online/offline switching, and ESP32 linking. The next isolated milestone should connect staged opponent moves to this planner through a host-only execution transaction, without adding firmware control yet.
+Still deferred: motor primitives, LED choreography, undo/redo motion plans, persistence, online/offline switching, and ESP32 linking. Coordinator integration, transactional graveyard reservation, and opponent promotion choreography are now implemented by the later host-only milestones below.
 
 ## Host-Only Motion Execution Transactions
 
-`OfflineTurnCoordinator` now connects engine results to `OfflineMotionPlanner` while `OfflinePhysicalController` remains the only owner of authoritative chess state. Engine results are checked against the latest stable sensed occupancy before routing. The coordinator tries the preferred move and unique ranked root candidates, rejects illegal and unsupported promotion candidates explicitly, and selects the strongest routable move. For non-mate candidates within five centipawns, route cost and then UCI order provide deterministic physical tie-breaking; mate rank is never traded for route convenience.
+`OfflineTurnCoordinator` now connects engine results to `OfflineMotionPlanner` while `OfflinePhysicalController` remains the only owner of authoritative chess state. Engine results are checked against the latest stable sensed occupancy before routing. The coordinator tries the preferred move and unique ranked root candidates, rejects illegal or unroutable candidates, and selects the strongest routable move. Promotion candidates participate in the same selection. For non-mate candidates within five centipawns, route cost and then UCI order provide deterministic physical tie-breaking; mate rank is never traded for route convenience.
 
 Each selected move creates a `MotionExecutionTransaction` containing the engine generation, transaction ID, preferred and selected moves, engine score, fallback reason, complete motion plan, current/verified phases, rejected candidates, and graveyard reservation state. Quiet moves, captures, en passant, and castling execute through their existing abstract phase sequence. A phase advances only after a successful hardware report whose occupancy exactly matches that phase's expected after-state. Failed unchanged phases are retryable, ambiguous occupancy enters recoverable `SyncWarning`, stale/out-of-order reports are rejected, and duplicate verified reports are idempotent.
 
@@ -300,8 +300,34 @@ Set-Location .\app
 npm run test:offline-motion-execution
 ```
 
-The 2026-07-14 acceptance run covered sensed-occupancy guards, strongest-routable fallback, the five-centipawn tie window, mate priority, quiet moves, direct/staged captures, en passant, all four castling directions, phase retry and confirmation, stale/duplicate reports, exact state immutability, graveyard `Free/Pending/Occupied` behavior, restored-piece release confirmation, full-graveyard fallback, atomic compatibility completion, checkmate, and explicit opponent-promotion blocking.
+The current 2026-07-14 acceptance run covers sensed-occupancy guards, strongest-routable fallback, the five-centipawn tie window, mate priority, quiet moves, direct/staged captures, en passant, all four castling directions, phase retry and confirmation, stale/duplicate reports, exact state immutability, graveyard `Free/Pending/Occupied` behavior, restored-piece release confirmation, full-graveyard fallback, atomic compatibility completion, Q/R/B/N promotion replacement, and promotion outcomes including check, checkmate, and stalemate.
 
-The 100-game soak passed 6,429 committed plies with 1,110 captures, 32 castling moves, 7 en-passant moves, and 17 completed human promotions. Sixteen games reached a clean `OpponentMotionBlocked` boundary because the engine's completed root set contained only promotions; no promotion was silently applied or converted into an illegal physical move. The complete foundation suite and `tools/verify-foundation.ps1` passed. Client build succeeded, lint retained the same eight existing warnings, and firmware remained exactly 1,095,735 bytes flash and 51,856 bytes static RAM.
+The current 100-game soak passed 6,758 committed plies with 1,160 captures, 34 castling moves, 8 en-passant moves, 66 total promotions, and 45 completed opponent promotions. The complete foundation suite and `tools/verify-foundation.ps1` passed. Client build and zero-warning lint both succeeded, and firmware remained exactly 1,095,735 bytes flash and 51,856 bytes static RAM.
 
-Still deferred: opponent promotion choreography, firmware phase-report integration, motor and LED adapters, persistence, undo/redo motion transactions, and online/offline ownership switching. The next isolated milestone should add explicit host-only opponent promotion choreography before firmware integration.
+Still deferred: firmware phase-report integration, motor and LED adapters, persistence, undo/redo motion transactions, and online/offline ownership switching.
+
+## Host-Only Opponent Promotion Choreography
+
+Legal opponent promotions now flow through the same engine candidate ranking, physical route planning, and phase verification as every other opponent move. Quiet promotions use `QuietTransfer`; capture promotions retain `CapturedRemoval` and `AttackerFinal`, including the proposed graveyard slot and its `Pending -> Occupied` transition. White and Black can promote to queen, rook, bishop, or knight. Planning remains deterministic and does not mutate the authoritative game.
+
+After the final pawn-motion phase is verified, the coordinator enters `OpponentPromotionPending` instead of committing. The staged FEN, history, side to move, and result remain unchanged while a person replaces the pawn because the binary hall sensors can prove occupancy but cannot identify the replacement piece. The external caller can report:
+
+- the promotion target temporarily empty through `processOpponentPromotionSnapshot`, producing `OpponentPromotionReplacementInProgress`;
+- exact expected occupancy, producing `OpponentPromotionConfirmationReady`;
+- any unrelated occupancy disturbance, producing recoverable `SyncWarning` with exact differences.
+
+The occupancy-aware `confirmOpponentPromotion(piece, occupancy)` commits only when occupancy exactly matches the staged post-position and the normalized Q/R/B/N identity matches the engine-selected UCI move. Wrong pieces, invalid identities, and target-empty snapshots leave the same transaction pending. Recovery returns to replacement-in-progress or confirmation-ready without rerunning the engine or motion plan. The original one-argument method remains as a trusted compatibility adapter. Duplicate phase, snapshot, completion, and confirmation reports are idempotent.
+
+Capture-promotion graveyard ownership is not rolled back while replacement is pending: once `CapturedRemoval` is verified, that slot remains occupied even if replacement later pauses for recovery. Atomic `completeOpponentExecution` also enters promotion pending and cannot bypass identity confirmation.
+
+Regressions cover White/Black Q/R/B/N quiet promotions, capture promotions, board/lane/blocked routes, exact per-phase occupancy, strongest-routable selection, state immutability, target-empty replacement, unrelated-disturbance recovery, wrong identity and wrong occupancy, duplicate/stale reports, atomic completion, transactional graveyard state, and promotions producing check, checkmate, or stalemate. The quick integration suite forces all four opponent identities and the deterministic soak completes naturally selected opponent promotions.
+
+Acceptance results on 2026-07-14:
+
+- `npm run test:offline-motion`, `test:offline-coordinator`, `test:offline-motion-execution`, and `test:offline-integration` passed;
+- the 100-game soak completed 6,758 plies and 45 opponent promotions without an unresolved transaction;
+- `npm run test:foundation` and `tools/verify-foundation.ps1` passed;
+- client lint has zero warnings/errors and the production build passes;
+- unlinked firmware remains exactly 1,095,735 bytes flash and 51,856 bytes static RAM.
+
+This remains host-only. Firmware prompts, LEDs, motors, voice guidance, promotion undo/redo, persistence, and online/offline ownership switching are still deferred.

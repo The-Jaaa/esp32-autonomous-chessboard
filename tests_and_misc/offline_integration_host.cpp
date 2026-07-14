@@ -56,7 +56,7 @@ struct Metrics {
   std::uint64_t humanCancellations = 0;
   std::uint64_t humanDisturbanceRecoveries = 0;
   std::uint64_t duplicateReports = 0;
-  std::uint64_t deferredOpponentPromotions = 0;
+  std::uint64_t opponentPromotions = 0;
   std::uint64_t engineNodes = 0;
 };
 
@@ -305,15 +305,8 @@ OfflineTurnResult simulateOpponentMove(
   if (staged.phase == OfflineTurnPhase::OpponentMotionBlocked) {
     require(staged.motionTransaction && staged.opponentPlan == std::nullopt &&
                 !staged.motionTransaction->rejectedCandidates.empty() &&
-                std::all_of(
-                    staged.motionTransaction->rejectedCandidates.begin(),
-                    staged.motionTransaction->rejectedCandidates.end(),
-                    [](const offline::MotionCandidateFailure& failure) {
-                      return failure.status == offline::MotionPlanStatus::UnsupportedPromotion;
-                    }) &&
                 coordinator.physical().game().fen() == oracle.fen(),
-            context + ": motion-blocked engine result was not an explicit deferred promotion.");
-    ++metrics.deferredOpponentPromotions;
+            context + ": motion-blocked engine result changed authoritative state.");
     return staged;
   }
   require(staged.phase == OfflineTurnPhase::OpponentMoveReady && staged.opponentPlan,
@@ -382,7 +375,19 @@ OfflineTurnResult simulateOpponentMove(
   if (!plan.move.promotion.empty()) {
     require(result.phase == OfflineTurnPhase::OpponentPromotionPending,
             context + ": opponent promotion did not wait for identity confirmation.");
-    result = coordinator.confirmOpponentPromotion(plan.move.promotion.front());
+    Occupancy replacing = plan.expectedOccupancy;
+    place(replacing, plan.move.to, false);
+    result = coordinator.processOpponentPromotionSnapshot(replacing);
+    require(result.phase == OfflineTurnPhase::OpponentPromotionPending &&
+                result.event == OfflineTurnEvent::OpponentPromotionReplacementInProgress,
+            context + ": lifted promotion pawn was not treated as replacement in progress.");
+    result = coordinator.processOpponentPromotionSnapshot(plan.expectedOccupancy);
+    require(result.phase == OfflineTurnPhase::OpponentPromotionPending &&
+                result.event == OfflineTurnEvent::OpponentPromotionConfirmationReady,
+            context + ": replaced promotion piece was not ready for confirmation.");
+    result = coordinator.confirmOpponentPromotion(
+        plan.move.promotion.front(), plan.expectedOccupancy);
+    ++metrics.opponentPromotions;
   }
 
   require(result.acceptedMove.has_value(), context + ": accepted opponent move metadata is missing.");
@@ -483,6 +488,70 @@ void runForcedHumanScenario(
   }
 }
 
+void runForcedOpponentPromotionScenario(
+    const std::string& label, const std::string& fen, const std::string& uci,
+    Metrics& metrics) {
+  OfflineGame oracle;
+  require(oracle.loadFen(fen), label + ": scenario oracle FEN must load.");
+
+  OfflineCoordinatorConfig config;
+  config.humanColor = oracle.sideToMove() == 'w' ? HumanColor::Black : HumanColor::White;
+  OfflineTurnCoordinator coordinator(config);
+  require(coordinator.loadFen(fen) &&
+              coordinator.phase() == OfflineTurnPhase::EngineSearchNeeded,
+          label + ": opponent promotion scenario must request engine search.");
+
+  const std::optional<EngineSearchRequest> request = coordinator.pendingEngineRequest();
+  require(request.has_value(), label + ": opponent promotion request is missing.");
+  SearchResult search;
+  search.bestMove = uci;
+  search.score = 300;
+  search.completedDepth = 2;
+  search.stopReason = offline::SearchStopReason::DepthLimit;
+  search.outcome = GameOutcome::Ongoing;
+  search.rankedRootMoves.push_back({uci, search.score, 0});
+
+  const std::string before = coordinator.physical().game().fen();
+  OfflineTurnResult result = coordinator.submitEngineResult(request->generation, search);
+  require(result.phase == OfflineTurnPhase::OpponentMoveReady && result.opponentPlan &&
+              result.opponentPlan->move.uci == uci,
+          label + ": opponent promotion did not stage.");
+  const OpponentMovePlan plan = *result.opponentPlan;
+  require(coordinator.physical().game().fen() == before,
+          label + ": staging changed authoritative state.");
+
+  result = coordinator.beginOpponentExecution();
+  require(result.phase == OfflineTurnPhase::OpponentMoveExecuting,
+          label + ": opponent promotion execution did not start.");
+  result = coordinator.completeOpponentExecution(plan.expectedOccupancy);
+  require(result.phase == OfflineTurnPhase::OpponentPromotionPending &&
+              result.event == OfflineTurnEvent::OpponentPromotionRequired &&
+              coordinator.physical().game().fen() == before,
+          label + ": completed pawn motion did not wait for replacement.");
+
+  Occupancy replacing = plan.expectedOccupancy;
+  place(replacing, plan.move.to, false);
+  result = coordinator.processOpponentPromotionSnapshot(replacing);
+  require(result.event == OfflineTurnEvent::OpponentPromotionReplacementInProgress,
+          label + ": target-empty snapshot did not represent replacement in progress.");
+  result = coordinator.processOpponentPromotionSnapshot(plan.expectedOccupancy);
+  require(result.event == OfflineTurnEvent::OpponentPromotionConfirmationReady,
+          label + ": replacement occupancy did not become confirmation-ready.");
+  result = coordinator.confirmOpponentPromotion(
+      plan.move.promotion.front(), plan.expectedOccupancy);
+  require(result.acceptedMove && result.acceptedMove->uci == uci,
+          label + ": matching replacement confirmation did not commit.");
+
+  applyOracleMove(oracle, *result.acceptedMove, "scenario " + label);
+  recordMove(*result.acceptedMove, false, metrics);
+  ++metrics.opponentPromotions;
+  ++metrics.scenarios;
+  requireSynchronized(coordinator, oracle, "scenario " + label);
+  if (result.phase == OfflineTurnPhase::GameOver) {
+    recordOutcome(coordinator.physical().game().status().outcome, metrics);
+  }
+}
+
 void requireTerminalScenario(
     const std::string& label, const std::string& fen, GameOutcome outcome,
     Metrics& metrics) {
@@ -508,6 +577,10 @@ void runForcedScenarios(Metrics& metrics) {
   for (const char promotion : std::string("qrbn")) {
     runForcedHumanScenario(
         std::string("promotion ") + promotion,
+        "4k3/P7/8/8/8/8/7p/4K3 w - - 0 1",
+        std::string("a7a8") + promotion, metrics);
+    runForcedOpponentPromotionScenario(
+        std::string("opponent promotion ") + promotion,
         "4k3/P7/8/8/8/8/7p/4K3 w - - 0 1",
         std::string("a7a8") + promotion, metrics);
   }
@@ -553,7 +626,7 @@ void requireCoverage(const Metrics& metrics) {
   require(metrics.humanMoves > 0 && metrics.engineMoves > 0,
           "Integration run did not exercise both move owners.");
   require(metrics.captures > 0 && metrics.castling >= 2 && metrics.enPassant > 0 &&
-              metrics.promotions >= 4,
+              metrics.promotions >= 8 && metrics.opponentPromotions >= 4,
           "Forced integration scenarios did not cover every special move category.");
   require(metrics.checkmates > 0 && metrics.stalemates > 0 &&
               metrics.insufficientDraws > 0 && metrics.fiftyMoveDraws > 0,
@@ -591,7 +664,7 @@ void printMetrics(const Options& options, const Metrics& metrics, std::int64_t e
             << ",\"humanCancellations\":" << metrics.humanCancellations
             << ",\"humanDisturbanceRecoveries\":" << metrics.humanDisturbanceRecoveries
             << ",\"duplicateReports\":" << metrics.duplicateReports
-            << ",\"deferredOpponentPromotions\":" << metrics.deferredOpponentPromotions
+            << ",\"opponentPromotions\":" << metrics.opponentPromotions
             << ",\"engineNodes\":" << metrics.engineNodes
             << ",\"elapsedMs\":" << elapsedMs << "}" << std::endl;
 }

@@ -1,6 +1,7 @@
 #include "../offline_core/offline_coordinator.h"
 
 #include <algorithm>
+#include <cctype>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -97,6 +98,11 @@ OfflineTurnResult executeAllPhases(OfflineTurnCoordinator& coordinator) {
 
 bool containsKey(const std::vector<std::string>& keys, const std::string& key) {
   return std::find(keys.begin(), keys.end(), key) != keys.end();
+}
+
+Occupancy withoutSquare(Occupancy occupancy, const std::string& square) {
+  occupancy[static_cast<std::size_t>(offline::squareToRawIndex(square))] = false;
+  return occupancy;
 }
 
 void verifyCandidateSelectionAndPlanningGuard() {
@@ -321,7 +327,7 @@ void verifyCapturesEnPassantAndCastling() {
       {MotionPhaseKind::CastleKing, MotionPhaseKind::CastleRook});
 }
 
-void verifyBlockedFallbackAndPromotion() {
+void verifyBlockedFallback() {
   {
     OfflineCoordinatorConfig config;
     for (const auto& slot : offline::defaultExternalSlots()) {
@@ -339,22 +345,214 @@ void verifyBlockedFallbackAndPromotion() {
             "A full graveyard must allow a strong routable quiet candidate fallback.");
   }
 
-  {
-    OfflineTurnCoordinator coordinator;
-    require(coordinator.loadFen("7k/8/8/8/8/8/p6P/4K3 b - - 0 1"),
-            "Promotion-blocked fixture must load.");
-    OfflineTurnResult blocked = submit(coordinator, syntheticSearch("a2a1n"));
-    require(blocked.phase == OfflineTurnPhase::OpponentMotionBlocked &&
-                blocked.event == OfflineTurnEvent::OpponentMotionBlocked &&
-                blocked.motionTransaction->rejectedCandidates.front().status ==
-                    offline::MotionPlanStatus::UnsupportedPromotion &&
-                coordinator.physical().game().pieceAt("a2") == "p",
-            "Opponent promotion must block explicitly without mutating the board.");
-    OfflineTurnResult retry = coordinator.retryOpponentMotionPlanning(
-        coordinator.physical().committedOccupancy());
-    require(retry.phase == OfflineTurnPhase::OpponentMotionBlocked,
-            "Retrying unchanged unsupported promotion must remain deterministically blocked.");
+}
+
+void verifyPromotionTransaction(
+    HumanColor humanColor,
+    const std::string& fen,
+    const std::string& uci,
+    bool capture,
+    bool atomicCompletion = false) {
+  OfflineTurnCoordinator coordinator(configForHuman(humanColor));
+  require(coordinator.loadFen(fen), uci + ": promotion fixture must load.");
+  const std::string beforeFen = coordinator.physical().game().fen();
+  OfflineTurnResult staged = stageSingle(coordinator, uci);
+  require(staged.motionTransaction->selectedMove == uci && staged.opponentPlan &&
+              staged.opponentPlan->move.promotion == uci.substr(4, 1) &&
+              staged.opponentPlan->move.capture == capture,
+          uci + ": promotion move did not stage with complete metadata.");
+  const auto transaction = *staged.motionTransaction;
+
+  OfflineTurnResult pending;
+  if (atomicCompletion) {
+    coordinator.beginOpponentExecution();
+    pending = coordinator.completeOpponentExecution(
+        staged.opponentPlan->expectedOccupancy);
+  } else {
+    pending = executeAllPhases(coordinator);
   }
+  require(pending.phase == OfflineTurnPhase::OpponentPromotionPending &&
+              pending.event == OfflineTurnEvent::OpponentPromotionRequired &&
+              coordinator.physical().game().fen() == beforeFen &&
+              pending.motionTransaction &&
+              pending.motionTransaction->currentPhase ==
+                  pending.motionTransaction->motion.phases.size(),
+          uci + ": verified motion must wait for replacement without committing.");
+  if (capture) {
+    require(pending.motionTransaction->graveyardState == GraveyardSlotState::Occupied &&
+                containsKey(coordinator.occupiedGraveyardKeys(),
+                            pending.motionTransaction->graveyardSlotKey),
+            uci + ": capture promotion must keep its verified graveyard slot occupied.");
+  }
+
+  const auto& finalPhase = transaction.motion.phases.back();
+  OfflineTurnResult duplicatePhase = coordinator.completeOpponentPhase(
+      {transaction.transactionId, transaction.motion.phases.size() - 1, true,
+       finalPhase.expectedAfter});
+  require(duplicatePhase.event == OfflineTurnEvent::None &&
+              duplicatePhase.phase == OfflineTurnPhase::OpponentPromotionPending,
+          uci + ": duplicate final phase report must be idempotent.");
+
+  const Occupancy expected = staged.opponentPlan->expectedOccupancy;
+  const Occupancy targetEmpty = withoutSquare(expected, staged.opponentPlan->move.to);
+  OfflineTurnResult replacing = coordinator.processOpponentPromotionSnapshot(targetEmpty);
+  require(replacing.phase == OfflineTurnPhase::OpponentPromotionPending &&
+              replacing.event ==
+                  OfflineTurnEvent::OpponentPromotionReplacementInProgress,
+          uci + ": lifting the promotion pawn must be an expected replacement state.");
+  OfflineTurnResult duplicateReplacing =
+      coordinator.processOpponentPromotionSnapshot(targetEmpty);
+  require(duplicateReplacing.event ==
+              OfflineTurnEvent::OpponentPromotionReplacementInProgress &&
+              coordinator.physical().game().fen() == beforeFen,
+          uci + ": duplicate replacement snapshots must remain idempotent.");
+
+  Occupancy disturbed = targetEmpty;
+  for (std::size_t index = 0; index < disturbed.size(); ++index) {
+    if (disturbed[index]) {
+      disturbed[index] = false;
+      break;
+    }
+  }
+  OfflineTurnResult warning = coordinator.processOpponentPromotionSnapshot(disturbed);
+  require(warning.phase == OfflineTurnPhase::SyncWarning &&
+              warning.event == OfflineTurnEvent::RestoreRequired &&
+              !warning.differenceFromExpected.empty() &&
+              coordinator.physical().game().fen() == beforeFen,
+          uci + ": unrelated replacement disturbance must be recoverable.");
+  replacing = coordinator.processRecoverySnapshot(targetEmpty);
+  require(replacing.phase == OfflineTurnPhase::OpponentPromotionPending &&
+              replacing.event ==
+                  OfflineTurnEvent::OpponentPromotionReplacementInProgress,
+          uci + ": promotion recovery must return to replacement pending.");
+
+  OfflineTurnResult ready = coordinator.processOpponentPromotionSnapshot(expected);
+  require(ready.phase == OfflineTurnPhase::OpponentPromotionPending &&
+              ready.event == OfflineTurnEvent::OpponentPromotionConfirmationReady,
+          uci + ": restored promotion occupancy must be ready for confirmation.");
+
+  const char expectedPiece = uci[4];
+  const char wrongPiece = expectedPiece == 'q' ? 'r' : 'q';
+  OfflineTurnResult wrong = coordinator.confirmOpponentPromotion(wrongPiece, expected);
+  require(wrong.event == OfflineTurnEvent::PromotionConfirmationRejected &&
+              wrong.phase == OfflineTurnPhase::OpponentPromotionPending &&
+              coordinator.physical().game().fen() == beforeFen,
+          uci + ": wrong promotion identity must not commit.");
+  OfflineTurnResult invalid = coordinator.confirmOpponentPromotion('x', expected);
+  require(invalid.event == OfflineTurnEvent::PromotionConfirmationRejected &&
+              invalid.phase == OfflineTurnPhase::OpponentPromotionPending &&
+              coordinator.physical().game().fen() == beforeFen,
+          uci + ": invalid promotion identity must not commit.");
+  OfflineTurnResult missing = coordinator.confirmOpponentPromotion(
+      expectedPiece, targetEmpty);
+  require(missing.event ==
+              OfflineTurnEvent::OpponentPromotionReplacementInProgress &&
+              coordinator.physical().game().fen() == beforeFen,
+          uci + ": confirmation while the target is empty must not commit.");
+
+  ready = coordinator.processOpponentPromotionSnapshot(expected);
+  OfflineTurnResult completed = coordinator.confirmOpponentPromotion(
+      static_cast<char>(std::toupper(static_cast<unsigned char>(expectedPiece))), expected);
+  require((completed.phase == OfflineTurnPhase::HumanTurn ||
+           completed.phase == OfflineTurnPhase::GameOver) &&
+              completed.acceptedMove && completed.acceptedMove->uci == uci &&
+              coordinator.physical().game().fen() == staged.opponentPlan->afterFen,
+          uci + ": matching promotion confirmation must commit the staged move.");
+  OfflineTurnResult duplicate = coordinator.confirmOpponentPromotion(expectedPiece, expected);
+  require(duplicate.event == OfflineTurnEvent::None,
+          uci + ": duplicate promotion confirmation must be idempotent.");
+}
+
+void verifyPromotionTransactions() {
+  {
+    OfflineTurnCoordinator coordinator(configForHuman(HumanColor::Black));
+    require(coordinator.loadFen("4k3/P7/8/8/8/8/8/4K3 w - - 0 1"),
+            "Promotion candidate-selection fixture must load.");
+    SearchResult search = syntheticSearch(
+        "a7a8n", 150, 0, {{"a7a8n", 150, 0}, {"a7a8q", 140, 0}});
+    OfflineTurnResult staged = submit(coordinator, search);
+    require(staged.phase == OfflineTurnPhase::OpponentMoveReady &&
+                staged.motionTransaction &&
+                staged.motionTransaction->selectedMove == "a7a8n",
+            "The strongest routable promotion must not be replaced by another identity.");
+  }
+
+  for (const char piece : std::string("qrbn")) {
+    verifyPromotionTransaction(
+        HumanColor::White,
+        "4k3/8/8/8/8/8/p7/4K3 b - - 0 1",
+        std::string("a2a1") + piece,
+        false,
+        piece == 'q');
+    verifyPromotionTransaction(
+        HumanColor::Black,
+        "4k3/P7/8/8/8/8/8/4K3 w - - 0 1",
+        std::string("a7a8") + piece,
+        false);
+  }
+  verifyPromotionTransaction(
+      HumanColor::White,
+      "4k3/8/8/8/8/8/p7/1R2K3 b - - 0 1",
+      "a2b1n",
+      true);
+  verifyPromotionTransaction(
+      HumanColor::Black,
+      "1r2k3/P7/8/8/8/8/8/4K3 w - - 0 1",
+      "a7b8r",
+      true);
+}
+
+void verifyPromotionOutcome(
+    const std::string& fen,
+    const std::string& uci,
+    offline::GameOutcome expectedOutcome,
+    bool expectedCheck) {
+  OfflineTurnCoordinator coordinator(configForHuman(HumanColor::Black));
+  require(coordinator.loadFen(fen), uci + ": promotion-outcome fixture must load.");
+  const std::string beforeFen = coordinator.physical().game().fen();
+  OfflineTurnResult staged = stageSingle(coordinator, uci);
+  require(staged.opponentPlan &&
+              staged.opponentPlan->expectedStatus.outcome == expectedOutcome &&
+              staged.opponentPlan->expectedStatus.inCheck == expectedCheck,
+          uci + ": staged promotion has the wrong expected game status.");
+
+  OfflineTurnResult pending = executeAllPhases(coordinator);
+  require(pending.phase == OfflineTurnPhase::OpponentPromotionPending &&
+              coordinator.physical().game().fen() == beforeFen,
+          uci + ": promotion outcome must remain uncommitted before confirmation.");
+  const Occupancy expected = staged.opponentPlan->expectedOccupancy;
+  OfflineTurnResult ready = coordinator.processOpponentPromotionSnapshot(expected);
+  require(ready.event == OfflineTurnEvent::OpponentPromotionConfirmationReady,
+          uci + ": promotion outcome did not become confirmation-ready.");
+  OfflineTurnResult completed = coordinator.confirmOpponentPromotion(uci[4], expected);
+  require(completed.acceptedMove && completed.acceptedMove->uci == uci &&
+              coordinator.physical().game().status().outcome == expectedOutcome &&
+              coordinator.physical().game().status().inCheck == expectedCheck,
+          uci + ": confirmed promotion has the wrong committed game status.");
+  const OfflineTurnPhase expectedPhase =
+      expectedOutcome == offline::GameOutcome::Ongoing
+          ? OfflineTurnPhase::HumanTurn
+          : OfflineTurnPhase::GameOver;
+  require(completed.phase == expectedPhase,
+          uci + ": confirmed promotion transitioned to the wrong coordinator phase.");
+}
+
+void verifyPromotionOutcomes() {
+  verifyPromotionOutcome(
+      "4k3/P7/8/8/8/8/8/4K3 w - - 0 1",
+      "a7a8q",
+      offline::GameOutcome::Ongoing,
+      true);
+  verifyPromotionOutcome(
+      "7k/5P2/6K1/8/8/8/8/8 w - - 0 1",
+      "f7f8q",
+      offline::GameOutcome::Checkmate,
+      true);
+  verifyPromotionOutcome(
+      "8/1P6/8/8/8/8/8/5K1k w - - 0 1",
+      "b7b8q",
+      offline::GameOutcome::Stalemate,
+      false);
 }
 
 void verifyGameOverAfterFinalPhase() {
@@ -378,7 +576,9 @@ int main() {
     verifyQuietPhaseAndIdempotency();
     verifyCaptureReservationAndRecovery();
     verifyCapturesEnPassantAndCastling();
-    verifyBlockedFallbackAndPromotion();
+    verifyBlockedFallback();
+    verifyPromotionTransactions();
+    verifyPromotionOutcomes();
     verifyGameOverAfterFinalPhase();
     std::cout << "offline motion execution transaction regressions passed\n";
     return 0;

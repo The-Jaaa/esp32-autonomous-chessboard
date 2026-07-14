@@ -202,18 +202,54 @@ void verifyPromotions() {
           "Opponent promotion fixture must load.");
   const std::string before = opponentPromotion.physical().game().fen();
   result = submitMove(opponentPromotion, "a2a1n");
-  require(result.phase == OfflineTurnPhase::OpponentMotionBlocked &&
-              result.event == OfflineTurnEvent::OpponentMotionBlocked &&
-              result.motionTransaction &&
-              result.motionTransaction->rejectedCandidates.size() == 1 &&
-              result.motionTransaction->rejectedCandidates.front().status ==
-                  offline::MotionPlanStatus::UnsupportedPromotion,
-          "Opponent promotion must be rejected explicitly by motion planning.");
+  require(result.phase == OfflineTurnPhase::OpponentMoveReady && result.opponentPlan &&
+              result.opponentPlan->move.uci == "a2a1n" &&
+              result.opponentPlan->move.promotion == "n",
+          "Opponent promotion must stage through normal motion planning.");
   require(opponentPromotion.physical().game().fen() == before,
-          "Rejected opponent promotion must leave the authoritative game unchanged.");
-  result = opponentPromotion.confirmOpponentPromotion('n');
+          "Staged opponent promotion must leave the authoritative game unchanged.");
+
+  const Occupancy expected = result.opponentPlan->expectedOccupancy;
+  result = executeStagedMove(opponentPromotion);
+  require(result.phase == OfflineTurnPhase::OpponentPromotionPending &&
+              result.event == OfflineTurnEvent::OpponentPromotionRequired &&
+              opponentPromotion.physical().game().fen() == before,
+          "Verified promotion motion must wait for physical piece replacement.");
+
+  Occupancy replacing = expected;
+  place(replacing, "a1", false);
+  result = opponentPromotion.processOpponentPromotionSnapshot(replacing);
+  require(result.phase == OfflineTurnPhase::OpponentPromotionPending &&
+              result.event == OfflineTurnEvent::OpponentPromotionReplacementInProgress &&
+              opponentPromotion.physical().game().fen() == before,
+          "An empty promotion square must represent replacement in progress.");
+
+  Occupancy disturbed = replacing;
+  place(disturbed, "h2", false);
+  result = opponentPromotion.processOpponentPromotionSnapshot(disturbed);
+  require(result.phase == OfflineTurnPhase::SyncWarning &&
+              result.event == OfflineTurnEvent::RestoreRequired &&
+              opponentPromotion.physical().game().fen() == before,
+          "An unrelated promotion disturbance must enter recoverable SyncWarning.");
+  result = opponentPromotion.processRecoverySnapshot(expected);
+  require(result.phase == OfflineTurnPhase::OpponentPromotionPending &&
+              result.event == OfflineTurnEvent::OpponentPromotionConfirmationReady,
+          "Restoring promotion occupancy must return to identity confirmation.");
+
+  result = opponentPromotion.confirmOpponentPromotion('q', expected);
   require(result.event == OfflineTurnEvent::PromotionConfirmationRejected,
-          "Deferred opponent promotion must not expose the old identity-confirmation path.");
+          "A promotion identity different from the engine move must be rejected.");
+  require(opponentPromotion.physical().game().fen() == before,
+          "Rejected promotion identity must not commit the move.");
+
+  result = opponentPromotion.confirmOpponentPromotion('N', expected);
+  require(result.event == OfflineTurnEvent::OpponentMoveVerified && result.acceptedMove &&
+              result.acceptedMove->uci == "a2a1n" &&
+              opponentPromotion.physical().game().fen() == result.opponentPlan->afterFen,
+          "Matching promotion identity and occupancy must commit the exact move.");
+  result = opponentPromotion.confirmOpponentPromotion('n', expected);
+  require(result.event == OfflineTurnEvent::None,
+          "Duplicate promotion confirmation must be idempotently ignored.");
 }
 
 void verifyExecutionRecoveryAndIdempotency() {

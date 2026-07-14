@@ -121,10 +121,32 @@ const fixtures = [
     occupied: allSlotKeys,
     status: 'no_safe_route'
   },
-  {
-    id: 'promotion-rejected',
+  ...'qrbn'.split('').map((promotion) => ({
+    id: `promotion-white-${promotion}`,
     fen: '4k3/P7/8/8/8/8/8/4K3 w - - 0 1',
-    uci: 'a7a8q', status: 'unsupported_promotion'
+    uci: `a7a8${promotion}`, status: 'success'
+  })),
+  ...'qrbn'.split('').map((promotion) => ({
+    id: `promotion-black-${promotion}`,
+    fen: '4k3/8/8/8/8/8/p7/4K3 b - - 0 1',
+    uci: `a2a1${promotion}`, status: 'success'
+  })),
+  {
+    id: 'promotion-capture-white',
+    fen: '1r2k3/P7/8/8/8/8/8/4K3 w - - 0 1',
+    uci: 'a7b8n', status: 'success',
+    expectedStrategy: 'capture-direct-after-removal'
+  },
+  {
+    id: 'promotion-capture-black',
+    fen: '4k3/8/8/8/8/8/p7/1R2K3 b - - 0 1',
+    uci: 'a2b1r', status: 'success',
+    expectedStrategy: 'capture-direct-after-removal'
+  },
+  {
+    id: 'promotion-capture-full-graveyard',
+    fen: '1r2k3/P7/8/8/8/8/8/4K3 w - - 0 1',
+    uci: 'a7b8q', occupied: allSlotKeys, status: 'no_graveyard_capacity'
   },
   {
     id: 'illegal-move-rejected',
@@ -253,8 +275,6 @@ function jsPlan(fixture) {
     const move = game.moves({ verbose: true }).find((candidate) =>
       legalMoveMatchesUci(candidate, fixture.uci));
     if (!move) return { status: 'invalid_move' };
-    if (move.promotion) return { status: 'unsupported_promotion' };
-
     let plan;
     try {
       if (move.flags.includes('k') || move.flags.includes('q')) {

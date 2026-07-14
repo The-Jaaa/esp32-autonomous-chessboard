@@ -42,6 +42,6 @@ console.log(JSON.stringify({
   compiler,
   phaseVerified: true,
   transactionalGraveyardState: true,
-  promotionDeferredExplicitly: true,
+  promotionChoreography: true,
   firmwareLinked: false
 }, null, 2));

@@ -75,6 +75,12 @@ bool routeTieEligible(
          candidate.score >= strongest.score - 5;
 }
 
+Occupancy withoutSquare(Occupancy occupancy, std::string_view square) {
+  const int index = squareToRawIndex(square);
+  if (index >= 0) occupancy[static_cast<std::size_t>(index)] = false;
+  return occupancy;
+}
+
 }  // namespace
 
 const char* offlineTurnPhaseName(OfflineTurnPhase phase) {
@@ -109,6 +115,10 @@ const char* offlineTurnEventName(OfflineTurnEvent event) {
     case OfflineTurnEvent::OpponentRetryReady: return "opponent_retry_ready";
     case OfflineTurnEvent::OpponentMoveVerified: return "opponent_move_verified";
     case OfflineTurnEvent::OpponentPromotionRequired: return "opponent_promotion_required";
+    case OfflineTurnEvent::OpponentPromotionReplacementInProgress:
+      return "opponent_promotion_replacement_in_progress";
+    case OfflineTurnEvent::OpponentPromotionConfirmationReady:
+      return "opponent_promotion_confirmation_ready";
     case OfflineTurnEvent::PromotionConfirmationRejected: return "promotion_confirmation_rejected";
     case OfflineTurnEvent::GameEnded: return "game_ended";
     case OfflineTurnEvent::RestoreRequired: return "restore_required";
@@ -144,6 +154,8 @@ void OfflineTurnCoordinator::reset() {
     occupiedGraveyardKeys_ = reserveVerifiedSlot(occupiedGraveyardKeys_, key);
   }
   verifiedPromotionOccupancy_.reset();
+  lastConfirmedOpponentPromotion_.reset();
+  lastConfirmedPromotionOccupancy_.reset();
   syncContext_ = SyncContext::None;
   initializePhase();
 }
@@ -157,6 +169,8 @@ bool OfflineTurnCoordinator::loadFen(std::string_view fen) {
     occupiedGraveyardKeys_ = reserveVerifiedSlot(occupiedGraveyardKeys_, key);
   }
   verifiedPromotionOccupancy_.reset();
+  lastConfirmedOpponentPromotion_.reset();
+  lastConfirmedPromotionOccupancy_.reset();
   syncContext_ = SyncContext::None;
   initializePhase();
   return true;
@@ -176,6 +190,8 @@ void OfflineTurnCoordinator::initializePhase() {
 
 void OfflineTurnCoordinator::requestEngineSearch() {
   clearOpponentTransaction();
+  lastConfirmedOpponentPromotion_.reset();
+  lastConfirmedPromotionOccupancy_.reset();
   EngineSearchRequest request;
   request.generation = ++nextGeneration_;
   request.fen = physical_.game().fen();
@@ -353,13 +369,6 @@ OfflineTurnResult OfflineTurnCoordinator::planOpponentMotion(
                           MotionPlanStatus::InvalidMove, "Engine candidate is not legal."});
       continue;
     }
-    if (!preview.move.promotion.empty()) {
-      rejected.push_back({candidate.uci, candidate.score, candidate.mateIn,
-                          MotionPlanStatus::UnsupportedPromotion,
-                          "Opponent promotion choreography is not implemented yet."});
-      continue;
-    }
-
     MotionPlan motion = planner.planMove(physical_.game(), candidate.uci, context);
     if (!motion.success()) {
       rejected.push_back({candidate.uci, candidate.score, candidate.mateIn,
@@ -384,7 +393,7 @@ OfflineTurnResult OfflineTurnCoordinator::planOpponentMotion(
     phase_ = OfflineTurnPhase::OpponentMotionBlocked;
     return resultFor(
         OfflineTurnEvent::OpponentMotionBlocked,
-        "No non-promotion engine candidate has a safe physical route.");
+        "No engine candidate has a safe physical route.");
   }
 
   std::size_t selectedIndex = 0;
@@ -542,7 +551,7 @@ OfflineTurnResult OfflineTurnCoordinator::completeOpponentPhase(
   ++transaction.currentPhase;
   syncContext_ = SyncContext::None;
   if (transaction.currentPhase == transaction.motion.phases.size()) {
-    return commitOpponentMove();
+    return finishVerifiedOpponentMotion(report.occupancy);
   }
 
   phase_ = OfflineTurnPhase::OpponentMoveExecuting;
@@ -569,6 +578,11 @@ OfflineTurnResult OfflineTurnCoordinator::commitOpponentMove() {
     return resultFor(OfflineTurnEvent::Error, "Verified opponent move could not be committed.");
   }
 
+  if (!completedPlan.move.promotion.empty()) {
+    lastConfirmedOpponentPromotion_ = completedPlan.move.promotion.front();
+    lastConfirmedPromotionOccupancy_ = verifiedOccupancy;
+  }
+
   clearOpponentTransaction();
   syncContext_ = SyncContext::None;
   const bool gameOver = isTerminal(physical_.game().status());
@@ -581,6 +595,27 @@ OfflineTurnResult OfflineTurnCoordinator::commitOpponentMove() {
   result.opponentPlan = completedPlan;
   result.motionTransaction = completedTransaction;
   return result;
+}
+
+OfflineTurnResult OfflineTurnCoordinator::finishVerifiedOpponentMotion(
+    const Occupancy& occupancy) {
+  if (!opponentPlan_ || !motionTransaction_ ||
+      occupancy != opponentPlan_->expectedOccupancy) {
+    phase_ = OfflineTurnPhase::Error;
+    return resultFor(
+        OfflineTurnEvent::Error,
+        "Verified opponent motion does not match the staged move occupancy.");
+  }
+
+  if (!opponentPlan_->move.promotion.empty()) {
+    verifiedPromotionOccupancy_ = occupancy;
+    syncContext_ = SyncContext::None;
+    phase_ = OfflineTurnPhase::OpponentPromotionPending;
+    return resultFor(
+        OfflineTurnEvent::OpponentPromotionRequired,
+        "Replace the pawn and confirm the engine-selected promotion piece.");
+  }
+  return commitOpponentMove();
 }
 
 OfflineTurnResult OfflineTurnCoordinator::handleOpponentOccupancy(const Occupancy& occupancy) {
@@ -600,14 +635,7 @@ OfflineTurnResult OfflineTurnCoordinator::handleOpponentOccupancy(const Occupanc
           occupiedGraveyardKeys_, motionTransaction_->graveyardSlotKey);
       motionTransaction_->graveyardState = GraveyardSlotState::Occupied;
     }
-    if (!opponentPlan_->move.promotion.empty()) {
-      verifiedPromotionOccupancy_ = occupancy;
-      syncContext_ = SyncContext::None;
-      phase_ = OfflineTurnPhase::OpponentPromotionPending;
-      return resultFor(OfflineTurnEvent::OpponentPromotionRequired,
-                       "Replace the pawn and confirm the engine-selected promotion piece.");
-    }
-    return commitOpponentMove();
+    return finishVerifiedOpponentMotion(occupancy);
   }
 
   if (occupancy == opponentPlan_->beforeOccupancy) {
@@ -703,6 +731,55 @@ OfflineTurnResult OfflineTurnCoordinator::completeOpponentExecution(
   return handleOpponentOccupancy(finalOccupancy);
 }
 
+OfflineTurnResult OfflineTurnCoordinator::processOpponentPromotionSnapshot(
+    const Occupancy& occupancy) {
+  if (phase_ != OfflineTurnPhase::OpponentPromotionPending ||
+      !opponentPlan_ || !motionTransaction_ || !verifiedPromotionOccupancy_) {
+    return resultFor(
+        OfflineTurnEvent::Error,
+        "No opponent promotion replacement is waiting for a board snapshot.");
+  }
+  return handleOpponentPromotionSnapshot(occupancy);
+}
+
+OfflineTurnResult OfflineTurnCoordinator::handleOpponentPromotionSnapshot(
+    const Occupancy& occupancy) {
+  if (!opponentPlan_ || !motionTransaction_ || !verifiedPromotionOccupancy_ ||
+      opponentPlan_->move.promotion.empty()) {
+    phase_ = OfflineTurnPhase::Error;
+    return resultFor(OfflineTurnEvent::Error,
+                     "Opponent promotion replacement metadata is missing.");
+  }
+
+  const Occupancy& expected = opponentPlan_->expectedOccupancy;
+  const Occupancy replacementInProgress = withoutSquare(
+      expected, opponentPlan_->move.to);
+  if (occupancy == replacementInProgress) {
+    phase_ = OfflineTurnPhase::OpponentPromotionPending;
+    syncContext_ = SyncContext::None;
+    return resultFor(
+        OfflineTurnEvent::OpponentPromotionReplacementInProgress,
+        "Promotion pawn lifted; place the requested replacement piece on the promotion square.");
+  }
+  if (occupancy == expected) {
+    verifiedPromotionOccupancy_ = occupancy;
+    phase_ = OfflineTurnPhase::OpponentPromotionPending;
+    syncContext_ = SyncContext::None;
+    return resultFor(
+        OfflineTurnEvent::OpponentPromotionConfirmationReady,
+        "Promotion square is occupied; confirm the engine-selected replacement piece.");
+  }
+
+  phase_ = OfflineTurnPhase::SyncWarning;
+  syncContext_ = SyncContext::OpponentPromotion;
+  OfflineTurnResult result = resultFor(
+      OfflineTurnEvent::RestoreRequired,
+      "Promotion replacement disturbed a square outside the promotion target.");
+  result.differenceFromBefore = compareOccupancy(replacementInProgress, occupancy);
+  result.differenceFromExpected = compareOccupancy(expected, occupancy);
+  return result;
+}
+
 OfflineTurnResult OfflineTurnCoordinator::processRecoverySnapshot(const Occupancy& occupancy) {
   if (phase_ != OfflineTurnPhase::SyncWarning) {
     return resultFor(OfflineTurnEvent::Error, "No synchronization warning is active.");
@@ -712,6 +789,9 @@ OfflineTurnResult OfflineTurnCoordinator::processRecoverySnapshot(const Occupanc
   }
   if (syncContext_ == SyncContext::OpponentPhase) {
     return handlePhaseRecovery(occupancy);
+  }
+  if (syncContext_ == SyncContext::OpponentPromotion) {
+    return handleOpponentPromotionSnapshot(occupancy);
   }
   if (syncContext_ == SyncContext::MotionPlanning) {
     if (occupancy != physical_.committedOccupancy()) {
@@ -763,14 +843,43 @@ OfflineTurnResult OfflineTurnCoordinator::confirmGraveyardSlotReleased(
 }
 
 OfflineTurnResult OfflineTurnCoordinator::confirmOpponentPromotion(char promotionPiece) {
+  const char normalized = static_cast<char>(
+      std::tolower(static_cast<unsigned char>(promotionPiece)));
+  if (phase_ != OfflineTurnPhase::OpponentPromotionPending &&
+      lastConfirmedOpponentPromotion_ && lastConfirmedPromotionOccupancy_ &&
+      normalized == *lastConfirmedOpponentPromotion_) {
+    return resultFor(OfflineTurnEvent::None,
+                     "Duplicate promotion confirmation ignored.");
+  }
   if (phase_ != OfflineTurnPhase::OpponentPromotionPending ||
       !opponentPlan_ || !verifiedPromotionOccupancy_) {
     return resultFor(OfflineTurnEvent::PromotionConfirmationRejected,
                      "No opponent promotion is waiting for confirmation.");
   }
 
+  return confirmOpponentPromotion(promotionPiece, *verifiedPromotionOccupancy_);
+}
+
+OfflineTurnResult OfflineTurnCoordinator::confirmOpponentPromotion(
+    char promotionPiece, const Occupancy& occupancy) {
   const char normalized = static_cast<char>(
       std::tolower(static_cast<unsigned char>(promotionPiece)));
+  if (phase_ != OfflineTurnPhase::OpponentPromotionPending &&
+      lastConfirmedOpponentPromotion_ && lastConfirmedPromotionOccupancy_ &&
+      normalized == *lastConfirmedOpponentPromotion_ &&
+      occupancy == *lastConfirmedPromotionOccupancy_) {
+    return resultFor(OfflineTurnEvent::None,
+                     "Duplicate promotion confirmation ignored.");
+  }
+  if (phase_ != OfflineTurnPhase::OpponentPromotionPending ||
+      !opponentPlan_ || !verifiedPromotionOccupancy_) {
+    return resultFor(OfflineTurnEvent::PromotionConfirmationRejected,
+                     "No opponent promotion is waiting for confirmation.");
+  }
+  if (occupancy != opponentPlan_->expectedOccupancy) {
+    return handleOpponentPromotionSnapshot(occupancy);
+  }
+
   const char expected = opponentPlan_->move.promotion.empty()
                             ? '\0'
                             : opponentPlan_->move.promotion.front();

@@ -473,13 +473,6 @@ MotionPlan OfflineMotionPlanner::planMove(
     plan.blockedReason = "Move is not legal in the supplied game.";
     return plan;
   }
-  if (!move.promotion.empty()) {
-    MotionPlan plan = basePlan(game, move);
-    plan.status = MotionPlanStatus::UnsupportedPromotion;
-    plan.blockedReason = "Promotion choreography is not supported by this planner.";
-    return plan;
-  }
-
   OfflineExternalRoutePlanner planner;
   if (move.castling) return planCastle(planner, game, move, context);
   if (move.capture) return planCapture(planner, game, move, context);
