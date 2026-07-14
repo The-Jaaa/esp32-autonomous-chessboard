@@ -13,7 +13,9 @@
     "test:offline-physical": "node scripts/offline-physical-regression.js",
     "test:offline-engine": "node scripts/offline-engine-regression.js",
     "test:offline-coordinator": "node scripts/offline-coordinator-regression.js",
-    "test:foundation": "npm run test:physical && npm run test:offline-rules && npm run test:offline-physical && npm run test:offline-engine && npm run test:offline-coordinator"
+    "test:offline-integration": "node scripts/offline-integration-regression.js --quick",
+    "test:offline-soak": "node scripts/offline-integration-regression.js --soak",
+    "test:foundation": "npm run test:physical && npm run test:offline-rules && npm run test:offline-physical && npm run test:offline-engine && npm run test:offline-coordinator && npm run test:offline-integration"
   },
   "dependencies": {
     "@google/genai": "*",

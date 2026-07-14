@@ -90,7 +90,7 @@ Set-Location .\app
 npm run test:offline-physical
 ```
 
-`npm run test:foundation` includes the online physical regressions plus the host rules, physical interpreter, engine, and turn coordinator regressions. The complete foundation verification passed on 2026-07-14. Client lint retained the same eight existing warnings, and the unlinked firmware remained exactly 1,095,735 bytes flash and 51,856 bytes static RAM.
+`npm run test:foundation` includes the online physical regressions plus the host rules, physical interpreter, engine, turn coordinator, and quick integration regressions. The complete foundation verification passed on 2026-07-14. Client lint retained the same eight existing warnings, and the unlinked firmware remained exactly 1,095,735 bytes flash and 51,856 bytes static RAM.
 
 The controller assumes snapshots are already debounced. It does not perform setup calibration or infer a promotion identity from occupancy. Binary occupancy also cannot distinguish a restored captured piece from the attacker after the capture square has first been observed empty; the controller therefore enforces the intended ordered capture workflow and treats exact restoration as cancellation.
 
@@ -157,3 +157,27 @@ npm run test:offline-coordinator
 The suite covers Human White and Black, real fixed-depth engine handoff, stale/illegal results, uncommitted staging, quiet moves, captures, en passant, both castling sides, human and opponent promotion, retry and mismatch recovery, duplicate reports, checkmate, stalemate, insufficient material, fifty-move draw, and threefold repetition. It is included in `npm run test:foundation`.
 
 Still deferred: firmware linking, FreeRTOS search execution, setup calibration, pathfinding, motors, graveyards, LEDs, persistence, online/offline ownership switching, and reconnect handoff.
+
+## Host-Only Offline Integration And Soak Tests
+
+`tests_and_misc/offline_integration_host.cpp` drives the rules, physical interpreter, real offline engine, and turn coordinator as one deterministic host system. It alternates Human White and Human Black, selects human moves from sorted legal moves with a fixed-seed PRNG, and uses node-limited engine searches (`timeLimitMs=0`, `maxNodes=2000`, `maxDepth=12`).
+
+Human moves are translated into stable occupancy snapshots for quiet moves, captures, en passant, king-first castling, and explicit Q/R/B/N promotions. Opponent moves pass through request, search, staging, execution, occupancy verification, and promotion confirmation. A separate `OfflineGame` oracle applies only committed moves and verifies exact FEN, occupancy, side to move, metadata, and game status after every ply.
+
+The simulator injects deterministic recoverable failures: stale search generations, partial opponent occupancy, restoration to the pre-move board, completion to the expected post-move board, cancelled human lifts, wrong-piece disturbances, and duplicate reports. Every warning must resolve without rerunning the staged search or committing twice.
+
+Two test tiers use the same executable:
+
+```powershell
+Set-Location .\app
+npm run test:offline-integration  # 12 games, up to 120 plies; included in test:foundation
+npm run test:offline-soak         # 100 games, up to 200 plies; milestone/debugging gate
+```
+
+The 2026-07-14 acceptance runs produced:
+
+- quick: 12 games, 719 plies, 138 captures, 5 castling moves, 3 en-passant moves, and 7 promotions;
+- soak: 100 games, 7,952 plies, 1,257 captures, 42 castling moves, 4 en-passant moves, 54 promotions, 96 checkmates, and 2 repetition draws;
+- both tiers exercised every injected recovery branch and finished without an unresolved `SyncWarning` or `Error`.
+
+No production source changed for this milestone. Physical route planning, firmware linking, motor/LED execution, graveyards, persistence, and ownership switching remain deferred.
