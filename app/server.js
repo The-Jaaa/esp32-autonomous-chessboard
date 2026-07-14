@@ -2663,6 +2663,67 @@ function compactSteps(steps = []) {
   return steps.filter(Boolean);
 }
 
+function buildCaptureBoardStagingFallback(
+  move,
+  capturedSquare,
+  safeBoardStaging,
+  fallbackRemoval,
+  stagingToTarget,
+  rejectedStrategies = []
+) {
+  const capturedIndex = squareToIndex(capturedSquare);
+  const metadata = combineRouteMetadata(
+    [safeBoardStaging, fallbackRemoval, stagingToTarget],
+    'capture-board-staging'
+  );
+  reserveRobotGraveyardSlot(fallbackRemoval.slot);
+
+  return {
+    ...metadata,
+    graveyardSlot: fallbackRemoval.slot,
+    captureStrategy: 'capture-board-staging',
+    captureStrategyRejected: rejectedStrategies,
+    graveyardRouteScore: fallbackRemoval.routeScore ?? null,
+    graveyardRouteCandidates: fallbackRemoval.candidates || [],
+    capturePreview: {
+      strategy: 'capture-board-staging',
+      attackerSquares: [
+        ...(safeBoardStaging.compressedPathSquares || safeBoardStaging.pathSquares || []),
+        ...(stagingToTarget.compressedPathSquares || stagingToTarget.pathSquares || []).slice(1)
+      ],
+      stageSquares: safeBoardStaging.compressedPathSquares || safeBoardStaging.pathSquares || [],
+      capturedSquares: fallbackRemoval.compressedPathSquares || fallbackRemoval.pathSquares || [],
+      finalSquares: stagingToTarget.compressedPathSquares || stagingToTarget.pathSquares || [],
+      graveyardLabel: fallbackRemoval.slot?.label || null
+    },
+    steps: compactSteps([
+      makeCaptureStartLedStep(move.from, capturedSquare),
+      makeRunwayMotionStep(
+        'attacker-stage',
+        safeBoardStaging.compressedPathSquares || safeBoardStaging.pathSquares || [],
+        'quiet'
+      ),
+      ...safeBoardStaging.steps,
+      makeRunwayMotionStep(
+        'captured-graveyard',
+        fallbackRemoval.compressedPathSquares || fallbackRemoval.pathSquares || [],
+        'special'
+      ),
+      ...makeTransferSteps(squareTarget(capturedSquare), fallbackRemoval.targets, {
+        sourceEmpty: capturedIndex
+      }, {
+        phase: 'captured-removal'
+      }),
+      makeRunwayMotionStep(
+        'attacker-final',
+        stagingToTarget.compressedPathSquares || stagingToTarget.pathSquares || [],
+        'source'
+      ),
+      ...stagingToTarget.steps
+    ])
+  };
+}
+
 function buildCaptureMotionPlan(game, move, capturedSquare, staging) {
   const capturedIndex = squareToIndex(capturedSquare);
   const directRemoval = planCapturedPieceRemoval(game, capturedSquare, [capturedSquare].filter(Boolean), { reserve: false });
@@ -2853,40 +2914,14 @@ function buildCaptureMotionPlan(game, move, capturedSquare, staging) {
     ignoredSquares: ignoredAfterPickup,
     phase: 'attacker-final'
   });
-  const metadata = combineRouteMetadata([safeBoardStaging, removal, stagingToTarget], 'capture-board-staging');
-
-  return {
-    ...metadata,
-    graveyardSlot: removal.slot,
-    captureStrategy: 'capture-board-staging',
-    captureStrategyRejected: rejectedStrategies,
-    graveyardRouteScore: removal.routeScore ?? null,
-    graveyardRouteCandidates: removal.candidates || [],
-    capturePreview: {
-      strategy: 'capture-board-staging',
-      attackerSquares: [
-        ...(safeBoardStaging.compressedPathSquares || safeBoardStaging.pathSquares || []),
-        ...(stagingToTarget.compressedPathSquares || stagingToTarget.pathSquares || []).slice(1)
-      ],
-      stageSquares: safeBoardStaging.compressedPathSquares || safeBoardStaging.pathSquares || [],
-      capturedSquares: removal.compressedPathSquares || removal.pathSquares || [],
-      finalSquares: stagingToTarget.compressedPathSquares || stagingToTarget.pathSquares || [],
-      graveyardLabel: removal.slot?.label || null
-    },
-    steps: compactSteps([
-      makeCaptureStartLedStep(move.from, capturedSquare),
-      makeRunwayMotionStep('attacker-stage', safeBoardStaging.compressedPathSquares || safeBoardStaging.pathSquares || [], 'quiet'),
-      ...safeBoardStaging.steps,
-      makeRunwayMotionStep('captured-graveyard', removal.compressedPathSquares || removal.pathSquares || [], 'special'),
-      ...makeTransferSteps(squareTarget(capturedSquare), removal.targets, {
-        sourceEmpty: capturedIndex
-      }, {
-        phase: 'captured-removal'
-      }),
-      makeRunwayMotionStep('attacker-final', stagingToTarget.compressedPathSquares || stagingToTarget.pathSquares || [], 'source'),
-      ...stagingToTarget.steps
-    ])
-  };
+  return buildCaptureBoardStagingFallback(
+    move,
+    capturedSquare,
+    safeBoardStaging,
+    fallbackRemoval,
+    stagingToTarget,
+    rejectedStrategies
+  );
 }
 
 function buildCastleMotionPlan(game, move) {
@@ -5402,6 +5437,12 @@ module.exports = {
     withPhysicalPlanningContext,
     buildBoardTransferPlan,
     planCapturedPieceRemoval,
+    buildCaptureMotionPlan,
+    buildCaptureBoardStagingFallback,
+    buildCastleMotionPlan,
+    findStagingSquareCandidates,
+    capturedSquareForMove,
+    castleRookMove,
     buildRobotMoveCommand,
     summarizeMotionPlan,
     legalMoveMatchesUci,

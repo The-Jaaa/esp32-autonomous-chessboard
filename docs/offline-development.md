@@ -246,3 +246,39 @@ The 2026-07-14 parity run passed 22 shared C++/JavaScript fixtures covering boar
 The 100-game soak, complete foundation suite, client production build, and final `tools/verify-foundation.ps1` run passed. Client lint retained the same eight existing warnings, and the unlinked firmware remained exactly 1,095,735 bytes flash and 51,856 bytes static RAM. One earlier full-verifier attempt encountered a transient timeout in the unchanged host engine executable; the engine suite passed immediately when rerun and the complete verifier then passed normally.
 
 Complete capture/castling choreography, coordinator integration, LEDs, firmware motion commands, server switching, persistence, and ESP32 linking remain deferred. The next milestone will compose the accepted board and external route primitives into host-only capture and castling choreography.
+
+## Host-Only Capture And Castling Choreography
+
+`offline_core/offline_motion.h/.cpp` composes the accepted board and external route planners into complete forward-move plans. It remains a pure host-only module and is not connected to the physical interpreter, turn coordinator, backend runtime, client, or ESP32 firmware.
+
+`OfflineMotionPlanner::planMove(game, uci, context)` validates the move without modifying `OfflineGame`. The context supplies optional sensed occupancy, configured Z/I slots, and caller-owned occupied graveyard keys. Successful results include legal move metadata, the selected strategy, total route cost, combined raw and compressed paths, rejected strategy reasons, a proposed graveyard slot, and exact initial, per-phase, and final board occupancy.
+
+Abstract phase kinds are:
+
+- `QuietTransfer`
+- `AttackerStage`
+- `CapturedRemoval`
+- `AttackerFinal`
+- `CastleKing`
+- `CastleRook`
+
+Each phase owns exactly one accepted transfer or graveyard route and records its expected before/after occupancy. A plan is accepted only when its final phase occupancy exactly equals the occupancy produced by applying the legal move in a copied rules position.
+
+Quiet moves delegate to the external route planner. Captures preserve the online order: direct removal followed by the attacker, stage-first when necessary, remove-first board/lane fallback, then the final board-staging fallback. En passant removes the pawn from `MoveInfo.capturedSquare`. Graveyard selection is a proposal only; planning never modifies the caller's occupied-slot keys. Castling moves the king first, plans the rook against the intermediate king position, and supports White/Black on both sides with board, lane, and lane-board routes.
+
+Illegal UCI moves and promotions are rejected without mutating the supplied game. Promotion choreography remains deferred even though the host rules layer already understands Q/R/B/N promotions.
+
+The online JavaScript planner received one narrowly scoped correction in its deepest capture fallback: every stale undefined `removal` reference now uses the selected `fallbackRemoval`, and that same slot is reserved when the online fallback becomes executable. The branch was extracted into a test-exported composition helper so the previously latent failure is exercised directly; production strategy order and call sites are unchanged.
+
+Run the motion regressions directly with:
+
+```powershell
+Set-Location .\app
+npm run test:offline-motion
+```
+
+The 2026-07-14 acceptance run passed 20 shared C++/JavaScript fixtures. Coverage includes direct and lane quiet moves, sensed-occupancy route changes, efficient direct capture, staged capture, remove-first fallback, capture with an attacker lane route, en passant, full and blocked graveyards, all four castling directions, crowded rook lane re-entry, unsafe rook-route rejection, illegal moves, promotion rejection, exact phase occupancy, graveyard candidates, rejected strategy order/reason categories, deterministic repetition, immutable inputs, and the corrected deepest online fallback.
+
+The 100-game soak passed 7,952 plies with 1,257 captures, 42 castling moves, 4 en-passant moves, and 54 promotions in the unchanged coordinator/rules simulation. The complete foundation suite and `tools/verify-foundation.ps1` passed. Client build succeeded, lint retained the same eight existing warnings, and firmware remained exactly 1,095,735 bytes flash and 51,856 bytes static RAM.
+
+Still deferred: coordinator-to-motion integration, pending/verified graveyard reservation state, motor primitives, LED choreography, undo/redo motion plans, promotion choreography, persistence, online/offline switching, and ESP32 linking. The next isolated milestone should connect staged opponent moves to this planner through a host-only execution transaction, without adding firmware control yet.
