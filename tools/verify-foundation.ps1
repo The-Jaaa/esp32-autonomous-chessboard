@@ -55,9 +55,9 @@ if (-not $SkipFirmware) {
         throw 'Arduino CLI was not found on PATH or in the Arduino IDE installation.'
     }
 
-    $fqbn = 'esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=min_spiffs,PSRAM=opi,UploadMode=default,UploadSpeed=921600,LoopCore=1,EventsCore=1'
+    $fqbn = 'esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,UploadMode=default,UploadSpeed=921600,LoopCore=1,EventsCore=1'
     New-Item -ItemType Directory -Force -Path $firmwareOutput | Out-Null
-    Invoke-Checked 'ESP32 OTA firmware compile' {
+    Invoke-Checked 'ESP32 USB-only firmware compile' {
         & $arduinoCliPath compile --fqbn $fqbn --output-dir $firmwareOutput $firmware
     }
 }

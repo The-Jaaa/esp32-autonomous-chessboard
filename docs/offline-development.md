@@ -2,7 +2,7 @@
 
 ## Current Baseline
 
-The active implementation is server-owned online physical chess. The ESP32 firmware scans sensors, drives LEDs and motion, executes backend motion plans, reports verification results, and supports OTA updates. It does not currently contain an offline chess engine or offline game controller.
+The active implementation is server-owned online physical chess. The ESP32 firmware scans sensors, drives LEDs and motion, executes backend motion plans, and reports verification results over WiFi HTTP. Firmware uploads are USB-only. It does not currently contain an active offline chess engine or offline game controller.
 
 The earlier offline implementation described near the end of the local `codex.md` was reverted on 2026-07-14 and is historical only.
 
@@ -20,8 +20,24 @@ Verified before the offline foundation work:
 - Physical planner and physical state regressions pass.
 - Client production build passes.
 - Client lint completes with warnings only.
-- ESP32-S3 firmware compiles with the OTA-capable `min_spiffs` partition scheme.
-- Baseline firmware uses approximately 55% flash and 15% static RAM.
+- ESP32-S3 firmware compiles with the USB-only `app3M_fat9M_16MB` partition scheme.
+- The current USB-only baseline is exactly 1,042,543 bytes flash and 47,128 bytes static RAM.
+
+### USB-Only Firmware Baseline
+
+OTA was removed on 2026-07-14 because this project used it only for wireless sketch uploads. WiFi HTTP polling, snapshots, commands, and job results are unchanged. Firmware uploads now require the USB serial port.
+
+The last verified OTA baseline used `min_spiffs` and measured 1,095,735 bytes flash / 51,856 bytes static RAM. Removing `ArduinoOTA`, mDNS, UDP, OTA state, and motion-interruption branches reduced the firmware to 1,042,543 bytes flash / 47,128 bytes static RAM.
+
+Use this partition setting in Arduino IDE:
+
+```text
+16M Flash (3MB APP/9.9MB FATFS)
+```
+
+The equivalent Arduino CLI FQBN option is `PartitionScheme=app3M_fat9M_16MB`, providing a 3,145,728-byte application partition. Select the USB COM port for every upload. Upload only while the gantry is idle and the electromagnet is off.
+
+The USB-only image was uploaded to the physical ESP32-S3 on COM11. It booted under the new partition, posted an occupancy snapshot to the running backend, and consumed a harmless magnet-off diagnostic command from the physical command queue. The board was not in a calibrated starting position, so a new human move and robot reply were not physically executed during this upload check; the existing planner/state regressions passed and the earlier complete physical baseline remains the motion reference.
 
 ## Required Hardware Gate
 

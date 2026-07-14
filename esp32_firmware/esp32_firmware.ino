@@ -1,7 +1,4 @@
 #include <WiFi.h>
-#include <ESPmDNS.h>
-#include <WiFiUdp.h>
-#include <ArduinoOTA.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <AccelStepper.h>
@@ -17,8 +14,6 @@
 const char* WIFI_SSID = CHESS_WIFI_SSID;
 const char* WIFI_PASSWORD = CHESS_WIFI_PASSWORD;
 const char* SERVER_BASE_URL = CHESS_SERVER_BASE_URL;
-const char* OTA_HOSTNAME = "chessboard-esp32";
-const char* OTA_PASSWORD = ""; // Optional. Leave empty to disable OTA password auth.
 
 // --- CoreXY Pin Definitions ---
 constexpr uint8_t MOTOR_A_STEP_PIN = 42;
@@ -92,8 +87,6 @@ String pendingMotionCommandJson;
 bool hasPendingMotionCommand = false;
 String pendingJobResultJson;
 bool hasPendingJobResult = false;
-bool otaReady = false;
-volatile bool otaInProgress = false;
 String lastMotionFailedPhase = "";
 int lastMotionFailedStep = -1;
 
@@ -115,7 +108,6 @@ bool postSnapshot(bool force);
 bool postJson(const String& endpoint, const String& payload, String* responseOut = nullptr);
 void applyImmediateLedCommands(const String& response);
 void networkTask(void* parameter);
-void beginOtaIfNeeded();
 void pollPhysicalCommands();
 void executeMotionCommand(const String& commandJson);
 void executeDiagnosticCommand(JsonObject command);
@@ -144,13 +136,13 @@ void runLedRunway(JsonObject step);
 bool enqueueMotionCommand(const String& commandJson);
 
 void setup() {
+  pinMode(MAGNET_PIN, OUTPUT);
+  digitalWrite(MAGNET_PIN, LOW);
+
   Serial.begin(115200);
   delay(200);
 
   sharedMutex = xSemaphoreCreateMutex();
-
-  pinMode(MAGNET_PIN, OUTPUT);
-  digitalWrite(MAGNET_PIN, LOW);
 
   pinMode(LIMIT_X_PIN, INPUT_PULLUP);
   pinMode(LIMIT_Y_PIN, INPUT_PULLUP);
@@ -180,19 +172,6 @@ void setup() {
 }
 
 void loop() {
-  if (WiFi.status() == WL_CONNECTED) {
-    beginOtaIfNeeded();
-    if (otaReady) {
-      ArduinoOTA.handle();
-    }
-  }
-
-  if (otaInProgress) {
-    digitalWrite(MAGNET_PIN, LOW);
-    delay(20);
-    return;
-  }
-
   scanSensors();
   updateLedAnimation();
 
@@ -230,11 +209,6 @@ void networkTask(void* parameter) {
     }
 
     if (WiFi.status() == WL_CONNECTED) {
-      if (otaInProgress) {
-        vTaskDelay(pdMS_TO_TICKS(10));
-        continue;
-      }
-
       String resultJson;
       bool shouldPostResult = false;
       if (xSemaphoreTake(sharedMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
@@ -261,50 +235,6 @@ void networkTask(void* parameter) {
 
     vTaskDelay(pdMS_TO_TICKS(25));
   }
-}
-
-void beginOtaIfNeeded() {
-  if (otaReady || WiFi.status() != WL_CONNECTED) return;
-
-  ArduinoOTA.setHostname(OTA_HOSTNAME);
-  if (strlen(OTA_PASSWORD) > 0) {
-    ArduinoOTA.setPassword(OTA_PASSWORD);
-  }
-
-  ArduinoOTA.onStart([]() {
-    otaInProgress = true;
-    digitalWrite(MAGNET_PIN, LOW);
-    motorA.stop();
-    motorB.stop();
-    Serial.println("[OTA] Upload started. Motion and magnet disabled.");
-  });
-
-  ArduinoOTA.onEnd([]() {
-    Serial.println("\n[OTA] Upload finished. Rebooting into new sketch.");
-  });
-
-  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    Serial.printf("[OTA] Progress: %u%%\r", (progress / (total / 100)));
-  });
-
-  ArduinoOTA.onError([](ota_error_t error) {
-    otaInProgress = false;
-    Serial.printf("[OTA] Error[%u]: ", error);
-    if (error == OTA_AUTH_ERROR) Serial.println("Auth failed");
-    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin failed");
-    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect failed");
-    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive failed");
-    else if (error == OTA_END_ERROR) Serial.println("End failed");
-    else Serial.println("Unknown error");
-  });
-
-  ArduinoOTA.begin();
-  otaReady = true;
-
-  Serial.print("[OTA] Ready as ");
-  Serial.print(OTA_HOSTNAME);
-  Serial.print(" at ");
-  Serial.println(WiFi.localIP());
 }
 
 void scanSensors() {
@@ -768,16 +698,7 @@ void goToXY(long targetX, long targetY, bool dragging) {
   motorB.moveTo(targetB);
 
   uint32_t lastScanMs = 0;
-  bool interrupted = false;
   while (motorA.distanceToGo() != 0 || motorB.distanceToGo() != 0) {
-    if (otaInProgress) {
-      motorA.stop();
-      motorB.stop();
-      digitalWrite(MAGNET_PIN, LOW);
-      interrupted = true;
-      break;
-    }
-
     motorA.run();
     motorB.run();
 
@@ -787,8 +708,6 @@ void goToXY(long targetX, long targetY, bool dragging) {
       yield();
     }
   }
-
-  if (interrupted) return;
 
   currentX = targetX;
   currentY = targetY;
@@ -832,7 +751,6 @@ void homeGantry() {
   motorA.move(1000000);
   motorB.move(-1000000);
   while (digitalRead(LIMIT_X_PIN) == SWITCH_UNPRESSED) {
-    if (otaInProgress) return;
     motorA.run();
     motorB.run();
     scanSensors();
@@ -847,7 +765,6 @@ void homeGantry() {
   motorA.move(-1000000);
   motorB.move(-1000000);
   while (digitalRead(LIMIT_Y_PIN) == SWITCH_UNPRESSED) {
-    if (otaInProgress) return;
     motorA.run();
     motorB.run();
     scanSensors();
