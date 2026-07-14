@@ -2,7 +2,7 @@
 
 ## Current Baseline
 
-The active implementation is server-owned online physical chess. The ESP32 firmware scans sensors, drives LEDs and motion, executes backend motion plans, and reports verification results over WiFi HTTP. Firmware uploads are USB-only. It does not currently contain an active offline chess engine or offline game controller.
+The active implementation is server-owned online physical chess. The production ESP32 firmware scans sensors, drives LEDs and motion, executes backend motion plans, and reports verification results over WiFi HTTP. Firmware uploads are USB-only. Offline gameplay is not active, but an explicit default-off diagnostic build can now link and exercise the host-tested offline foundation on the ESP32-S3.
 
 The earlier offline implementation described near the end of the local `codex.md` was reverted on 2026-07-14 and is historical only.
 
@@ -19,7 +19,7 @@ Verified before the offline foundation work:
 - Backend syntax passes.
 - Physical planner and physical state regressions pass.
 - Client production build passes.
-- Client lint completes with warnings only.
+- Client lint passes with zero warnings and zero errors.
 - ESP32-S3 firmware compiles with the USB-only `app3M_fat9M_16MB` partition scheme.
 - The current USB-only baseline is exactly 1,042,543 bytes flash and 47,128 bytes static RAM.
 
@@ -39,6 +39,55 @@ The equivalent Arduino CLI FQBN option is `PartitionScheme=app3M_fat9M_16MB`, pr
 
 The USB-only image was uploaded to the physical ESP32-S3 on COM11. It booted under the new partition, posted an occupancy snapshot to the running backend, and consumed a harmless magnet-off diagnostic command from the physical command queue. The board was not in a calibrated starting position, so a new human move and robot reply were not physically executed during this upload check; the existing planner/state regressions passed and the earlier complete physical baseline remains the motion reference.
 
+### Embedded Offline Resource Gate
+
+`ENABLE_OFFLINE_EMBEDDED_DIAGNOSTICS` is defined in `esp32_firmware/offline_embedded_config.h` and defaults to `0`. The normal build therefore does not compile or link the offline modules and remains exactly 1,042,543 bytes flash / 47,128 bytes static RAM.
+
+The enabled build is compiled by passing the repository's `offline_core/` directory as an Arduino library and setting `compiler.cpp.extra_flags=-DENABLE_OFFLINE_EMBEDDED_DIAGNOSTICS=1`. Arduino-only wrappers under `offline_core/src/` include every production-relevant offline module: rules, engine, physical interpreter, turn coordinator, board routing, Z/I/graveyard routing, and move choreography. The normal MinGW host implementation remains unchanged.
+
+The pinned chess library has an embedded-only allocation path guarded by `CHESS_EMBEDDED_PSRAM_TABLES`:
+
+- the 819,200-byte rook attack table is allocated in PSRAM;
+- the 41,984-byte bishop attack table is allocated in PSRAM;
+- the 32,768-byte squares-between table is also initialized in PSRAM, avoiding a large pre-`setup()` stack temporary;
+- allocation and external-address checks must pass before any offline smoke/search work starts;
+- a missing PSRAM device or failed allocation emits a failed diagnostic summary and ends the diagnostic task cleanly.
+
+The current diagnostic build is 1,240,207 bytes flash / 51,248 bytes static RAM. Its 3,145,728-byte app partition retains 1,905,521 bytes of headroom, well above the required 512 KiB.
+
+Diagnostics run in a 49,152-byte, idle-priority task pinned to core 0. The normal sensor/hardware loop continues on core 1 and the priority-1 network task can preempt search. Every motion command is rejected in this build, the magnet is continuously driven LOW, and the structured report is emitted as `[OFFLINE_DIAG]` JSON over the USB serial/JTAG console.
+
+Run compile-only resource verification from the repository root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\verify-offline-embedded.ps1
+```
+
+To upload the diagnostic image, parse its complete USB report, and automatically restore the production image afterward:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\verify-offline-embedded.ps1 `
+  -UploadPort COM11 `
+  -SerialLogPath tmp\offline-embedded-diagnostic.log
+```
+
+The physical ESP32-S3 diagnostic session on 2026-07-14 passed rules, apply/undo, Q/R/B/N promotion, physical interpretation, coordinator transactions, board and external routes, graveyard selection, capture, en passant, castling, and promotion choreography. It also passed deterministic 2,000-node searches and 250 ms, 1 second, and 3 second timed searches.
+
+Measured hardware resources and concurrency during that session:
+
+- attack/squares-between initialization: 780 ms;
+- free internal heap: 150,824 bytes;
+- largest internal allocation: 139,252 bytes;
+- minimum observed internal heap: 110,148 bytes;
+- free PSRAM after search: 7,431,636 bytes;
+- diagnostic stack headroom: 22,412 bytes;
+- maximum sensor-loop gap: 2 ms across 4,826 scans;
+- successful HTTP polls during search: 49;
+- 3-second opening search: depth 4, 17,216 nodes, 3,000 ms;
+- 3-second middlegame search: depth 1, 18,624 nodes, 3,005 ms.
+
+The 250 ms middlegame search reached its deadline before completing depth 1, but returned a deterministic legal fallback as designed. No crash, watchdog, brownout, motor movement, or magnet activation occurred. The verifier restored the default USB-only production firmware at the end.
+
 ## Required Hardware Gate
 
 Before enabling any offline firmware behavior, verify all of the following on the physical board:
@@ -55,7 +104,7 @@ If this gate exposes a baseline failure, stop offline development and fix the on
 
 ## Development Boundary
 
-Host-only offline modules belong under `offline_core/`. Until a later milestone explicitly integrates them, they must not be included from `esp32_firmware/esp32_firmware.ino` or placed inside the Arduino sketch directory.
+Portable offline modules remain under `offline_core/`. Production firmware does not link them. The only accepted embedded boundary is the default-off diagnostic adapter under `offline_core/src/`, selected explicitly by the diagnostic compile flag; runtime online/offline ownership switching is still deferred.
 
 ## Host-Only Rules Foundation
 

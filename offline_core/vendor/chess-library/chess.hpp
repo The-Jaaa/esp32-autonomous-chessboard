@@ -36,7 +36,11 @@ VERSION: 0.9.4
 #include <utility>
 
 
+#include <cstddef>
 #include <cstdint>
+#ifdef CHESS_EMBEDDED_PSRAM_TABLES
+#    include <esp_heap_caps.h>
+#endif
 #ifdef CHESS_USE_PEXT
 #    include <immintrin.h>
 #endif
@@ -1079,8 +1083,14 @@ class attacks {
         0xa010109502200ULL,    0x4a02012000ULL,       0x500201010098b028ULL, 0x8040002811040900ULL,
         0x28000010020204ULL,   0x6000020202d0240ULL,  0x8918844842082200ULL, 0x4010011029020020ULL};
 
+#ifdef CHESS_EMBEDDED_PSRAM_TABLES
+    static inline Bitboard* RookAttacks   = nullptr;
+    static inline Bitboard* BishopAttacks = nullptr;
+    static inline bool AttackTablesReady  = false;
+#else
     static inline Bitboard RookAttacks[0x19000]  = {};
     static inline Bitboard BishopAttacks[0x1480] = {};
+#endif
 
     static inline Magic RookTable[64]   = {};
     static inline Magic BishopTable[64] = {};
@@ -1190,6 +1200,15 @@ class attacks {
      * @brief [Internal Usage] Initializes the attacks for the bishop and rook. Called once at startup.
      */
     static inline void initAttacks();
+
+#ifdef CHESS_EMBEDDED_PSRAM_TABLES
+    [[nodiscard]] static bool embeddedAttackTablesReady() noexcept { return AttackTablesReady; }
+    [[nodiscard]] static constexpr std::size_t embeddedAttackTableBytes() noexcept {
+        return (0x19000 + 0x1480) * sizeof(Bitboard);
+    }
+    [[nodiscard]] static const void* embeddedRookAttackTable() noexcept { return RookAttacks; }
+    [[nodiscard]] static const void* embeddedBishopAttackTable() noexcept { return BishopAttacks; }
+#endif
 };
 }  // namespace chess
 
@@ -1498,9 +1517,27 @@ class movegen {
      */
     [[nodiscard]] static bool isLegal(const Board& board, const Move move);
 
+#ifdef CHESS_EMBEDDED_PSRAM_TABLES
+    static void initEmbeddedBetweenTable();
+    [[nodiscard]] static bool embeddedBetweenTableReady() noexcept {
+        return SQUARES_BETWEEN_BB != nullptr;
+    }
+    [[nodiscard]] static constexpr std::size_t embeddedBetweenTableBytes() noexcept {
+        return sizeof(BetweenTable);
+    }
+    [[nodiscard]] static const void* embeddedBetweenTable() noexcept {
+        return SQUARES_BETWEEN_BB;
+    }
+#endif
+
    private:
+    using BetweenTable = std::array<std::array<Bitboard, 64>, 64>;
     static auto init_squares_between();
-    static const std::array<std::array<Bitboard, 64>, 64> SQUARES_BETWEEN_BB;
+#ifdef CHESS_EMBEDDED_PSRAM_TABLES
+    static inline BetweenTable* SQUARES_BETWEEN_BB = nullptr;
+#else
+    static const BetweenTable SQUARES_BETWEEN_BB;
+#endif
 
     // Generate the checkmask. Returns a bitboard where the attacker path between the king and enemy piece is set.
     template <Color::underlying c>
@@ -3685,10 +3722,16 @@ template <Color::underlying c>
 [[nodiscard]] inline Bitboard attacks::knight(Square sq) noexcept { return KnightAttacks[sq.index()]; }
 
 [[nodiscard]] inline Bitboard attacks::bishop(Square sq, Bitboard occupied) noexcept {
+#ifdef CHESS_EMBEDDED_PSRAM_TABLES
+    if (!AttackTablesReady) return sliderAttacks<false>(sq, occupied);
+#endif
     return BishopTable[sq.index()].attacks[BishopTable[sq.index()](occupied)];
 }
 
 [[nodiscard]] inline Bitboard attacks::rook(Square sq, Bitboard occupied) noexcept {
+#ifdef CHESS_EMBEDDED_PSRAM_TABLES
+    if (!AttackTablesReady) return sliderAttacks<true>(sq, occupied);
+#endif
     return RookTable[sq.index()].attacks[RookTable[sq.index()](occupied)];
 }
 
@@ -3777,6 +3820,27 @@ inline void attacks::initSliders(Square sq, Magic table[], U64 magic,
 }
 
 inline void attacks::initAttacks() {
+#ifdef CHESS_EMBEDDED_PSRAM_TABLES
+    if (AttackTablesReady) return;
+
+    if (BishopAttacks == nullptr) {
+        BishopAttacks = static_cast<Bitboard*>(
+            heap_caps_calloc(0x1480, sizeof(Bitboard), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    }
+    if (RookAttacks == nullptr) {
+        RookAttacks = static_cast<Bitboard*>(
+            heap_caps_calloc(0x19000, sizeof(Bitboard), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    }
+
+    if (BishopAttacks == nullptr || RookAttacks == nullptr) {
+        if (BishopAttacks != nullptr) heap_caps_free(BishopAttacks);
+        if (RookAttacks != nullptr) heap_caps_free(RookAttacks);
+        BishopAttacks = nullptr;
+        RookAttacks   = nullptr;
+        return;
+    }
+#endif
+
     BishopTable[0].attacks = BishopAttacks;
     RookTable[0].attacks   = RookAttacks;
 
@@ -3784,6 +3848,10 @@ inline void attacks::initAttacks() {
         initSliders(static_cast<Square>(i), BishopTable, BishopMagics[i], sliderAttacks<false>);
         initSliders(static_cast<Square>(i), RookTable, RookMagics[i], sliderAttacks<true>);
     }
+
+#ifdef CHESS_EMBEDDED_PSRAM_TABLES
+    AttackTablesReady = true;
+#endif
 }
 }  // namespace chess
 
@@ -4520,13 +4588,60 @@ inline bool movegen::isEpSquareValid(const Board& board, Square ep) {
 }
 
 [[nodiscard]] inline Bitboard movegen::between(Square sq1, Square sq2) noexcept {
+#ifdef CHESS_EMBEDDED_PSRAM_TABLES
+    if (SQUARES_BETWEEN_BB != nullptr) {
+        return (*SQUARES_BETWEEN_BB)[sq1.index()][sq2.index()];
+    }
+
+    Bitboard betweenSquares{};
+    for (PieceType pt : {PieceType::BISHOP, PieceType::ROOK}) {
+        const auto attack = [pt](Square sq, Bitboard occ) {
+            return (pt == PieceType::BISHOP) ? attacks::bishop(sq, occ) : attacks::rook(sq, occ);
+        };
+        if (attack(sq1, 0).check(sq2.index())) {
+            betweenSquares =
+                attack(sq1, Bitboard::fromSquare(sq2)) & attack(sq2, Bitboard::fromSquare(sq1));
+            break;
+        }
+    }
+    betweenSquares.set(sq2.index());
+    return betweenSquares;
+#else
     return SQUARES_BETWEEN_BB[sq1.index()][sq2.index()];
+#endif
 }
 
+#ifdef CHESS_EMBEDDED_PSRAM_TABLES
+inline void movegen::initEmbeddedBetweenTable() {
+    if (SQUARES_BETWEEN_BB != nullptr) return;
+
+    auto* table = static_cast<BetweenTable*>(
+        heap_caps_calloc(1, sizeof(BetweenTable), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (table == nullptr) return;
+
+    for (int sq1 = 0; sq1 < 64; ++sq1) {
+        for (PieceType pt : {PieceType::BISHOP, PieceType::ROOK}) {
+            const auto attack = [pt](Square sq, Bitboard occ) {
+                return (pt == PieceType::BISHOP) ? attacks::bishop(sq, occ) : attacks::rook(sq, occ);
+            };
+            for (int sq2 = 0; sq2 < 64; ++sq2) {
+                if (attack(sq1, 0).check(sq2)) {
+                    (*table)[sq1][sq2] =
+                        attack(sq1, Bitboard::fromSquare(sq2)) & attack(sq2, Bitboard::fromSquare(sq1));
+                }
+                (*table)[sq1][sq2].set(sq2);
+            }
+        }
+    }
+
+    SQUARES_BETWEEN_BB = table;
+}
+#else
 inline const std::array<std::array<Bitboard, 64>, 64> movegen::SQUARES_BETWEEN_BB = [] {
     attacks::initAttacks();
     return movegen::init_squares_between();
 }();
+#endif
 
 }  // namespace chess
 

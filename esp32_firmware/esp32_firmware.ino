@@ -5,6 +5,8 @@
 #include <Adafruit_NeoPixel.h>
 #include <math.h>
 
+#include "offline_embedded_diagnostics.h"
+
 #if __has_include("firmware_secrets.h")
 #include "firmware_secrets.h"
 #else
@@ -169,9 +171,14 @@ void setup() {
   xTaskCreatePinnedToCore(networkTask, "networkTask", 12288, nullptr, 1, nullptr, 0);
 
   Serial.println("[BOOT] Physical board firmware started.");
+  beginOfflineEmbeddedDiagnostics();
 }
 
 void loop() {
+  if (offlineEmbeddedDiagnosticsActive()) {
+    digitalWrite(MAGNET_PIN, LOW);
+  }
+
   scanSensors();
   updateLedAnimation();
 
@@ -238,6 +245,19 @@ void networkTask(void* parameter) {
 }
 
 void scanSensors() {
+#if ENABLE_OFFLINE_EMBEDDED_DIAGNOSTICS
+  static uint32_t previousScanMs = 0;
+  const uint32_t scanStartedMs = millis();
+  if (previousScanMs != 0) {
+    const uint32_t gap = scanStartedMs - previousScanMs;
+    if (gap > offlineDiagnosticSensorMaxGapMs) {
+      offlineDiagnosticSensorMaxGapMs = gap;
+    }
+  }
+  previousScanMs = scanStartedMs;
+  offlineDiagnosticSensorScanCount++;
+#endif
+
   for (int channel = 0; channel < 16; channel++) {
     digitalWrite(S0, bitRead(channel, 0));
     digitalWrite(S1, bitRead(channel, 1));
@@ -364,6 +384,10 @@ void pollPhysicalCommands() {
     return;
   }
 
+#if ENABLE_OFFLINE_EMBEDDED_DIAGNOSTICS
+  offlineDiagnosticSuccessfulPollCount++;
+#endif
+
   JsonArray commands = doc["commands"].as<JsonArray>();
   for (JsonObject command : commands) {
     const char* type = command["type"] | "";
@@ -377,7 +401,9 @@ void pollPhysicalCommands() {
       const char* action = command["action"] | "";
       if (strcmp(action, "magnet") == 0) {
         const int val = command["val"] | 0;
-        digitalWrite(MAGNET_PIN, val ? HIGH : LOW);
+        digitalWrite(
+            MAGNET_PIN,
+            offlineEmbeddedDiagnosticsActive() ? LOW : (val ? HIGH : LOW));
         markSnapshotDirty();
       } else {
         String commandJson;
@@ -399,6 +425,12 @@ void pollPhysicalCommands() {
 }
 
 bool enqueueMotionCommand(const String& commandJson) {
+  if (offlineEmbeddedDiagnosticsActive()) {
+    (void)commandJson;
+    digitalWrite(MAGNET_PIN, LOW);
+    return false;
+  }
+
   bool queued = false;
   if (xSemaphoreTake(sharedMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
     if (!hasPendingMotionCommand) {
@@ -412,6 +444,12 @@ bool enqueueMotionCommand(const String& commandJson) {
 }
 
 void executeMotionCommand(const String& commandJson) {
+  if (offlineEmbeddedDiagnosticsActive()) {
+    (void)commandJson;
+    digitalWrite(MAGNET_PIN, LOW);
+    return;
+  }
+
   DynamicJsonDocument doc(24576);
   DeserializationError err = deserializeJson(doc, commandJson);
   if (err) {
