@@ -40,3 +40,20 @@ If this gate exposes a baseline failure, stop offline development and fix the on
 ## Development Boundary
 
 Host-only offline modules belong under `offline_core/`. Until a later milestone explicitly integrates them, they must not be included from `esp32_firmware/esp32_firmware.ino` or placed inside the Arduino sketch directory.
+
+## Host-Only Rules Foundation
+
+The first offline component is a portable rules wrapper in `offline_core/`. It vendors Disservin `chess-library` at commit `57159616358c2d4c09e0d4fb1562ca7f2d36a2fb` and is compiled only by the MinGW host regression runner.
+
+The wrapper currently provides FEN loading/reset, side to move, sorted legal UCI moves, SAN and physical move metadata, apply/undo, check state, and terminal game outcomes. Promotions support queen, rook, bishop, and knight at the rules level.
+
+Run its regressions directly with:
+
+```powershell
+Set-Location .\app
+npm run test:offline-rules
+```
+
+This foundation deliberately contains no engine search, physical occupancy controller, pathfinder, firmware ownership switching, persistence, or ESP32 integration.
+
+Foundation verification on 2026-07-14 passed with nine `chess.js` legal-move parity positions, standard and Kiwipete perft, move metadata, castling, en passant, all four promotions, check/game outcomes, repetition, and exact apply/undo restoration. The complete online regression suite continued to pass, and firmware usage remained exactly 1,095,735 bytes of flash and 51,856 bytes of static RAM.

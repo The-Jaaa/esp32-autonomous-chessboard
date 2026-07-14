@@ -8,7 +8,9 @@
     "dev": "node server.js",
     "test:physical-planner": "node scripts/physical-planner-regression.js",
     "test:physical-state": "node scripts/physical-state-regression.js",
-    "test:physical": "npm run test:physical-planner && npm run test:physical-state"
+    "test:physical": "npm run test:physical-planner && npm run test:physical-state",
+    "test:offline-rules": "node scripts/offline-chess-rules-regression.js",
+    "test:foundation": "npm run test:physical && npm run test:offline-rules"
   },
   "dependencies": {
     "@google/genai": "*",

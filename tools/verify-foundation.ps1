@@ -27,7 +27,7 @@ function Invoke-Checked {
 Push-Location $app
 try {
     Invoke-Checked 'Backend syntax' { node --check server.js }
-    Invoke-Checked 'Physical regressions' { npm run test:physical }
+    Invoke-Checked 'Physical and host-only offline regressions' { npm run test:foundation }
 }
 finally {
     Pop-Location
