@@ -11,7 +11,8 @@
     "test:physical": "npm run test:physical-planner && npm run test:physical-state",
     "test:offline-rules": "node scripts/offline-chess-rules-regression.js",
     "test:offline-physical": "node scripts/offline-physical-regression.js",
-    "test:foundation": "npm run test:physical && npm run test:offline-rules && npm run test:offline-physical"
+    "test:offline-engine": "node scripts/offline-engine-regression.js",
+    "test:foundation": "npm run test:physical && npm run test:offline-rules && npm run test:offline-physical && npm run test:offline-engine"
   },
   "dependencies": {
     "@google/genai": "*",

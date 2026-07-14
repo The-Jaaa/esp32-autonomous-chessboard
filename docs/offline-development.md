@@ -54,7 +54,7 @@ Set-Location .\app
 npm run test:offline-rules
 ```
 
-This foundation deliberately contains no engine search, pathfinder, firmware ownership switching, persistence, or ESP32 integration. The host-only physical occupancy controller described below is still isolated from the online application and firmware.
+The rules wrapper deliberately contains no engine search, pathfinder, firmware ownership switching, persistence, or ESP32 integration. The host-only physical controller and engine described below remain isolated from the online application and firmware.
 
 Foundation verification on 2026-07-14 passed with nine `chess.js` legal-move parity positions, standard and Kiwipete perft, move metadata, castling, en passant, all four promotions, check/game outcomes, repetition, and exact apply/undo restoration. The complete online regression suite continued to pass, and firmware usage remained exactly 1,095,735 bytes of flash and 51,856 bytes of static RAM.
 
@@ -93,3 +93,31 @@ npm run test:offline-physical
 `npm run test:foundation` includes the online physical regressions, host rules regressions, and host physical interpreter regressions. The complete foundation verification passed on 2026-07-14. Client lint retained the same eight existing warnings, and the unlinked firmware remained exactly 1,095,735 bytes flash and 51,856 bytes static RAM.
 
 The controller assumes snapshots are already debounced. It does not perform setup calibration or infer a promotion identity from occupancy. Binary occupancy also cannot distinguish a restored captured piece from the attacker after the capture square has first been observed empty; the controller therefore enforces the intended ordered capture workflow and treats exact restoration as cancellation.
+
+## Host-Only Deterministic Engine
+
+`offline_core/offline_engine.h/.cpp` adds a portable search-only opponent around the same pinned chess rules library. It accepts a FEN and returns a legal UCI move, centipawn or mate score, completed depth, node and elapsed-time telemetry, principal variation, ranked root candidates, terminal outcome, and stop reason.
+
+The engine currently uses:
+
+- deterministic iterative-deepening negamax with alpha-beta pruning;
+- quiescence search for captures, promotions, and check evasions;
+- material, pawn-square, centralization, mobility, bishop-pair, advanced-rook, and king-safety evaluation;
+- principal-variation, transposition, promotion, capture, killer, history, and UCI move ordering;
+- a fixed 4,096-entry transposition table with 16-byte entries, capped at exactly 64 KiB;
+- a default hard 3,000 ms deadline, maximum depth 12, and the last fully completed iteration as the trusted result.
+
+The search is deterministic and contains no opening book or randomness. A later variation milestone can select among close root candidates, but this milestone always returns the proven principal move. Quiescence continuations may make the reported principal variation longer than the nominal completed depth.
+
+Run the engine regressions directly with:
+
+```powershell
+Set-Location .\app
+npm run test:offline-engine
+```
+
+Regressions cover invalid and terminal FENs, legal moves for both sides, repeatability, mate in one/two, delaying forced mate, check evasions, major captures, castling, en passant, all promotion choices, transposition-table parity, node limits, and the 3,000 ms deadline with 100 ms tolerance. A host benchmark corpus reports move, depth, nodes, elapsed time, and principal variation.
+
+On the 2026-07-14 MinGW host run, the three-second starting-position search completed depth 7, examined approximately 8 million nodes, and selected `b1c3`. Root candidates are searched with full windows so their reported scores are directly comparable for the future variation feature. These figures are host measurements only; ESP32 depth and working-memory placement must be measured during a later firmware-integration milestone.
+
+The engine is not connected to `OfflinePhysicalController`, the backend, client, or firmware. No ESP32 upload or physical-board test is required for this milestone.
