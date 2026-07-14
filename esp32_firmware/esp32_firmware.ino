@@ -8,10 +8,15 @@
 #include <Adafruit_NeoPixel.h>
 #include <math.h>
 
-// Set these for your network before uploading.
-const char* WIFI_SSID = "YOUR_WIFI_NAME";
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
-const char* SERVER_BASE_URL = "http://YOUR_SERVER_IP:3000";
+#if __has_include("firmware_secrets.h")
+#include "firmware_secrets.h"
+#else
+#include "firmware_secrets.example.h"
+#endif
+
+const char* WIFI_SSID = CHESS_WIFI_SSID;
+const char* WIFI_PASSWORD = CHESS_WIFI_PASSWORD;
+const char* SERVER_BASE_URL = CHESS_SERVER_BASE_URL;
 const char* OTA_HOSTNAME = "chessboard-esp32";
 const char* OTA_PASSWORD = ""; // Optional. Leave empty to disable OTA password auth.
 

@@ -3,6 +3,7 @@
 .env.*
 !*.env.example
 app/.env
+esp32_firmware/firmware_secrets.h
 
 # Dependency folders
 node_modules/
