@@ -90,7 +90,7 @@ Set-Location .\app
 npm run test:offline-physical
 ```
 
-`npm run test:foundation` includes the online physical regressions plus the host rules, physical interpreter, engine, turn coordinator, and quick integration regressions. The complete foundation verification passed on 2026-07-14. Client lint retained the same eight existing warnings, and the unlinked firmware remained exactly 1,095,735 bytes flash and 51,856 bytes static RAM.
+`npm run test:foundation` includes the online physical regressions plus the host rules, physical interpreter, engine, turn coordinator, quick integration, and board-route regressions. The complete foundation verification passed on 2026-07-14. Client lint retained the same eight existing warnings, and the unlinked firmware remained exactly 1,095,735 bytes flash and 51,856 bytes static RAM.
 
 The controller assumes snapshots are already debounced. It does not perform setup calibration or infer a promotion identity from occupancy. Binary occupancy also cannot distinguish a restored captured piece from the attacker after the capture square has first been observed empty; the controller therefore enforces the intended ordered capture workflow and treats exact restoration as cancellation.
 
@@ -181,3 +181,36 @@ The 2026-07-14 acceptance runs produced:
 - both tiers exercised every injected recovery branch and finished without an unresolved `SyncWarning` or `Error`.
 
 No production source changed for this milestone. Physical route planning, firmware linking, motor/LED execution, graveyards, persistence, and ownership switching remain deferred.
+
+## Host-Only Board Route Planner
+
+`offline_core/offline_route.h/.cpp` is a portable C++17 board-only route planner. It matches the existing online JavaScript `buildBoardTransferPlan` behavior without linking into the backend, client, firmware, physical controller, or turn coordinator.
+
+`BoardRouteRequest` supplies source and target squares, expected occupancy, optional latest sensed occupancy, ignored squares, and whether a verified simple pawn push may use the online direct-route shortcut. `BoardRouteResult` reports success or a blocked reason, route mode, route cost, the raw square path, and compressed drag waypoints. The convenience `planQuietMove` operation rejects captures, castling, en passant, and promotions because their choreography belongs to later milestones.
+
+The planner preserves the online routing rules:
+
+- expected and sensed occupancy are merged with logical OR;
+- source, target, and explicit ignored squares are cleared before routing;
+- a clear rank, file, or diagonal chess line is preferred;
+- buffered A* is attempted before relaxed A*;
+- orthogonal and diagonal steps cost 10 and 14 respectively;
+- buffered A* adds 10 per adjacent occupied square;
+- diagonal movement between two occupied orthogonal neighbors remains allowed;
+- JavaScript neighbor insertion and equal-score tie order are preserved;
+- consecutive steps in the same direction are compressed into one drag waypoint.
+
+The existing JavaScript planner is exported only through the server's test module boundary. Its production call sites and runtime behavior are unchanged.
+
+Run the route regressions directly with:
+
+```powershell
+Set-Location .\app
+npm run test:offline-route
+```
+
+The 2026-07-14 acceptance run passed 16 exact C++/JavaScript parity fixtures and 256 deterministic randomized C++ safety cases. Fixtures cover direct pawn pushes, one-square moves, long clear lines, routed knight transfers, crowded/blocked boards, diagonal corner-adjacent passage, expected-plus-sensed occupancy, ignored obstructions, waypoint compression, and deterministic repeated planning. Every successful C++ route is additionally checked for valid endpoints, unoccupied traversed squares, and lossless compressed-segment reconstruction.
+
+The 100-game offline soak, complete `npm run test:foundation`, and `tools/verify-foundation.ps1` all passed. The client production build passed, lint retained only the same eight existing warnings, and the unlinked ESP32 firmware remained exactly 1,095,735 bytes flash and 51,856 bytes static RAM.
+
+This milestone deliberately returns `NoBoardPath` when the 8x8 board has no route. Z/I lanes, graveyards, capture staging/removal, castling choreography, LED previews, motor commands, coordinator wiring, and ESP32 integration remain deferred. The next isolated milestone will add host-only Z/I lane and graveyard routing on top of this accepted board-route API.

@@ -5400,6 +5400,7 @@ module.exports = {
     DEFAULT_GRAVEYARD_SLOTS,
     normalizeGraveyardSlots,
     withPhysicalPlanningContext,
+    buildBoardTransferPlan,
     buildRobotMoveCommand,
     summarizeMotionPlan,
     legalMoveMatchesUci,
