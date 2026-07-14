@@ -33,6 +33,36 @@ GameOutcome mapOutcome(chess::GameResultReason reason) {
   }
 }
 
+MoveInfo describeMove(const chess::Board& board, const chess::Move move) {
+  const std::string normalizedUci = chess::uci::moveToUci(move);
+  MoveInfo next;
+  next.uci = normalizedUci;
+  next.san = chess::uci::moveToSan(board, move);
+  next.from = normalizedUci.substr(0, 2);
+  next.to = normalizedUci.substr(2, 2);
+  next.piece = pieceName(board.at(move.from()));
+  next.capture = board.isCapture(move);
+  next.castling = move.typeOf() == chess::Move::CASTLING;
+  next.enPassant = move.typeOf() == chess::Move::ENPASSANT;
+
+  if (next.capture) {
+    next.capturedPiece = pieceName(board.getCapturing<chess::Piece>(move));
+    next.capturedSquare = next.enPassant ? squareName(move.to().ep_square()) : next.to;
+  }
+
+  if (move.typeOf() == chess::Move::PROMOTION) {
+    next.promotion = normalizedUci.substr(4, 1);
+  }
+
+  if (next.castling) {
+    next.rookFrom = squareName(move.to());
+    const char rank = next.from[1];
+    next.rookTo = std::string{next.to[0] == 'g' ? 'f' : 'd', rank};
+  }
+
+  return next;
+}
+
 }  // namespace
 
 OfflineGame::OfflineGame() = default;
@@ -69,6 +99,37 @@ std::vector<std::string> OfflineGame::legalMovesUci() const {
   return moves;
 }
 
+std::vector<std::string> OfflineGame::occupiedSquares() const {
+  std::vector<std::string> squares;
+  for (int rank = 0; rank < 8; ++rank) {
+    for (int file = 0; file < 8; ++file) {
+      const std::string square{static_cast<char>('a' + file), static_cast<char>('1' + rank)};
+      const chess::Square parsed(square);
+      if (board_.at(parsed) != chess::Piece::NONE) squares.push_back(square);
+    }
+  }
+  return squares;
+}
+
+std::string OfflineGame::pieceAt(std::string_view square) const {
+  if (square.size() != 2 || square[0] < 'a' || square[0] > 'h' || square[1] < '1' || square[1] > '8') {
+    return {};
+  }
+  return pieceName(board_.at(chess::Square(std::string(square))));
+}
+
+bool OfflineGame::describeLegalMove(std::string_view uci, MoveInfo& result) const {
+  const chess::Move requested = chess::uci::uciToMove(board_, uci);
+  if (requested == chess::Move::NO_MOVE) return false;
+
+  chess::Movelist legal;
+  chess::movegen::legalmoves(legal, board_);
+  const auto found = std::find(legal.begin(), legal.end(), requested);
+  if (found == legal.end()) return false;
+  result = describeMove(board_, *found);
+  return true;
+}
+
 bool OfflineGame::inCheck() const {
   return board_.inCheck();
 }
@@ -87,31 +148,7 @@ bool OfflineGame::applyUci(std::string_view uci, MoveInfo& result) {
   if (found == legal.end()) return false;
 
   const chess::Move move = *found;
-  const std::string normalizedUci = chess::uci::moveToUci(move);
-  MoveInfo next;
-  next.uci = normalizedUci;
-  next.san = chess::uci::moveToSan(board_, move);
-  next.from = normalizedUci.substr(0, 2);
-  next.to = normalizedUci.substr(2, 2);
-  next.piece = pieceName(board_.at(move.from()));
-  next.capture = board_.isCapture(move);
-  next.castling = move.typeOf() == chess::Move::CASTLING;
-  next.enPassant = move.typeOf() == chess::Move::ENPASSANT;
-
-  if (next.capture) {
-    next.capturedPiece = pieceName(board_.getCapturing<chess::Piece>(move));
-    next.capturedSquare = next.enPassant ? squareName(move.to().ep_square()) : next.to;
-  }
-
-  if (move.typeOf() == chess::Move::PROMOTION) {
-    next.promotion = normalizedUci.substr(4, 1);
-  }
-
-  if (next.castling) {
-    next.rookFrom = squareName(move.to());
-    const char rank = next.from[1];
-    next.rookTo = std::string{next.to[0] == 'g' ? 'f' : 'd', rank};
-  }
+  MoveInfo next = describeMove(board_, move);
 
   history_.push_back(move);
   board_.makeMove(move);

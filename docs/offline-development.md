@@ -54,7 +54,7 @@ Set-Location .\app
 npm run test:offline-rules
 ```
 
-This foundation deliberately contains no engine search, physical occupancy controller, pathfinder, firmware ownership switching, persistence, or ESP32 integration.
+This foundation deliberately contains no engine search, pathfinder, firmware ownership switching, persistence, or ESP32 integration. The host-only physical occupancy controller described below is still isolated from the online application and firmware.
 
 Foundation verification on 2026-07-14 passed with nine `chess.js` legal-move parity positions, standard and Kiwipete perft, move metadata, castling, en passant, all four promotions, check/game outcomes, repetition, and exact apply/undo restoration. The complete online regression suite continued to pass, and firmware usage remained exactly 1,095,735 bytes of flash and 51,856 bytes of static RAM.
 
@@ -65,3 +65,31 @@ The full physical-board gate was completed on 2026-07-14 and passed. The session
 The session contained two transient robot occupancy mismatches and two piece-centering warnings. Each was recoverable and resolved before play continued; no error-level event or unresolved mismatch remained at the end.
 
 During undo of the human capture `Rxf5`, the backend correctly entered `undo_waiting_human_restore` and requested that the captured black pawn be returned to `f5`. The workflow completed after the pawn was detected, but the user could not readily tell why play had paused. Clear board-level communication for manual captured-piece restoration is deferred to the later offline LED/status communication milestone; no behavior change is included in the foundation pass.
+
+## Host-Only Physical Move Interpreter
+
+The second offline component is `offline_core/offline_physical.h/.cpp`. It interprets stable 64-square binary occupancy snapshots while remaining independent of Arduino, WiFi, sensors, LEDs, motors, pathfinding, graveyards, and engine search.
+
+Its physical mapping exactly matches the online board: raw index `0=h8`, `1=h7`, `56=a1`, and `63=a8`. It supports either human color and exposes hardware-neutral phases, events, legal targets, highlights, occupancy differences, and accepted `MoveInfo` metadata.
+
+Implemented physical sequences:
+
+- quiet moves, cancellation, and duplicate-snapshot idempotence;
+- ordinary captures that observe victim removal before attacker placement;
+- en passant with source, capture square, and destination verification;
+- king-first kingside and queenside castling followed by the rook;
+- quiet and capture promotions that pause for an explicit queen, rook, bishop, or knight choice;
+- recoverable sync warnings for wrong-color lifts, pieces with no legal moves, illegal destinations, multi-piece disturbances, and movement while waiting for the opponent.
+
+`OfflineGame` now also provides read-only legal-move descriptions, piece lookup, and occupied-square access. Applying moves remains the only mutating rules operation used by the interpreter.
+
+Run the interpreter regressions directly with:
+
+```powershell
+Set-Location .\app
+npm run test:offline-physical
+```
+
+`npm run test:foundation` includes the online physical regressions, host rules regressions, and host physical interpreter regressions. The complete foundation verification passed on 2026-07-14. Client lint retained the same eight existing warnings, and the unlinked firmware remained exactly 1,095,735 bytes flash and 51,856 bytes static RAM.
+
+The controller assumes snapshots are already debounced. It does not perform setup calibration or infer a promotion identity from occupancy. Binary occupancy also cannot distinguish a restored captured piece from the attacker after the capture square has first been observed empty; the controller therefore enforces the intended ordered capture workflow and treats exact restoration as cancellation.

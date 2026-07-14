@@ -51,6 +51,9 @@ class OfflineGame {
   [[nodiscard]] std::string fen() const;
   [[nodiscard]] char sideToMove() const;
   [[nodiscard]] std::vector<std::string> legalMovesUci() const;
+  [[nodiscard]] std::vector<std::string> occupiedSquares() const;
+  [[nodiscard]] std::string pieceAt(std::string_view square) const;
+  [[nodiscard]] bool describeLegalMove(std::string_view uci, MoveInfo& result) const;
   [[nodiscard]] bool inCheck() const;
   [[nodiscard]] GameStatus status() const;
 
