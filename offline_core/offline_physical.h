@@ -71,6 +71,14 @@ struct SnapshotResult {
   std::string message;
 };
 
+struct OpponentMovePreview {
+  MoveInfo move;
+  std::string beforeFen;
+  std::string afterFen;
+  Occupancy expectedOccupancy{};
+  GameStatus expectedStatus;
+};
+
 int squareToRawIndex(std::string_view square);
 std::string rawIndexToSquare(std::size_t rawIndex);
 Occupancy occupancyFromFen(std::string_view fen);
@@ -88,6 +96,11 @@ class OfflinePhysicalController {
 
   SnapshotResult processSnapshot(const Occupancy& occupancy);
   SnapshotResult confirmPromotion(char promotionPiece);
+
+  [[nodiscard]] bool previewOpponentMove(
+      std::string_view uci, OpponentMovePreview& result) const;
+  bool commitVerifiedOpponentMove(
+      std::string_view uci, const Occupancy& verifiedOccupancy, MoveInfo& result);
 
   [[nodiscard]] HumanColor humanColor() const { return humanColor_; }
   [[nodiscard]] PhysicalPhase phase() const { return phase_; }

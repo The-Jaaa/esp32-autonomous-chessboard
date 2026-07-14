@@ -90,7 +90,7 @@ Set-Location .\app
 npm run test:offline-physical
 ```
 
-`npm run test:foundation` includes the online physical regressions, host rules regressions, and host physical interpreter regressions. The complete foundation verification passed on 2026-07-14. Client lint retained the same eight existing warnings, and the unlinked firmware remained exactly 1,095,735 bytes flash and 51,856 bytes static RAM.
+`npm run test:foundation` includes the online physical regressions plus the host rules, physical interpreter, engine, and turn coordinator regressions. The complete foundation verification passed on 2026-07-14. Client lint retained the same eight existing warnings, and the unlinked firmware remained exactly 1,095,735 bytes flash and 51,856 bytes static RAM.
 
 The controller assumes snapshots are already debounced. It does not perform setup calibration or infer a promotion identity from occupancy. Binary occupancy also cannot distinguish a restored captured piece from the attacker after the capture square has first been observed empty; the controller therefore enforces the intended ordered capture workflow and treats exact restoration as cancellation.
 
@@ -121,3 +121,39 @@ Regressions cover invalid and terminal FENs, legal moves for both sides, repeata
 On the 2026-07-14 MinGW host run, the three-second starting-position search completed depth 7, examined approximately 8 million nodes, and selected `b1c3`. Root candidates are searched with full windows so their reported scores are directly comparable for the future variation feature. These figures are host measurements only; ESP32 depth and working-memory placement must be measured during a later firmware-integration milestone.
 
 The engine is not connected to `OfflinePhysicalController`, the backend, client, or firmware. No ESP32 upload or physical-board test is required for this milestone.
+
+## Host-Only Offline Turn Coordinator
+
+`offline_core/offline_coordinator.h/.cpp` connects the host-only physical interpreter and deterministic engine through a transactional turn state machine. It remains portable C++17 and is not referenced by the backend, client, or ESP32 firmware.
+
+The coordinator exposes these phases:
+
+- `HumanTurn` and `HumanPromotionPending` while physical snapshots are interpreted;
+- `EngineSearchNeeded` with a generation-tagged FEN and `SearchLimits` request;
+- `OpponentMoveReady` and `OpponentMoveExecuting` for an externally executed move;
+- `OpponentPromotionPending` until the engine-selected Q/R/B/N replacement is confirmed;
+- `GameOver`, recoverable `SyncWarning`, and internal `Error` states.
+
+Search is deliberately split-phase. The caller retrieves `pendingEngineRequest()`, runs `OfflineEngine::searchFen` outside sensor processing, and submits the result with its request generation. Stale generations are rejected without replacing the active request. An empty or illegal result causes a fresh generation for the same authoritative FEN.
+
+Opponent moves are previewed without changing `OfflineGame`. The resulting `OpponentMovePlan` includes engine telemetry, full move metadata, pre/post FEN, pre/post occupancy, and expected game status. After external hardware execution:
+
+- exact post-move occupancy commits the move;
+- exact pre-move occupancy makes the same staged move ready for retry;
+- any other occupancy enters `SyncWarning` without changing the game;
+- recovery may either restore the pre-position or complete the exact post-position without rerunning search.
+
+For opponent promotion, post-move occupancy is necessary but not sufficient because binary sensors cannot identify the replacement piece. The coordinator remains uncommitted in `OpponentPromotionPending` until `confirmOpponentPromotion(q/r/b/n)` matches the engine-selected promotion.
+
+`OfflinePhysicalController` remains the single owner of authoritative rules state. Its new opponent methods only preview a legal opponent move or commit one whose supplied occupancy exactly matches that preview. Duplicate snapshots and completion reports are idempotent.
+
+Run coordinator regressions directly with:
+
+```powershell
+Set-Location .\app
+npm run test:offline-coordinator
+```
+
+The suite covers Human White and Black, real fixed-depth engine handoff, stale/illegal results, uncommitted staging, quiet moves, captures, en passant, both castling sides, human and opponent promotion, retry and mismatch recovery, duplicate reports, checkmate, stalemate, insufficient material, fifty-move draw, and threefold repetition. It is included in `npm run test:foundation`.
+
+Still deferred: firmware linking, FreeRTOS search execution, setup calibration, pathfinding, motors, graveyards, LEDs, persistence, online/offline ownership switching, and reconnect handoff.

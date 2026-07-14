@@ -427,4 +427,45 @@ SnapshotResult OfflinePhysicalController::confirmPromotion(char promotionPiece) 
   return resultFor(occupancy, PhysicalEvent::InvalidPromotionChoice, "That promotion choice is not legal here.");
 }
 
+bool OfflinePhysicalController::previewOpponentMove(
+    std::string_view uci, OpponentMovePreview& result) const {
+  if (phase_ != PhysicalPhase::WaitingForOpponent) return false;
+
+  OfflineGame previewGame = game_;
+
+  MoveInfo move;
+  if (!previewGame.applyUci(uci, move)) return false;
+
+  OpponentMovePreview preview;
+  preview.move = std::move(move);
+  preview.beforeFen = game_.fen();
+  preview.afterFen = previewGame.fen();
+  preview.expectedOccupancy = occupancyFromFen(preview.afterFen);
+  preview.expectedStatus = previewGame.status();
+  result = std::move(preview);
+  return true;
+}
+
+bool OfflinePhysicalController::commitVerifiedOpponentMove(
+    std::string_view uci, const Occupancy& verifiedOccupancy, MoveInfo& result) {
+  OpponentMovePreview preview;
+  if (!previewOpponentMove(uci, preview)) return false;
+  if (verifiedOccupancy != preview.expectedOccupancy) return false;
+
+  MoveInfo accepted;
+  if (!game_.applyUci(uci, accepted)) return false;
+  if (game_.fen() != preview.afterFen) {
+    game_.undo();
+    return false;
+  }
+
+  committedOccupancy_ = preview.expectedOccupancy;
+  resetInteraction();
+  refreshTurnPhase();
+  lastSnapshot_ = verifiedOccupancy;
+  hasLastSnapshot_ = true;
+  result = std::move(accepted);
+  return true;
+}
+
 }  // namespace offline
