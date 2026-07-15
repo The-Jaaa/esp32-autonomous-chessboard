@@ -6,6 +6,7 @@
 #include <math.h>
 
 #include "offline_embedded_diagnostics.h"
+#include "offline_ownership_diagnostics.h"
 
 #if __has_include("firmware_secrets.h")
 #include "firmware_secrets.h"
@@ -168,6 +169,7 @@ void setup() {
   WiFi.setSleep(false);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
+  beginOfflineOwnershipDiagnostics();
   xTaskCreatePinnedToCore(networkTask, "networkTask", 12288, nullptr, 1, nullptr, 0);
 
   Serial.println("[BOOT] Physical board firmware started.");
@@ -175,12 +177,16 @@ void setup() {
 }
 
 void loop() {
-  if (offlineEmbeddedDiagnosticsActive()) {
+  if (offlineEmbeddedDiagnosticsActive() || offlineOwnershipDiagnosticsActive()) {
     digitalWrite(MAGNET_PIN, LOW);
   }
 
   scanSensors();
+#if ENABLE_OFFLINE_OWNERSHIP_DIAGNOSTICS
+  updateOfflineOwnershipDiagnosticLeds(millis());
+#else
   updateLedAnimation();
+#endif
 
   String commandJson;
   bool shouldExecute = false;
@@ -215,6 +221,12 @@ void networkTask(void* parameter) {
       WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     }
 
+#if ENABLE_OFFLINE_OWNERSHIP_DIAGNOSTICS
+    runOfflineOwnershipNetworkStep(now);
+    vTaskDelay(pdMS_TO_TICKS(25));
+    continue;
+#endif
+
     if (WiFi.status() == WL_CONNECTED) {
       String resultJson;
       bool shouldPostResult = false;
@@ -245,6 +257,19 @@ void networkTask(void* parameter) {
 }
 
 void scanSensors() {
+#if ENABLE_OFFLINE_OWNERSHIP_DIAGNOSTICS
+  static uint32_t previousOwnershipScanMs = 0;
+  const uint32_t ownershipScanStartedMs = millis();
+  if (previousOwnershipScanMs != 0) {
+    const uint32_t gap = ownershipScanStartedMs - previousOwnershipScanMs;
+    if (gap > ownershipDiagnosticSensorMaxGapMs) {
+      ownershipDiagnosticSensorMaxGapMs = gap;
+    }
+  }
+  previousOwnershipScanMs = ownershipScanStartedMs;
+  ownershipDiagnosticSensorScanCount++;
+#endif
+
 #if ENABLE_OFFLINE_EMBEDDED_DIAGNOSTICS
   static uint32_t previousScanMs = 0;
   const uint32_t scanStartedMs = millis();
@@ -403,7 +428,9 @@ void pollPhysicalCommands() {
         const int val = command["val"] | 0;
         digitalWrite(
             MAGNET_PIN,
-            offlineEmbeddedDiagnosticsActive() ? LOW : (val ? HIGH : LOW));
+            (offlineEmbeddedDiagnosticsActive() || offlineOwnershipDiagnosticsActive())
+                ? LOW
+                : (val ? HIGH : LOW));
         markSnapshotDirty();
       } else {
         String commandJson;
@@ -425,7 +452,7 @@ void pollPhysicalCommands() {
 }
 
 bool enqueueMotionCommand(const String& commandJson) {
-  if (offlineEmbeddedDiagnosticsActive()) {
+  if (offlineEmbeddedDiagnosticsActive() || offlineOwnershipDiagnosticsActive()) {
     (void)commandJson;
     digitalWrite(MAGNET_PIN, LOW);
     return false;
@@ -444,7 +471,7 @@ bool enqueueMotionCommand(const String& commandJson) {
 }
 
 void executeMotionCommand(const String& commandJson) {
-  if (offlineEmbeddedDiagnosticsActive()) {
+  if (offlineEmbeddedDiagnosticsActive() || offlineOwnershipDiagnosticsActive()) {
     (void)commandJson;
     digitalWrite(MAGNET_PIN, LOW);
     return;

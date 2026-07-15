@@ -7,6 +7,7 @@ require('dotenv').config();
 
 const path = require('path');
 const fs = require('fs');
+const { randomUUID } = require('crypto');
 
 const app = express();
 const server = http.createServer(app);
@@ -802,9 +803,12 @@ const PHYSICAL_LED_COLORS = {
 };
 
 const PHYSICAL_PROMOTIONS_ENABLED = false;
+const PHYSICAL_OWNERSHIP_PROTOCOL_VERSION = 1;
+const PHYSICAL_SERVER_INSTANCE_ID = randomUUID();
 
 const physicalSession = {
   active: false,
+  sessionGeneration: 0,
   phase: 'idle',
   setupMode: 'full',
   game: new Chess(),
@@ -2661,6 +2665,31 @@ function makeRunwayMotionStep(label, squares = [], colorName = 'quiet') {
 
 function compactSteps(steps = []) {
   return steps.filter(Boolean);
+}
+
+function physicalSessionSafeForOwnershipSwitch() {
+  const noPendingWork = !physicalSession.pendingRobotJob &&
+    !physicalSession.pendingUndo &&
+    !physicalSession.pendingRedo &&
+    !physicalSession.selectedSource &&
+    !physicalSession.pendingCaptureTarget &&
+    !physicalSession.pendingCastleMove;
+
+  return !physicalSession.active ||
+    (physicalSession.phase === 'game_over' && noPendingWork);
+}
+
+function serializePhysicalHeartbeat() {
+  return {
+    success: true,
+    protocolVersion: PHYSICAL_OWNERSHIP_PROTOCOL_VERSION,
+    serverInstanceId: PHYSICAL_SERVER_INSTANCE_ID,
+    sessionGeneration: physicalSession.sessionGeneration,
+    sessionActive: physicalSession.active,
+    phase: physicalSession.phase,
+    safeToSwitch: physicalSessionSafeForOwnershipSwitch(),
+    serverTimeMs: Date.now()
+  };
 }
 
 function buildCaptureBoardStagingFallback(
@@ -4648,6 +4677,7 @@ async function processPhysicalSnapshot(occupancy, metadata = {}) {
 app.post('/api/physical/start', (req, res) => {
   const { level = 1, profile = 'balanced', graveyardSlots = [], setupMode = 'full' } = req.body || {};
 
+  physicalSession.sessionGeneration += 1;
   physicalSession.active = true;
   physicalSession.phase = 'setup';
   physicalSession.setupMode = setupMode === 'partial' ? 'partial' : 'full';
@@ -4701,6 +4731,10 @@ app.post('/api/physical/start', (req, res) => {
 
 app.get('/api/physical/status', (req, res) => {
   res.json({ success: true, state: serializePhysicalState() });
+});
+
+app.get('/api/physical/heartbeat', (req, res) => {
+  res.json(serializePhysicalHeartbeat());
 });
 
 app.get('/api/physical/logs', (req, res) => {
@@ -5463,5 +5497,11 @@ module.exports = {
     squareToIndex,
     normalizeProfile,
     clampLevel
+  },
+  physicalOwnershipTest: {
+    protocolVersion: PHYSICAL_OWNERSHIP_PROTOCOL_VERSION,
+    serverInstanceId: PHYSICAL_SERVER_INSTANCE_ID,
+    serializeHeartbeat: serializePhysicalHeartbeat,
+    safeForOwnershipSwitch: physicalSessionSafeForOwnershipSwitch
   }
 };

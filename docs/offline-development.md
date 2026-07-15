@@ -396,3 +396,46 @@ Acceptance results on 2026-07-14:
 - unlinked firmware remains exactly 1,095,735 bytes flash and 51,856 bytes static RAM.
 
 This remains host-only. Firmware prompts, LEDs, motors, voice guidance, promotion undo/redo, persistence, and online/offline ownership switching are still deferred.
+
+## Offline Runtime Ownership Diagnostics
+
+`offline_core/offline_ownership.h/.cpp` now provides the portable ownership state machine that will eventually arbitrate control between the backend and the local offline runtime. It is host-tested independently of Arduino and has these states:
+
+- `BootProbe`: wait up to 10 seconds for the backend;
+- `OnlineOwned`: normal backend ownership;
+- `OnlinePaused`: an active online game lost its server, so new commands are blocked while an already-running motion may finish;
+- `OfflineIdle`: no online game needs recovery and local control may begin at a stable boundary;
+- `ReconnectPending`: require two matching successful heartbeats before transferring ownership;
+- `RecoveryRequired`: server/session identity changed during an active or paused game, so automatic continuation is unsafe.
+
+The defaults are a one-second heartbeat interval, one-second HTTP read and connect timeouts, three consecutive failures before declaring the server unavailable, and two consecutive successes before reconnection. Timer arithmetic is safe across the ESP32 `millis()` wraparound. A changed server instance may be adopted after two heartbeats only when there is no active game, the local board is stable, and the remote heartbeat reports `safeToSwitch`; active or paused games require explicit recovery. A future offline game can continue through `ReconnectPending` until its next exact stable turn boundary, where the manager emits a handoff-required decision. No FEN/history/graveyard transfer is invented in this milestone.
+
+The backend exposes read-only `GET /api/physical/heartbeat` with protocol version, process-unique server ID, physical-session generation, active phase, session-active state, and transition-safety state. The server ID remains stable for one Node process. The generation increments only when `/api/physical/start` creates a new physical session. Regression tests prove heartbeat reads do not mutate the physical state or command queue.
+
+Run the host regression directly with:
+
+```powershell
+Set-Location .\app
+npm run test:offline-ownership
+```
+
+`ENABLE_OFFLINE_OWNERSHIP_DIAGNOSTICS` is independent from the existing resource diagnostic and defaults to `0`. The enabled ESP32 build keeps sensor scanning and heartbeat HTTP traffic active, does not consume normal movement commands, rejects motion at the queue and executor boundaries, and continuously holds the magnet LOW. `[OWNERSHIP_DIAG]` JSON reports transitions, heartbeat latency, task placement, motor lock, sensor timing, and synthetic transition checks. Board corners briefly show green online, amber offline, and blue/amber while reconnecting; paused/recovery states use persistent red warning patterns. Offline gameplay remains disabled.
+
+`tools/verify-offline-ownership.ps1` compiles production and diagnostic variants, enforces the exact production baseline, optionally uploads and validates diagnostic telemetry, and restores production firmware in a `finally` block. `tools/verify-foundation.ps1` includes the compile-only ownership gate.
+
+Acceptance results on 2026-07-15:
+
+- the accepted online baseline completed a full physical game with 12 verified robot replies and checkmate, with no motion or synchronization errors;
+- the 100-game soak passed 6,758 plies, 1,160 captures, 34 castlings, 8 en-passant moves, 66 promotions, and every injected recovery;
+- `npm run test:foundation` and `tools/verify-foundation.ps1` passed; client build and zero-warning lint passed;
+- production remains exactly 1,042,543 bytes flash and 47,128 bytes static RAM;
+- the ownership diagnostic is 1,037,391 bytes flash and 47,200 bytes static RAM, leaving 2,108,337 bytes of application-partition headroom;
+- the resource diagnostic with embedded ownership smoke is 1,244,715 bytes flash and 51,248 bytes static RAM, leaving 1,901,013 bytes of application-partition headroom;
+- the final ownership hardware run recorded 2,409 sensor scans, a 10 ms maximum sensor gap, and a 42 ms maximum live heartbeat duration;
+- a real backend outage produced three failed probes of approximately 1,003 ms each, then `OnlineOwned -> OfflineIdle`; restart produced `OfflineIdle -> ReconnectPending -> OnlineOwned` after two successes;
+- the resource diagnostic, now including an embedded ownership smoke test, passed with 151,308 bytes free internal heap, a 139,252-byte largest internal block, 7,433,348 bytes free PSRAM, 22,396 bytes task stack headroom, a 2 ms maximum sensor gap, and 50 successful HTTP polls;
+- both diagnostic sessions automatically restored the normal production firmware on COM11.
+
+Hardware testing exposed and fixed two diagnostic-path issues before acceptance. A rapidly restarted idle server originally triggered `RecoveryRequired` even without an active game; it now uses the two-heartbeat idle adoption path while retaining the strict active-game identity guard. ESP32 `HTTPClient::setTimeout` did not cover TCP connection establishment, so `setConnectTimeout` is now configured separately and heartbeat latency is enforced by the verifier. The serial verifier also accepts safety fields repeated in the final summary because the one-time startup line can precede monitor attachment.
+
+Still deferred: actual offline coordinator input from sensors, offline engine turns, route/motion execution, setup calibration, ownership persistence, state-transfer endpoints, offline LEDs beyond diagnostic status, offline undo/redo, and production online/offline switching. The next isolated milestone will connect stable sensor snapshots to the offline coordinator in a read-only diagnostic mode that can produce engine and motion plans but cannot move pieces.

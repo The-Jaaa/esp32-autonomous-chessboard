@@ -118,6 +118,33 @@ bool runPhysicalSmoke() {
          accepted.acceptedMove.has_value() && accepted.acceptedMove->uci == "e2e4";
 }
 
+bool runOwnershipSmoke() {
+  offline::OfflineOwnershipManager manager;
+  offline::ServerHeartbeat heartbeat;
+  heartbeat.success = true;
+  heartbeat.protocolVersion = offline::kOfflineOwnershipProtocolVersion;
+  heartbeat.serverInstanceId = "embedded-smoke";
+  heartbeat.sessionGeneration = 1;
+  heartbeat.safeToSwitch = true;
+
+  const auto online = manager.observeHeartbeat(0, heartbeat);
+  if (online.state != offline::OwnershipState::OnlineOwned) return false;
+
+  offline::OwnershipSafety active;
+  active.onlineGameActive = true;
+  active.motionExecuting = true;
+  for (std::uint32_t now = 1000; now <= 3000; now += 1000) {
+    static_cast<void>(manager.observeHeartbeat(now, {}, active));
+  }
+  if (manager.state() != offline::OwnershipState::OnlinePaused) return false;
+
+  active.motionExecuting = false;
+  static_cast<void>(manager.observeHeartbeat(4000, heartbeat, active));
+  const auto resumed = manager.observeHeartbeat(5000, heartbeat, active);
+  return resumed.state == offline::OwnershipState::OnlineOwned &&
+         resumed.event == offline::OwnershipEvent::OnlineResumed;
+}
+
 bool runRouteSmoke() {
   offline::Occupancy occupancy{};
   occupancy[static_cast<std::size_t>(offline::squareToRawIndex("a1"))] = true;
@@ -324,6 +351,9 @@ void diagnosticTask(void*) {
   emitCheck("rules-apply-undo-promotion", runRulesSmoke());
   emitPhase("physical-smoke");
   emitCheck("physical-interpreter", runPhysicalSmoke());
+
+  emitPhase("ownership-smoke");
+  emitCheck("ownership-state-machine", runOwnershipSmoke());
   emitPhase("route-smoke");
   emitCheck("board-lane-graveyard-routes", runRouteSmoke());
   emitPhase("motion-smoke");
