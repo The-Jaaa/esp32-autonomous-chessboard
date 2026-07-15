@@ -2,7 +2,8 @@
 
 #include "offline_embedded_config.h"
 
-#if ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS
 
 #include <Arduino.h>
 #include <OfflineCore.h>

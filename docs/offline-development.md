@@ -593,3 +593,48 @@ The guarded COM11 acceptance run passed end to end. Bounded homing succeeded, ph
 Final hardware metrics were a 5 ms maximum sensor gap, 1,502 sensor scans and three heartbeat attempts during search, 130,544 bytes free internal heap, a 104,436-byte largest internal block, 7,430,496 bytes free PSRAM, and 16,808 bytes task-stack headroom. The magnet activated only inside pickup/drag and was LOW in the final report. Setup also demonstrated recoverable feedback for an intermittently detected `d7` pawn before the accepted move; no warning remained when execution began. The complete serial transcript is retained locally under `tmp/offline-quiet-motion-hardware-2026-07-15.log`.
 
 Still deferred: real captures, en passant, castling, promotions, Z/I travel, graveyard drops, gameplay LEDs, persistence, reconnect state transfer, offline undo/redo, and production automatic offline ownership.
+
+## Guarded Real Offline Capture Diagnostics
+
+`offline_core/offline_capture_motion.h/.cpp` adds the first portable compiler for a real multi-phase offline capture. It accepts one phase request at a time and deliberately supports only `CapturedRemoval` followed by `AttackerFinal`. Captured removal compiles to board travel, pickup, compressed board drag, one external-coordinate drag, drop, and board verification. Attacker final reuses the accepted quiet-motion compiler for a board-only transfer. The graveyard leg never receives board-drop compensation; exactly the final attacker drag onto the chessboard is marked for the existing 250-step overshoot.
+
+The compiler verifies phase tokens and metadata, exact before/after occupancy, a `Pending` capture slot for removal, an `Occupied` slot for attacker final, clear route squares, finite external coordinates, and matching graveyard labels/coordinates. It rejects staging, en passant, castling, promotion, attacker lane routing, malformed paths, and unexpected phase kinds. Compilation is deterministic and leaves requests unchanged. `kCaptureMotionMaximumAttempts` limits each physical phase to two attempts.
+
+The controlled physical fixture is intentionally small:
+
+- White king `e1`;
+- White rook `e2`;
+- Black king `a8`;
+- Black pawn `d5`;
+- Human move `e2e4` (`Re4`);
+- deterministic opponent move `d5e4`;
+- captured rook route `e4 -> h4 -> I4`, where I4 is `(17600, -350)`;
+- attacker route `d5 -> e4`;
+- final FEN `k7/8/8/8/4p3/8/8/4K3 w - - 0 2`.
+
+The original proposed black king square `e8` was invalid because the rook on `e2` already checks `e8` while the FEN says White is to move. Moving only the black king to `a8` makes the fixture legal while preserving the intended human move, engine capture, graveyard route, and final attacker movement.
+
+`ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS` defaults to `0` and is mutually exclusive with all earlier diagnostics. The enabled ESP32 build reuses bounded homing, ownership heartbeats, stable sensor snapshots, PSRAM chess tables, the three-second engine search, motion planning, phase tokens, speed profiles, and the guarded core-1 hardware mailbox. It blocks normal HTTP motion, command polling, diagnostic movement, and unbounded homing. Magnet HIGH is authorized only while a compiled pickup/drag program is active and is forced LOW after every phase, failure, timeout, abort, and task exit.
+
+The runtime requires exact fixture occupancy for 500 ms, accepts the physical rook move, and refuses execution unless the engine and planner produce exactly `d5e4`, strategy `capture-direct-after-removal`, graveyard `I4`, and two ordered phases. It verifies real occupancy before and after each phase. Verified removal changes I4 from `Pending` to `Occupied`; chess FEN/history remain unchanged until the attacker phase also verifies. An unchanged failure can retry once with the adapter's incremented token. A partial or ambiguous board enters synchronization warning and freezes. Nudge recovery and automatic restoration are not available in this diagnostic.
+
+Run the host regression or compile/run the USB gate with:
+
+```powershell
+Set-Location .\app
+npm run test:offline-capture-motion
+
+Set-Location ..
+.\tools\verify-offline-capture-motion.ps1
+.\tools\verify-offline-capture-motion.ps1 -UploadPort COM11 -SerialTimeoutSeconds 300 -SerialLogPath tmp/offline-capture-motion-hardware-2026-07-15.log
+```
+
+The USB verifier compiles production and diagnostic images, validates structured `[OFFLINE_CAPTURE_MOTION_DIAG]` and ownership telemetry, and restores production firmware in `finally` after success, failure, or timeout.
+
+Automated acceptance on 2026-07-15 passes the focused capture regression, the complete foundation suite, the 100-game/6,758-ply soak, client build, zero-warning lint, and every existing firmware compile gate. The soak covered 1,160 captures, 34 castlings, 8 en-passant moves, 66 promotions, and all injected recoveries. Production remains exactly 1,042,543 bytes flash / 47,128 bytes static RAM. The final capture diagnostic compiles at 1,315,931 / 52,032 with 1,829,797 bytes of application-partition headroom.
+
+Physical USB acceptance passed on COM11. Bounded homing succeeded, physical `e2e4` was accepted, and the engine selected `d5e4` after a 3,000 ms depth-7 search across 45,824 nodes. The robot moved the rook through `e4 -> h4 -> I4`, verified I4 as occupied transactionally, moved the pawn `d5 -> e4`, matched exact occupancy, and committed FEN `k7/8/8/8/4p3/8/8/4K3 w - - 0 2`. The final report recorded the magnet LOW, a 5 ms maximum sensor gap, 1,501 search-time sensor scans, three search-time heartbeat attempts, 138,884 bytes free internal heap, an 86,004-byte largest internal block, 7,430,464 bytes free PSRAM, and 19,464 bytes task-stack headroom. Production firmware was restored automatically and the Serial evidence is retained locally at `tmp/offline-capture-motion-hardware-2026-07-15.log`.
+
+Two preliminary mechanically successful runs exposed diagnostic-only memory-lifetime issues: copied plan/state objects and the last runtime update remained alive until resource measurement. Narrowing those lifetimes raised free internal heap and the largest contiguous block above their accepted thresholds without changing production behavior. The final run also exposed a strict-mode verifier assumption that every execution event contained `graveyardStateAfter`; the parser now checks field presence and validates the saved passing telemetry correctly.
+
+Still deferred: generalized captures, staged capture choreography, en passant, castling, promotions, arbitrary Z/I transit, gameplay LEDs, persistent graveyard state, reconnect transfer, offline undo/redo, and production automatic offline ownership.

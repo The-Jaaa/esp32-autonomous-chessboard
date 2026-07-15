@@ -56,6 +56,9 @@ if (-not $SkipFirmware) {
     Invoke-Checked 'ESP32 guarded real quiet-motion diagnostic firmware builds' {
         & (Join-Path $PSScriptRoot 'verify-offline-quiet-motion.ps1')
     }
+    Invoke-Checked 'ESP32 guarded real capture-motion diagnostic firmware builds' {
+        & (Join-Path $PSScriptRoot 'verify-offline-capture-motion.ps1')
+    }
 }
 
 Write-Host "`nFoundation verification passed." -ForegroundColor Green
