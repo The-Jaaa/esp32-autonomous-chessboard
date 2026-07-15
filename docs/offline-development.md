@@ -439,3 +439,55 @@ Acceptance results on 2026-07-15:
 Hardware testing exposed and fixed two diagnostic-path issues before acceptance. A rapidly restarted idle server originally triggered `RecoveryRequired` even without an active game; it now uses the two-heartbeat idle adoption path while retaining the strict active-game identity guard. ESP32 `HTTPClient::setTimeout` did not cover TCP connection establishment, so `setConnectTimeout` is now configured separately and heartbeat latency is enforced by the verifier. The serial verifier also accepts safety fields repeated in the final summary because the one-time startup line can precede monitor attachment.
 
 Still deferred: actual offline coordinator input from sensors, offline engine turns, route/motion execution, setup calibration, ownership persistence, state-transfer endpoints, offline LEDs beyond diagnostic status, offline undo/redo, and production online/offline switching. The next isolated milestone will connect stable sensor snapshots to the offline coordinator in a read-only diagnostic mode that can produce engine and motion plans but cannot move pieces.
+
+## Embedded Read-Only Offline Runtime Diagnostics
+
+`offline_core/offline_runtime.h/.cpp` now provides a portable, single-turn runtime around the accepted ownership manager and turn coordinator. It defaults to the standard position, Human White, a three-second/depth-12 engine search, the current Z/I coordinates, and an empty robot graveyard. Its states are `Disabled`, `WaitingForSetup`, `HumanTurn`, `EngineSearchNeeded`, `PlanReady`, `SyncWarning`, `HandoffPending`, `GameOver`, and `Error`.
+
+The runtime arms only after exact standard occupancy remains stable for 500 ms. Stable sensor changes are passed to `OfflineTurnCoordinator`; duplicate snapshots are idempotent, incorrect setup reports missing/extra squares, cancelled lifts restore `HumanTurn`, and ambiguous occupancy enters recoverable synchronization warning. Search remains split-phase so the caller can continue scanning sensors. The result is submitted with the latest sensed occupancy, preventing a stale or disturbed board from producing a motion plan.
+
+This milestone deliberately stops at `PlanReady`. A legal human move is committed, but the selected opponent move remains a preview in `OpponentMoveReady`: no execution begins, no phase is verified, no graveyard slot becomes occupied, and the authoritative FEN, history, and side to move remain at the post-human position. The runtime freezes there and reports later sensor changes without advancing the game.
+
+Reconnect handling follows the accepted ownership boundary. A confirmed server reconnect before the human move produces `HandoffPending`; a reconnect after the human move does not discard or complete the staged offline turn. Actual FEN/history/graveyard transfer remains deferred.
+
+`ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS` is default-off and mutually exclusive with ownership/resource diagnostics. Its ESP32 build:
+
+- initializes the embedded chess tables in PSRAM;
+- scans and publishes complete debounced occupancy snapshots on core 1 through a synchronized mailbox;
+- runs ownership heartbeat handling on core 0 at priority 1;
+- runs the offline runtime and engine worker on core 0 at priority 0;
+- rejects command polling and every motion entry point, holds the magnet LOW continuously, and uses only existing diagnostic status colors;
+- emits `[OFFLINE_RUNTIME_DIAG]` JSON for setup differences, accepted human move, engine telemetry, candidate selection, route/graveyard metadata, every abstract motion phase, resource use, timing, and safety checks.
+
+Run the host regression directly with:
+
+```powershell
+Set-Location .\app
+npm run test:offline-runtime
+```
+
+Compile or perform the guarded USB test with:
+
+```powershell
+.\tools\verify-offline-runtime.ps1
+.\tools\verify-offline-runtime.ps1 -UploadPort COM11 -SerialTimeoutSeconds 360
+```
+
+The verifier always restores production firmware in `finally`, including timeout and failure paths. It checks the exact production baseline, diagnostic partition headroom, ownership transition to `OfflineIdle`, setup arming, the human move, search telemetry, complete plan output, non-commit invariants, resource thresholds, sensor/heartbeat progress, motor lock, and magnet safety.
+
+Acceptance results on 2026-07-15:
+
+- `npm run test:offline-runtime`, the complete `npm run test:foundation`, the 100-game/6,758-ply soak, client build, and zero-warning lint passed;
+- production remains byte-identical at 1,042,543 bytes flash and 47,128 bytes static RAM;
+- runtime diagnostics compile at 1,256,919 bytes flash and 51,536 bytes static RAM, leaving 1,888,809 bytes of application-partition headroom;
+- resource diagnostics, now including a read-only runtime smoke, compile at 1,260,343 bytes flash and 51,248 bytes static RAM;
+- ownership diagnostics compile at 1,037,847 bytes flash and 47,232 bytes static RAM;
+- the updated resource diagnostic passed on COM11 with the read-only runtime preview, 151,468 bytes free internal heap, a 139,252-byte largest internal block, 7,433,348 bytes free PSRAM, 22,208 bytes task-stack headroom, a 2 ms maximum sensor gap, and 49 successful HTTP polls;
+- the updated ownership diagnostic passed on COM11 with 2,408 sensor scans, an 11 ms maximum sensor gap, two successful heartbeats, and 44 ms maximum heartbeat latency;
+- the final guarded COM11 runtime run completed `BootProbe -> OfflineIdle -> WaitingForSetup -> HumanTurn -> EngineSearchNeeded -> PlanReady`: it accepted physical `g2g4`, searched for 3,000 ms to depth 3 across 18,688 nodes, selected `d7d5`, and emitted one complete quiet-transfer phase;
+- a transient sensed-occupancy mismatch after search entered `SyncWarning` as designed, then recovered to the same staged plan when the board stabilized without rerunning the engine;
+- the runtime hardware run recorded 1,501 sensor scans and three heartbeat attempts during search, a 2 ms maximum sensor gap, 133,340 bytes free internal heap, a 106,484-byte largest internal block, 7,430,464 bytes free PSRAM, and 26,704 bytes task-stack headroom;
+- motion-plan freeze, unchanged motors, magnet LOW, search deadline, memory, sensor, and heartbeat checks all passed; `opponentMoveCommitted` remained false;
+- production firmware was automatically restored after every hardware diagnostic.
+
+The milestone hardware gate is accepted. Still deferred: simulated or real phase execution, motors, gameplay LEDs, promotion prompts, persistent graveyard state, reconnect state transfer, offline undo/redo, and production ownership switching. The next isolated milestone is a motor-locked phase-execution adapter that consumes a staged plan and generates simulated phase reports without enabling physical movement.

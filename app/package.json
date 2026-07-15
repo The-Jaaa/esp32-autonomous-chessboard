@@ -20,7 +20,8 @@
     "test:offline-motion": "node scripts/offline-motion-regression.js",
     "test:offline-motion-execution": "node scripts/offline-motion-execution-regression.js",
     "test:offline-ownership": "node scripts/offline-ownership-regression.js",
-    "test:foundation": "npm run test:physical && npm run test:offline-rules && npm run test:offline-physical && npm run test:offline-engine && npm run test:offline-coordinator && npm run test:offline-integration && npm run test:offline-route && npm run test:offline-external-route && npm run test:offline-motion && npm run test:offline-motion-execution && npm run test:offline-ownership"
+    "test:offline-runtime": "node scripts/offline-runtime-regression.js",
+    "test:foundation": "npm run test:physical && npm run test:offline-rules && npm run test:offline-physical && npm run test:offline-engine && npm run test:offline-coordinator && npm run test:offline-integration && npm run test:offline-route && npm run test:offline-external-route && npm run test:offline-motion && npm run test:offline-motion-execution && npm run test:offline-ownership && npm run test:offline-runtime"
   },
   "dependencies": {
     "@google/genai": "*",

@@ -278,6 +278,57 @@ bool runCoordinatorPromotionSmoke() {
          confirmed.acceptedMove.has_value() && confirmed.acceptedMove->promotion == "q";
 }
 
+bool runReadOnlyRuntimeSmoke() {
+  offline::OfflineRuntimeConfig config;
+  config.setupStableMs = 500;
+  config.coordinator.humanColor = offline::HumanColor::White;
+  config.coordinator.searchLimits.timeLimitMs = 0;
+  config.coordinator.searchLimits.maxNodes = 2000;
+  config.coordinator.searchLimits.maxDepth = 12;
+  config.coordinator.externalSlots = offline::defaultExternalSlots();
+  offline::OfflineReadOnlyRuntime runtime(config);
+
+  offline::OfflineOwnershipManager ownership;
+  const offline::Occupancy setup = runtime.expectedSetupOccupancy();
+  const auto offlineDecision = ownership.tick(10000);
+  if (runtime.applyOwnershipDecision(10000, offlineDecision, setup).phase !=
+      offline::OfflineRuntimePhase::WaitingForSetup) {
+    return false;
+  }
+  if (runtime.applyOwnershipDecision(
+          10500, ownership.tick(10500, runtime.ownershipSafety(setup)), setup).phase !=
+      offline::OfflineRuntimePhase::HumanTurn) {
+    return false;
+  }
+
+  offline::Occupancy moved = setup;
+  moved[static_cast<std::size_t>(offline::squareToRawIndex("e2"))] = false;
+  if (runtime.processStableSnapshot(10501, moved).phase !=
+      offline::OfflineRuntimePhase::HumanTurn) {
+    return false;
+  }
+  moved[static_cast<std::size_t>(offline::squareToRawIndex("e4"))] = true;
+  const auto accepted = runtime.processStableSnapshot(10502, moved);
+  const auto request = runtime.pendingEngineRequest();
+  if (accepted.phase != offline::OfflineRuntimePhase::EngineSearchNeeded || !request) {
+    return false;
+  }
+
+  offline::SearchResult result;
+  result.bestMove = "e7e5";
+  result.score = 0;
+  result.completedDepth = 1;
+  result.nodes = 1;
+  result.stopReason = offline::SearchStopReason::DepthLimit;
+  result.rankedRootMoves.push_back({"e7e5", 0, 0});
+  const auto preview = runtime.submitEngineResult(request->generation, result, moved);
+  const auto transaction = runtime.coordinator().pendingMotionTransaction();
+  return preview.phase == offline::OfflineRuntimePhase::PlanReady &&
+         transaction.has_value() && transaction->currentPhase == 0 &&
+         runtime.coordinator().phase() == offline::OfflineTurnPhase::OpponentMoveReady &&
+         runtime.coordinator().physical().game().fen() == request->fen;
+}
+
 offline::SearchResult runTimedSearch(
     const offline::OfflineEngine& engine,
     const char* name,
@@ -379,6 +430,7 @@ void diagnosticTask(void*) {
   emitSearch("node-2000-b", deterministicB, deterministic);
   emitCheck("coordinator-transaction", runCoordinatorSmoke(deterministicA));
   emitCheck("coordinator-promotion", runCoordinatorPromotionSmoke());
+  emitCheck("read-only-runtime-preview", runReadOnlyRuntimeSmoke());
 
   emitPhase("timed-searches");
   runTimedSearch(engine, "opening-250ms", kStartFen, 250);

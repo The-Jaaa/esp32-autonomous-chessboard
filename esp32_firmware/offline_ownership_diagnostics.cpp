@@ -1,6 +1,6 @@
 #include "offline_ownership_diagnostics.h"
 
-#if ENABLE_OFFLINE_OWNERSHIP_DIAGNOSTICS
+#if ENABLE_OFFLINE_OWNERSHIP_DIAGNOSTICS || ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS
 
 #include <OfflineCore.h>
 
@@ -13,6 +13,10 @@
 #include <cstdint>
 #include <string>
 
+#if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS
+#include "offline_runtime_diagnostics.h"
+#endif
+
 extern const char* SERVER_BASE_URL;
 extern Adafruit_NeoPixel strip;
 extern void setSquareColor(int squareNumber, uint8_t r, uint8_t g, uint8_t b);
@@ -21,6 +25,8 @@ extern void clearBoardLeds();
 volatile uint32_t ownershipDiagnosticSensorScanCount = 0;
 volatile uint32_t ownershipDiagnosticSensorMaxGapMs = 0;
 volatile uint32_t ownershipDiagnosticSuccessfulHeartbeats = 0;
+volatile uint32_t ownershipDiagnosticHeartbeatAttempts = 0;
+volatile uint32_t ownershipDiagnosticHeartbeatMaxElapsedMs = 0;
 
 namespace {
 
@@ -36,11 +42,31 @@ bool startEmitted = false;
 bool summaryEmitted = false;
 bool overallPass = true;
 uint32_t heartbeatMaxElapsedMs = 0;
+portMUX_TYPE decisionMux = portMUX_INITIALIZER_UNLOCKED;
+OfflineOwnershipDiagnosticSnapshot latestDecision;
 
 offline::OwnershipSafety idleSafety() {
   offline::OwnershipSafety safety;
   safety.boardStable = true;
   return safety;
+}
+
+offline::OwnershipSafety diagnosticSafety() {
+#if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS
+  return offlineRuntimeOwnershipSafety();
+#else
+  return idleSafety();
+#endif
+}
+
+void storeDecision(const offline::OwnershipDecision& decision) {
+  portENTER_CRITICAL(&decisionMux);
+  latestDecision.state = decision.state;
+  latestDecision.event = decision.event;
+  latestDecision.allowOfflineControl = decision.allowOfflineControl;
+  latestDecision.handoffRequired = decision.handoffRequired;
+  latestDecision.valid = true;
+  portEXIT_CRITICAL(&decisionMux);
 }
 
 void emitCheck(const char* name, bool pass) {
@@ -55,6 +81,7 @@ void publishDecision(
     offline::OwnershipState previous,
     const offline::OwnershipDecision& decision,
     uint32_t nowMs) {
+  storeDecision(decision);
   if (decision.state != previous) {
     displayedState = static_cast<int>(decision.state);
     displayedStateSinceMs = nowMs;
@@ -166,6 +193,7 @@ void setCorners(uint8_t red, uint8_t green, uint8_t blue) {
 
 void beginOfflineOwnershipDiagnostics() {
   liveManager.reset(millis());
+  storeDecision(liveManager.tick(millis(), diagnosticSafety()));
   displayedState = static_cast<int>(offline::OwnershipState::BootProbe);
   displayedStateSinceMs = millis();
   diagnosticsStarted = true;
@@ -184,18 +212,21 @@ void runOfflineOwnershipNetworkStep(uint32_t nowMs) {
   }
 
   const offline::OwnershipState beforeTick = liveManager.state();
-  const auto tick = liveManager.tick(nowMs, idleSafety());
+  const auto tick = liveManager.tick(nowMs, diagnosticSafety());
   publishDecision(beforeTick, tick, nowMs);
 
   if (liveManager.heartbeatDue(nowMs)) {
+    ownershipDiagnosticHeartbeatAttempts++;
     const uint32_t heartbeatStartedAtMs = millis();
     const offline::ServerHeartbeat heartbeat = probeServer();
     const uint32_t heartbeatElapsedMs = millis() - heartbeatStartedAtMs;
     heartbeatMaxElapsedMs =
         heartbeatElapsedMs > heartbeatMaxElapsedMs ? heartbeatElapsedMs
                                                    : heartbeatMaxElapsedMs;
+    ownershipDiagnosticHeartbeatMaxElapsedMs = heartbeatMaxElapsedMs;
     const offline::OwnershipState beforeHeartbeat = liveManager.state();
-    const auto observed = liveManager.observeHeartbeat(nowMs, heartbeat, idleSafety());
+    const auto observed =
+        liveManager.observeHeartbeat(nowMs, heartbeat, diagnosticSafety());
     if (heartbeat.success) ownershipDiagnosticSuccessfulHeartbeats++;
     publishDecision(beforeHeartbeat, observed, nowMs);
     esp_rom_printf(
@@ -230,6 +261,14 @@ void runOfflineOwnershipNetworkStep(uint32_t nowMs) {
         xPortGetCoreID(),
         static_cast<unsigned>(uxTaskPriorityGet(nullptr)));
   }
+}
+
+bool copyOfflineOwnershipDiagnosticSnapshot(
+    OfflineOwnershipDiagnosticSnapshot& snapshot) {
+  portENTER_CRITICAL(&decisionMux);
+  snapshot = latestDecision;
+  portEXIT_CRITICAL(&decisionMux);
+  return snapshot.valid;
 }
 
 void updateOfflineOwnershipDiagnosticLeds(uint32_t nowMs) {

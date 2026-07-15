@@ -47,6 +47,9 @@ if (-not $SkipFirmware) {
     Invoke-Checked 'ESP32 offline ownership diagnostic firmware builds' {
         & (Join-Path $PSScriptRoot 'verify-offline-ownership.ps1')
     }
+    Invoke-Checked 'ESP32 read-only offline runtime diagnostic firmware builds' {
+        & (Join-Path $PSScriptRoot 'verify-offline-runtime.ps1')
+    }
 }
 
 Write-Host "`nFoundation verification passed." -ForegroundColor Green
