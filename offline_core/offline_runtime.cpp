@@ -11,6 +11,9 @@ std::uint32_t elapsedSince(std::uint32_t nowMs, std::uint32_t thenMs) {
 
 bool isFrozenPhase(OfflineRuntimePhase phase) {
   return phase == OfflineRuntimePhase::PlanReady ||
+         phase == OfflineRuntimePhase::OpponentExecuting ||
+         phase == OfflineRuntimePhase::OpponentPromotionPending ||
+         phase == OfflineRuntimePhase::ExecutionComplete ||
          phase == OfflineRuntimePhase::HandoffPending ||
          phase == OfflineRuntimePhase::GameOver ||
          phase == OfflineRuntimePhase::Error;
@@ -334,6 +337,9 @@ const char* offlineRuntimePhaseName(OfflineRuntimePhase phase) {
     case OfflineRuntimePhase::HumanTurn: return "human_turn";
     case OfflineRuntimePhase::EngineSearchNeeded: return "engine_search_needed";
     case OfflineRuntimePhase::PlanReady: return "plan_ready";
+    case OfflineRuntimePhase::OpponentExecuting: return "opponent_executing";
+    case OfflineRuntimePhase::OpponentPromotionPending: return "opponent_promotion_pending";
+    case OfflineRuntimePhase::ExecutionComplete: return "execution_complete";
     case OfflineRuntimePhase::SyncWarning: return "sync_warning";
     case OfflineRuntimePhase::HandoffPending: return "handoff_pending";
     case OfflineRuntimePhase::GameOver: return "game_over";

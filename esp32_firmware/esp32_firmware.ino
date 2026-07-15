@@ -139,7 +139,7 @@ void applyCaptureStart(JsonObject step);
 void runLedRunway(JsonObject step);
 bool enqueueMotionCommand(const String& commandJson);
 
-#if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS
+#if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS
 bool offlineRuntimeMagnetIsLow() {
   return digitalRead(MAGNET_PIN) == LOW;
 }
@@ -191,10 +191,11 @@ void loop() {
   }
 
   scanSensors();
-#if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS
+#if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS
   publishOfflineRuntimeStableSnapshot(stableOccupancy, millis());
 #endif
-#if ENABLE_OFFLINE_OWNERSHIP_DIAGNOSTICS || ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS
+#if ENABLE_OFFLINE_OWNERSHIP_DIAGNOSTICS || ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || \
+    ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS
   updateOfflineOwnershipDiagnosticLeds(millis());
 #else
   updateLedAnimation();
@@ -233,7 +234,8 @@ void networkTask(void* parameter) {
       WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     }
 
-#if ENABLE_OFFLINE_OWNERSHIP_DIAGNOSTICS || ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS
+#if ENABLE_OFFLINE_OWNERSHIP_DIAGNOSTICS || ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || \
+    ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS
     runOfflineOwnershipNetworkStep(now);
     vTaskDelay(pdMS_TO_TICKS(25));
     continue;
@@ -282,7 +284,7 @@ void scanSensors() {
   ownershipDiagnosticSensorScanCount++;
 #endif
 
-#if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS
+#if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS
   static uint32_t previousRuntimeScanMs = 0;
   const uint32_t runtimeScanStartedMs = millis();
   if (previousRuntimeScanMs != 0) {

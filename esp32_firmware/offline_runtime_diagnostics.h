@@ -4,7 +4,7 @@
 
 #include <stdint.h>
 
-#if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS
+#if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS
 
 #include <Arduino.h>
 #include <OfflineCore.h>

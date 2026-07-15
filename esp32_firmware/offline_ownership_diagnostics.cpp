@@ -1,6 +1,7 @@
 #include "offline_ownership_diagnostics.h"
 
-#if ENABLE_OFFLINE_OWNERSHIP_DIAGNOSTICS || ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS
+#if ENABLE_OFFLINE_OWNERSHIP_DIAGNOSTICS || ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || \
+    ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS
 
 #include <OfflineCore.h>
 
@@ -13,7 +14,7 @@
 #include <cstdint>
 #include <string>
 
-#if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS
+#if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS
 #include "offline_runtime_diagnostics.h"
 #endif
 
@@ -52,7 +53,7 @@ offline::OwnershipSafety idleSafety() {
 }
 
 offline::OwnershipSafety diagnosticSafety() {
-#if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS
+#if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS
   return offlineRuntimeOwnershipSafety();
 #else
   return idleSafety();

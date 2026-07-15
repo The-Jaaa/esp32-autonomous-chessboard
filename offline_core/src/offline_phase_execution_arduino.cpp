@@ -1,0 +1,5 @@
+#include "EmbeddedConfig.h"
+
+#if ENABLE_OFFLINE_EMBEDDED_DIAGNOSTICS || ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS
+#include "../offline_phase_execution.cpp"
+#endif

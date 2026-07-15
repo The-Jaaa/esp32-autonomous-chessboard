@@ -9,12 +9,17 @@
 
 namespace offline {
 
+class OfflinePhaseExecutionAdapter;
+
 enum class OfflineRuntimePhase {
   Disabled,
   WaitingForSetup,
   HumanTurn,
   EngineSearchNeeded,
   PlanReady,
+  OpponentExecuting,
+  OpponentPromotionPending,
+  ExecutionComplete,
   SyncWarning,
   HandoffPending,
   GameOver,
@@ -89,6 +94,8 @@ class OfflineReadOnlyRuntime {
   }
 
  private:
+  friend class OfflinePhaseExecutionAdapter;
+
   bool resetCoordinator();
   OfflineRuntimeUpdate processSetupSnapshot(
       std::uint32_t nowMs, const Occupancy& occupancy);

@@ -1,6 +1,6 @@
 #include "offline_runtime_diagnostics.h"
 
-#if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS
+#if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS
 
 #include "offline_ownership_diagnostics.h"
 
@@ -51,10 +51,17 @@ std::uint32_t lastSetupLogMs = 0;
 offline::OfflineRuntimePhase lastLoggedPhase = offline::OfflineRuntimePhase::Disabled;
 offline::OfflineRuntimeEvent lastLoggedEvent = offline::OfflineRuntimeEvent::None;
 
+constexpr bool kPhaseExecutionDiagnostic =
+    ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS != 0;
+
+const char* diagnosticPrefix() {
+  return kPhaseExecutionDiagnostic ? "OFFLINE_PHASE_DIAG" : "OFFLINE_RUNTIME_DIAG";
+}
+
 void emitDocument(JsonDocument& document) {
   String payload;
   serializeJson(document, payload);
-  esp_rom_printf("[OFFLINE_RUNTIME_DIAG] %s\n", payload.c_str());
+  esp_rom_printf("[%s] %s\n", diagnosticPrefix(), payload.c_str());
 }
 
 void emitCheck(const char* name, bool pass) {
@@ -271,8 +278,224 @@ bool emitMotionPlan(const offline::OfflineReadOnlyRuntime& runtime) {
          transaction->currentPhase == 0 && noneVerified;
 }
 
+#if ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS
+
+struct PhaseExecutionDiagnosticResult {
+  bool committed = false;
+  bool firstPhaseRetryObserved = false;
+  bool orderedPhases = true;
+  bool realBoardUnchanged = false;
+  std::size_t verifiedPhaseCount = 0;
+  std::string committedFen;
+  std::string actualOccupancy;
+  std::string simulatedOccupancy;
+};
+
+void emitExecutionUpdate(const offline::OfflinePhaseExecutionUpdate& update) {
+  DynamicJsonDocument document(4096);
+  document["type"] = "execution";
+  document["state"] = offline::offlinePhaseExecutionStateName(update.state);
+  document["event"] = offline::offlinePhaseExecutionEventName(update.event);
+  document["message"] = update.message.c_str();
+  if (update.request) {
+    JsonObject token = document.createNestedObject("token");
+    token["transactionId"] = update.request->token.transactionId;
+    token["phaseIndex"] = update.request->token.phaseIndex;
+    token["attempt"] = update.request->token.attempt;
+    document["phaseKind"] = offline::motionPhaseKindName(update.request->phase.kind);
+    document["from"] = update.request->phase.from.c_str();
+    document["to"] = update.request->phase.to.c_str();
+    document["expectedBefore"] = occupancyHex(update.request->phase.expectedBefore).c_str();
+    document["expectedAfter"] = occupancyHex(update.request->phase.expectedAfter).c_str();
+    document["graveyardState"] =
+        offline::graveyardSlotStateName(update.request->graveyardState);
+    if (!update.request->graveyardSlotKey.empty()) {
+      document["graveyardSlot"] = update.request->graveyardSlotKey.c_str();
+    }
+    if (update.request->phase.transfer) {
+      document["routeMode"] =
+          offline::externalRouteModeName(update.request->phase.transfer->mode);
+      document["routeCost"] = update.request->phase.transfer->routeCost;
+    } else if (update.request->phase.graveyard) {
+      document["routeMode"] =
+          offline::externalRouteModeName(update.request->phase.graveyard->mode);
+      document["routeCost"] = update.request->phase.graveyard->routeCost;
+    }
+  }
+  if (update.coordinatorResult && update.coordinatorResult->motionTransaction) {
+    document["graveyardStateAfter"] = offline::graveyardSlotStateName(
+        update.coordinatorResult->motionTransaction->graveyardState);
+    document["verifiedPhaseCount"] = std::count(
+        update.coordinatorResult->motionTransaction->verifiedPhases.begin(),
+        update.coordinatorResult->motionTransaction->verifiedPhases.end(),
+        true);
+  }
+  if (!update.differenceFromBefore.empty()) {
+    addDifference(
+        document.createNestedObject("differenceFromBefore"),
+        update.differenceFromBefore);
+  }
+  if (!update.differenceFromExpected.empty()) {
+    addDifference(
+        document.createNestedObject("differenceFromExpected"),
+        update.differenceFromExpected);
+  }
+  emitDocument(document);
+}
+
+void emitPhaseReport(
+    const offline::OfflinePhaseExecutionReport& report,
+    const char* purpose) {
+  StaticJsonDocument<512> document;
+  document["type"] = "phase-report";
+  document["purpose"] = purpose;
+  document["transactionId"] = report.token.transactionId;
+  document["phaseIndex"] = report.token.phaseIndex;
+  document["attempt"] = report.token.attempt;
+  document["success"] = report.success;
+  document["occupancy"] = occupancyHex(report.occupancy).c_str();
+  emitDocument(document);
+}
+
+PhaseExecutionDiagnosticResult runSimulatedPhaseExecution(
+    offline::OfflineReadOnlyRuntime& runtime,
+    const offline::Occupancy& postHumanOccupancy,
+    const std::string& previewAfterFen) {
+  PhaseExecutionDiagnosticResult diagnostic;
+  diagnostic.simulatedOccupancy = occupancyHex(postHumanOccupancy);
+  offline::OfflinePhaseExecutionAdapter adapter(runtime);
+  auto update = adapter.begin();
+  emitExecutionUpdate(update);
+  if (update.state != offline::OfflinePhaseExecutionState::PhaseReady ||
+      !update.request) {
+    return diagnostic;
+  }
+
+  std::size_t expectedPhaseIndex = 0;
+  bool injectedFailure = false;
+  offline::OfflinePhaseExecutionToken failedToken;
+  offline::Occupancy simulatedOccupancy = postHumanOccupancy;
+
+  for (std::size_t guard = 0; guard < 64; ++guard) {
+    if (adapter.state() == offline::OfflinePhaseExecutionState::PhaseReady ||
+        adapter.state() == offline::OfflinePhaseExecutionState::RetryReady) {
+      update = adapter.takeCurrentRequest();
+      emitExecutionUpdate(update);
+      if (update.state != offline::OfflinePhaseExecutionState::AwaitingReport ||
+          !update.request) {
+        diagnostic.orderedPhases = false;
+        break;
+      }
+
+      const auto request = *update.request;
+      if (request.token.phaseIndex != expectedPhaseIndex) {
+        diagnostic.orderedPhases = false;
+        break;
+      }
+
+      offline::OfflinePhaseExecutionReport report;
+      report.token = request.token;
+      if (!injectedFailure) {
+        injectedFailure = true;
+        failedToken = request.token;
+        report.success = false;
+        report.occupancy = request.phase.expectedBefore;
+        emitPhaseReport(report, "controlled-unchanged-failure");
+        update = adapter.submitReport(report);
+        emitExecutionUpdate(update);
+        diagnostic.firstPhaseRetryObserved =
+            update.state == offline::OfflinePhaseExecutionState::RetryReady &&
+            update.request &&
+            update.request->token.transactionId == failedToken.transactionId &&
+            update.request->token.phaseIndex == failedToken.phaseIndex &&
+            update.request->token.attempt == failedToken.attempt + 1;
+        if (!diagnostic.firstPhaseRetryObserved) break;
+        continue;
+      }
+
+      if (request.token.phaseIndex == failedToken.phaseIndex &&
+          request.token.attempt <= failedToken.attempt) {
+        diagnostic.orderedPhases = false;
+        break;
+      }
+      report.success = true;
+      report.occupancy = request.phase.expectedAfter;
+      simulatedOccupancy = report.occupancy;
+      emitPhaseReport(report, "simulated-success");
+      update = adapter.submitReport(report);
+      emitExecutionUpdate(update);
+      diagnostic.verifiedPhaseCount++;
+      expectedPhaseIndex++;
+      continue;
+    }
+
+    if (adapter.state() == offline::OfflinePhaseExecutionState::PromotionPending) {
+      const auto state = runtime.coordinator().currentState();
+      if (!state.opponentPlan || state.opponentPlan->move.promotion.empty()) {
+        diagnostic.orderedPhases = false;
+        break;
+      }
+      const offline::Occupancy expected = state.opponentPlan->expectedOccupancy;
+      offline::Occupancy replacementInProgress = expected;
+      const int targetIndex = offline::squareToRawIndex(state.opponentPlan->move.to);
+      if (targetIndex < 0) {
+        diagnostic.orderedPhases = false;
+        break;
+      }
+      replacementInProgress[static_cast<std::size_t>(targetIndex)] = false;
+      update = adapter.processPromotionSnapshot(replacementInProgress);
+      emitExecutionUpdate(update);
+      update = adapter.processPromotionSnapshot(expected);
+      emitExecutionUpdate(update);
+      update = adapter.confirmPromotion(
+          state.opponentPlan->move.promotion.front(), expected);
+      emitExecutionUpdate(update);
+      simulatedOccupancy = expected;
+      continue;
+    }
+
+    if (adapter.state() == offline::OfflinePhaseExecutionState::Complete ||
+        adapter.state() == offline::OfflinePhaseExecutionState::GameOver) {
+      diagnostic.committed =
+          runtime.coordinator().physical().game().fen() == previewAfterFen;
+      diagnostic.committedFen = runtime.coordinator().physical().game().fen();
+      diagnostic.simulatedOccupancy = occupancyHex(simulatedOccupancy);
+      break;
+    }
+
+    diagnostic.orderedPhases = false;
+    break;
+  }
+
+  offline::Occupancy actualOccupancy;
+  std::uint32_t revision = 0;
+  std::uint32_t changedAtMs = 0;
+  if (copySnapshot(actualOccupancy, revision, changedAtMs)) {
+    (void)revision;
+    (void)changedAtMs;
+    diagnostic.realBoardUnchanged = actualOccupancy == postHumanOccupancy;
+    diagnostic.actualOccupancy = occupancyHex(actualOccupancy);
+  }
+
+  DynamicJsonDocument comparison(1024);
+  comparison["type"] = "board-comparison";
+  comparison["realBoardUnchanged"] = diagnostic.realBoardUnchanged;
+  comparison["actualOccupancy"] = diagnostic.actualOccupancy.c_str();
+  comparison["simulatedOccupancy"] = diagnostic.simulatedOccupancy.c_str();
+  comparison["committedFen"] = diagnostic.committedFen.c_str();
+  comparison["previewAfterFen"] = previewAfterFen.c_str();
+  emitDocument(comparison);
+  return diagnostic;
+}
+
+#endif
+
 void emitSummary(
     bool planFrozen,
+    bool opponentMoveCommitted,
+    bool retryObserved,
+    bool orderedPhases,
+    bool realBoardUnchanged,
     std::uint32_t searchSensorScans,
     std::uint32_t searchHeartbeatAttempts,
     std::uint32_t searchElapsedMs,
@@ -288,7 +511,14 @@ void emitSummary(
                                motorB.currentPosition() == initialMotorB;
   const bool magnetLow = offlineRuntimeMagnetIsLow();
 
-  emitCheck("motion-plan-frozen", planFrozen);
+  if (kPhaseExecutionDiagnostic) {
+    emitCheck("controlled-first-phase-retry", retryObserved);
+    emitCheck("ordered-phase-completion", orderedPhases);
+    emitCheck("opponent-move-committed", opponentMoveCommitted);
+    emitCheck("real-board-unchanged", realBoardUnchanged);
+  } else {
+    emitCheck("motion-plan-frozen", planFrozen);
+  }
   emitCheck("motors-unchanged", motorsUnchanged);
   emitCheck("magnet-low", magnetLow);
   emitCheck("internal-heap-threshold", internalFree >= kMinimumInternalHeapBytes);
@@ -310,7 +540,12 @@ void emitSummary(
   document["pass"] = overallPass;
   document["motorsLocked"] = true;
   document["magnetLow"] = magnetLow;
-  document["opponentMoveCommitted"] = false;
+  document["opponentMoveCommitted"] = opponentMoveCommitted;
+  document["planFrozen"] = planFrozen;
+  document["firstPhaseRetryObserved"] = retryObserved;
+  document["orderedPhases"] = orderedPhases;
+  document["realBoardUnchanged"] = realBoardUnchanged;
+  document["commandConsumptionBlocked"] = true;
   document["sensorScans"] = offlineRuntimeSensorScanCount;
   document["sensorMaxGapMs"] = offlineRuntimeSensorMaxGapMs;
   document["searchSensorScans"] = searchSensorScans;
@@ -350,7 +585,8 @@ void runtimeTask(void*) {
 
   emitCheck("psram-found", psramFound());
   if (!psramFound()) {
-    emitSummary(false, 0, 0, 0, initialMotorA, initialMotorB);
+    emitSummary(
+        false, false, false, false, false, 0, 0, 0, initialMotorA, initialMotorB);
     vTaskDelete(nullptr);
     return;
   }
@@ -364,7 +600,8 @@ void runtimeTask(void*) {
                            esp_ptr_external_ram(chess::movegen::embeddedBetweenTable());
   emitCheck("psram-tables-ready", tablesReady);
   if (!tablesReady) {
-    emitSummary(false, 0, 0, 0, initialMotorA, initialMotorB);
+    emitSummary(
+        false, false, false, false, false, 0, 0, 0, initialMotorA, initialMotorB);
     vTaskDelete(nullptr);
     return;
   }
@@ -380,7 +617,8 @@ void runtimeTask(void*) {
       new (std::nothrow) offline::OfflineReadOnlyRuntime(config));
   emitCheck("runtime-allocation", runtime != nullptr);
   if (!runtime) {
-    emitSummary(false, 0, 0, 0, initialMotorA, initialMotorB);
+    emitSummary(
+        false, false, false, false, false, 0, 0, 0, initialMotorA, initialMotorB);
     vTaskDelete(nullptr);
     return;
   }
@@ -441,13 +679,38 @@ void runtimeTask(void*) {
 
     if (!summaryEmitted && runtime->phase() == offline::OfflineRuntimePhase::PlanReady) {
       const bool planFrozen = emitMotionPlan(*runtime);
+#if ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS
+      const auto state = runtime->coordinator().currentState();
+      const auto transaction = runtime->coordinator().pendingMotionTransaction();
+      PhaseExecutionDiagnosticResult execution;
+      if (planFrozen && state.opponentPlan && transaction) {
+        execution = runSimulatedPhaseExecution(
+            *runtime, occupancy, state.opponentPlan->afterFen);
+      }
       emitSummary(
-          planFrozen,
+          false,
+          execution.committed,
+          execution.firstPhaseRetryObserved,
+          execution.orderedPhases,
+          execution.realBoardUnchanged,
           searchSensorScans,
           searchHeartbeatAttempts,
           searchElapsedMs,
           initialMotorA,
           initialMotorB);
+#else
+      emitSummary(
+          planFrozen,
+          false,
+          false,
+          true,
+          true,
+          searchSensorScans,
+          searchHeartbeatAttempts,
+          searchElapsedMs,
+          initialMotorA,
+          initialMotorB);
+#endif
       summaryEmitted = true;
     }
 
@@ -469,8 +732,9 @@ void beginOfflineRuntimeDiagnostics() {
       0);
   if (created != pdPASS) {
     esp_rom_printf(
-        "[OFFLINE_RUNTIME_DIAG] {\"type\":\"summary\",\"pass\":false,"
-        "\"error\":\"task-create-failed\"}\n");
+        "[%s] {\"type\":\"summary\",\"pass\":false,"
+        "\"error\":\"task-create-failed\"}\n",
+        diagnosticPrefix());
   }
 }
 

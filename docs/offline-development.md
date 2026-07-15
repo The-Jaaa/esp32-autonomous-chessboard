@@ -491,3 +491,65 @@ Acceptance results on 2026-07-15:
 - production firmware was automatically restored after every hardware diagnostic.
 
 The milestone hardware gate is accepted. Still deferred: simulated or real phase execution, motors, gameplay LEDs, promotion prompts, persistent graveyard state, reconnect state transfer, offline undo/redo, and production ownership switching. The next isolated milestone is a motor-locked phase-execution adapter that consumes a staged plan and generates simulated phase reports without enabling physical movement.
+
+## Motor-Locked Offline Phase Execution Adapter
+
+`offline_core/offline_phase_execution.h/.cpp` now provides the portable boundary between a staged `OfflineReadOnlyRuntime` plan and a future hardware executor. The adapter does not contain motor logic. It exposes one current phase at a time and wraps each request in a token containing the motion transaction ID, phase index, and monotonically increasing attempt number.
+
+The execution sequence is explicit:
+
+1. `begin()` asks the coordinator to start the already staged transaction.
+2. `takeCurrentRequest()` marks exactly one phase request as awaiting a report.
+3. `submitReport()` accepts only the exact current token and reported occupancy.
+4. A successful exact after-checkpoint advances to the next phase; an unchanged failed phase becomes retryable with a new attempt token.
+5. Ambiguous occupancy enters recovery. The caller can report a restored checkpoint, explicitly release a restored captured piece from its unsensored graveyard slot, or complete pending promotion replacement.
+6. The coordinator commits FEN/history only after every phase and any required promotion identity are verified.
+
+Stale transaction, phase, and attempt tokens are rejected. Accepted duplicates are idempotent, reports cannot skip or reorder phases, and reaching an after-checkpoint without an explicit success report does not advance state. Graveyard ownership remains coordinator-controlled: a capture slot starts `Pending`, becomes `Occupied` after verified captured removal, and needs explicit release confirmation if the captured piece is restored during recovery. Q/R/B/N promotions remain pending until exact occupancy and the selected identity both match.
+
+`OfflineReadOnlyRuntime` grants narrow friend access only to this adapter. Its existing public coordinator accessor remains const, and normal read-only `PlanReady` behavior is unchanged unless a caller explicitly constructs and starts the adapter.
+
+Run the host regression directly with:
+
+```powershell
+Set-Location .\app
+npm run test:offline-phase-execution
+```
+
+The host suite covers quiet phases, controlled unchanged failure/retry, attempt-token freshness, stale/duplicate/out-of-order reports, recovery through before and after checkpoints, captures and graveyard transitions, restored-slot release, en passant, all castling directions, Q/R/B/N promotion replacement, state immutability before final verification, game-over commit, and deterministic repetition. It is included in `npm run test:foundation`.
+
+`ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS` defaults to `0` and is mutually exclusive with resource, ownership, and read-only runtime diagnostics. The enabled ESP32 build reuses the accepted setup, sensor mailbox, heartbeat, PSRAM chess tables, engine search, and route-plan generation. After `PlanReady`, it:
+
+- reports the first phase as a controlled failure with exact before-occupancy;
+- verifies the same transaction/phase is reissued with an incremented attempt;
+- reports every phase successful with synthetic expected occupancy;
+- simulates matching promotion replacement when required;
+- verifies the opponent move commits internally;
+- compares the untouched real sensor snapshot with the post-human board and freezes.
+
+Synthetic checkpoints are never written to the sensor mailbox or ownership-safety input. Command polling, homing, queueing, and motion execution remain blocked, while the magnet is continuously forced LOW. `[OFFLINE_PHASE_DIAG]` JSON includes plan and route metadata, request tokens, reports, retries, graveyard state, promotion events, committed FEN, actual-versus-simulated occupancy, timing, resources, and safety checks.
+
+Compile or perform the guarded USB diagnostic with:
+
+```powershell
+.\tools\verify-offline-phase-execution.ps1
+.\tools\verify-offline-phase-execution.ps1 -UploadPort COM11 -SerialTimeoutSeconds 360
+```
+
+The verifier restores production firmware in `finally`. It requires the controlled retry, ordered phase completion, internal commit, unchanged physical board, unchanged motors, magnet LOW, blocked command consumption, search within 3,100 ms, sensor gaps below 25 ms, heartbeat progress during search, and all accepted memory thresholds.
+
+Automated acceptance results on 2026-07-15:
+
+- the dedicated adapter suite, complete foundation suite, and 100-game/6,758-ply soak passed;
+- the soak covered 1,160 captures, 34 castlings, 8 en-passant moves, 66 promotions, and all injected recoveries;
+- client build and zero-warning lint passed;
+- production remains exactly 1,042,543 bytes flash and 47,128 bytes static RAM;
+- the phase diagnostic compiles at 1,286,427 bytes flash and 51,536 bytes static RAM, leaving 1,859,301 bytes of application headroom;
+- the read-only runtime diagnostic compiles at 1,257,315 / 51,536, ownership at 1,037,847 / 47,232, and resource diagnostics with an adapter smoke at 1,282,727 / 51,248;
+- `tools/verify-foundation.ps1` passes with every diagnostic compile gate.
+
+The guarded COM11 hardware run is accepted. It detected physical `g1f3`, searched for 3,011 ms to depth 4 across 19,392 nodes, and selected quiet reply `d7d5`. Phase 0 attempt 1 was deliberately reported failed at unchanged occupancy; the adapter issued attempt 2 for the same transaction and phase, accepted its simulated success, and committed the exact previewed FEN internally. The real board remained at the post-human occupancy. Motors were unchanged, the magnet stayed LOW, command consumption remained blocked, and production firmware was restored automatically.
+
+Hardware metrics were a 2 ms maximum sensor gap, 1,506 sensor scans and three heartbeat attempts during search, 131,136 bytes free internal heap, a 106,484-byte largest internal block, 7,430,464 bytes free PSRAM, and 17,528 bytes task-stack headroom. Every telemetry, timing, memory, retry, ordering, isolation, and safety assertion passed.
+
+Real motor primitives, gameplay LEDs, persistent graveyard state, reconnect transfer, offline undo/redo, and production automatic switching remain deferred. The next guarded milestone should translate one accepted quiet phase into real travel/pickup/drag/drop primitives before enabling captures or multi-phase physical motion.

@@ -3,11 +3,12 @@
 #include "EmbeddedConfig.h"
 
 #if ENABLE_OFFLINE_EMBEDDED_DIAGNOSTICS || ENABLE_OFFLINE_OWNERSHIP_DIAGNOSTICS || \
-    ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS
+    ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS
 #include "../offline_ownership.h"
 #endif
 
-#if ENABLE_OFFLINE_EMBEDDED_DIAGNOSTICS || ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS
+#if ENABLE_OFFLINE_EMBEDDED_DIAGNOSTICS || ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || \
+    ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS
 #include "../offline_coordinator.h"
 #include "../offline_engine.h"
 #include "../offline_external_route.h"
@@ -16,4 +17,5 @@
 #include "../offline_physical.h"
 #include "../offline_route.h"
 #include "../offline_runtime.h"
+#include "../offline_phase_execution.h"
 #endif

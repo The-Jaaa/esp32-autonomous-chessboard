@@ -329,6 +329,73 @@ bool runReadOnlyRuntimeSmoke() {
          runtime.coordinator().physical().game().fen() == request->fen;
 }
 
+bool runPhaseExecutionAdapterSmoke() {
+  offline::OfflineRuntimeConfig config;
+  config.setupStableMs = 0;
+  config.coordinator.humanColor = offline::HumanColor::White;
+  config.coordinator.externalSlots = offline::defaultExternalSlots();
+  offline::OfflineReadOnlyRuntime runtime(config);
+
+  offline::OfflineOwnershipManager ownership;
+  const offline::Occupancy setup = runtime.expectedSetupOccupancy();
+  if (runtime.applyOwnershipDecision(10000, ownership.tick(10000), setup).phase !=
+      offline::OfflineRuntimePhase::HumanTurn) {
+    return false;
+  }
+
+  offline::Occupancy moved = setup;
+  moved[static_cast<std::size_t>(offline::squareToRawIndex("e2"))] = false;
+  runtime.processStableSnapshot(10001, moved);
+  moved[static_cast<std::size_t>(offline::squareToRawIndex("e4"))] = true;
+  const auto accepted = runtime.processStableSnapshot(10002, moved);
+  const auto request = runtime.pendingEngineRequest();
+  if (accepted.phase != offline::OfflineRuntimePhase::EngineSearchNeeded || !request) {
+    return false;
+  }
+
+  offline::SearchResult result;
+  result.bestMove = "e7e5";
+  result.score = 0;
+  result.completedDepth = 1;
+  result.nodes = 1;
+  result.stopReason = offline::SearchStopReason::DepthLimit;
+  result.rankedRootMoves.push_back({"e7e5", 0, 0});
+  const auto preview = runtime.submitEngineResult(request->generation, result, moved);
+  if (preview.phase != offline::OfflineRuntimePhase::PlanReady) return false;
+
+  offline::OfflinePhaseExecutionAdapter adapter(runtime);
+  if (adapter.begin().state != offline::OfflinePhaseExecutionState::PhaseReady) {
+    return false;
+  }
+  auto issued = adapter.takeCurrentRequest();
+  if (!issued.request) return false;
+  const auto first = *issued.request;
+  const auto retry = adapter.submitReport(
+      {first.token, false, first.phase.expectedBefore});
+  if (retry.state != offline::OfflinePhaseExecutionState::RetryReady ||
+      !retry.request || retry.request->token.attempt != first.token.attempt + 1) {
+    return false;
+  }
+
+  for (std::size_t guard = 0; guard < 16; ++guard) {
+    if (adapter.state() == offline::OfflinePhaseExecutionState::Complete ||
+        adapter.state() == offline::OfflinePhaseExecutionState::GameOver) {
+      return runtime.coordinator().physical().game().fen() != request->fen;
+    }
+    issued = adapter.takeCurrentRequest();
+    if (!issued.request) return false;
+    const auto phase = *issued.request;
+    const auto update = adapter.submitReport(
+        {phase.token, true, phase.phase.expectedAfter});
+    if (update.state == offline::OfflinePhaseExecutionState::Error ||
+        update.state == offline::OfflinePhaseExecutionState::RecoveryRequired ||
+        update.state == offline::OfflinePhaseExecutionState::PromotionPending) {
+      return false;
+    }
+  }
+  return false;
+}
+
 offline::SearchResult runTimedSearch(
     const offline::OfflineEngine& engine,
     const char* name,
@@ -431,6 +498,7 @@ void diagnosticTask(void*) {
   emitCheck("coordinator-transaction", runCoordinatorSmoke(deterministicA));
   emitCheck("coordinator-promotion", runCoordinatorPromotionSmoke());
   emitCheck("read-only-runtime-preview", runReadOnlyRuntimeSmoke());
+  emitCheck("phase-execution-adapter", runPhaseExecutionAdapterSmoke());
 
   emitPhase("timed-searches");
   runTimedSearch(engine, "opening-250ms", kStartFen, 250);
