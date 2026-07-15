@@ -201,6 +201,33 @@ bool runMotionSmoke() {
   return promotion.success() && promotion.move.promotion == "q";
 }
 
+bool runQuietMotionCompilerSmoke() {
+  offline::OfflineGame game;
+  offline::MoveInfo move;
+  if (!game.describeLegalMove("e2e4", move)) return false;
+
+  offline::MotionPlanningContext context;
+  context.slots = offline::defaultExternalSlots();
+  const auto plan = offline::OfflineMotionPlanner{}.planMove(game, move.uci, context);
+  if (!plan.success() || plan.phases.size() != 1) return false;
+
+  offline::OfflinePhaseExecutionRequest request;
+  request.token = {1, 0, 1};
+  request.move = plan.move;
+  request.phase = plan.phases.front();
+  const auto program = offline::OfflineQuietMotionCompiler{}.compile(request);
+  if (!program.success() || program.primitives.size() != 5 ||
+      program.primitives.front().kind != offline::QuietMotionPrimitiveKind::Travel ||
+      program.primitives.back().kind != offline::QuietMotionPrimitiveKind::Verify ||
+      !program.primitives[2].finalBoardDrop) {
+    return false;
+  }
+
+  request.move.capture = true;
+  return offline::OfflineQuietMotionCompiler{}.compile(request).status ==
+         offline::QuietMotionCompileStatus::UnsupportedMove;
+}
+
 bool runCoordinatorSmoke(const offline::SearchResult& openingSearch) {
   offline::OfflineCoordinatorConfig config;
   config.humanColor = offline::HumanColor::Black;
@@ -499,6 +526,7 @@ void diagnosticTask(void*) {
   emitCheck("coordinator-promotion", runCoordinatorPromotionSmoke());
   emitCheck("read-only-runtime-preview", runReadOnlyRuntimeSmoke());
   emitCheck("phase-execution-adapter", runPhaseExecutionAdapterSmoke());
+  emitCheck("quiet-motion-compiler", runQuietMotionCompilerSmoke());
 
   emitPhase("timed-searches");
   runTimedSearch(engine, "opening-250ms", kStartFen, 250);

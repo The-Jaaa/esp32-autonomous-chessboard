@@ -553,3 +553,43 @@ The guarded COM11 hardware run is accepted. It detected physical `g1f3`, searche
 Hardware metrics were a 2 ms maximum sensor gap, 1,506 sensor scans and three heartbeat attempts during search, 131,136 bytes free internal heap, a 106,484-byte largest internal block, 7,430,464 bytes free PSRAM, and 17,528 bytes task-stack headroom. Every telemetry, timing, memory, retry, ordering, isolation, and safety assertion passed.
 
 Real motor primitives, gameplay LEDs, persistent graveyard state, reconnect transfer, offline undo/redo, and production automatic switching remain deferred. The next guarded milestone should translate one accepted quiet phase into real travel/pickup/drag/drop primitives before enabling captures or multi-phase physical motion.
+
+## Guarded Real Quiet-Move Diagnostics
+
+`offline_core/offline_quiet_motion.h/.cpp` now provides the first portable compiler from a verified phase request to concrete hardware primitives. It accepts exactly one ordinary `QuietTransfer` whose route remains on the 8x8 board and emits ordered `Travel`, `Pickup`, compressed `Drag`, `Drop`, and `Verify` operations. Direct pawn routes and all accepted board-only route modes are supported. Consecutive squares in the same direction remain one continuous drag segment, and only the final drag is marked for the existing 250-step board-drop compensation.
+
+The compiler rejects captures, en passant, castling, promotion, Z/I lanes, external coordinates, graveyard state, malformed paths, occupied route squares, and any before/after occupancy that is not the exact quiet move transition. Compilation is deterministic and does not modify the phase request. The phase adapter now carries the already validated `MoveInfo`, allowing the compiler to enforce this boundary without re-parsing or mutating chess state. `kQuietMotionMaximumAttempts` fixes the automatic hardware limit at two attempts.
+
+Run the host regressions directly with:
+
+```powershell
+Set-Location .\app
+npm run test:offline-quiet-motion
+```
+
+`ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS` defaults to `0` and is mutually exclusive with every earlier diagnostic. The enabled build reuses the accepted ownership manager, stable-snapshot mailbox, runtime, engine, planner, phase adapter, square coordinates, and motion speed profiles. External HTTP motion, diagnostics motion, normal homing, and queue execution remain blocked. A core-0 worker stages the transaction while the existing core-1 hardware loop alone services the guarded hardware mailbox.
+
+The hardware diagnostic performs bounded homing before setup can arm. Each axis has a 20-second approach deadline, debounced switch sampling, bounded release movement, active sensor scans, and magnet-LOW enforcement. Logical `(0,0)` is assigned only after both switches are proven and the accepted 100-step calibrated release point is restored. It does not call the existing unbounded `homeGantry()` path.
+
+Before motion, the real stable occupancy must exactly equal the phase's expected-before checkpoint. Fast magnet-off travel goes to the source, pickup authorizes the magnet only inside the executor, slow magnet-on drag follows compressed board waypoints, the final board drag receives 250-step compensation, and drop immediately revokes magnet authorization. No nudge recovery is available. Full expected-after occupancy must settle within 1.5 seconds before a success report can commit the opponent move.
+
+An unchanged failed attempt is sent through the accepted adapter retry path once, producing a new attempt token. A second failure is final. Any partial or ambiguous occupancy enters synchronization warning and freezes without another motion. Every success, failure, timeout, task exit, and normal loop iteration outside authorized pickup/drag forces the magnet LOW.
+
+Diagnostic JSON is serialized through a dedicated FreeRTOS mutex. This prevents ownership heartbeat output from interleaving with longer quiet-motion records on USB Serial. The lock exists only in diagnostic builds; production code and behavior remain unchanged.
+
+Compile or run the guarded USB gate with:
+
+```powershell
+.\tools\verify-offline-quiet-motion.ps1
+.\tools\verify-offline-quiet-motion.ps1 -UploadPort COM11 -SerialTimeoutSeconds 360
+```
+
+The verifier compiles both variants, optionally uploads and parses the physical run, and restores production firmware in `finally`. It requires bounded home, ordered primitives, real motor and magnet activity, exact occupancy, internal FEN commit, magnet LOW at completion, blocked external commands, memory/timing limits, and a parseable summary.
+
+Automated acceptance on 2026-07-15 passes `npm run test:offline-quiet-motion`, the complete foundation suite, client build, zero-warning lint, and every firmware compile gate. Production remains exactly 1,042,543 bytes flash and 47,128 bytes static RAM. The final guarded quiet-motion diagnostic is 1,305,695 / 51,952 with 1,840,033 bytes of application headroom. Resource, ownership, runtime, and simulated-phase diagnostics also compile with the shared telemetry lock.
+
+The guarded COM11 acceptance run passed end to end. Bounded homing succeeded, physical `g1f3` was accepted, and the engine selected `d7d5` after a 3,003 ms depth-4 search across 19,392 nodes. The robot executed the direct quiet move, final occupancy exactly matched the preview, the adapter committed the expected FEN, and production firmware was restored automatically. A prior successful run also exercised the allowed recovery path: attempt one left occupancy unchanged and attempt two completed the same tokenized phase. No third attempt was made.
+
+Final hardware metrics were a 5 ms maximum sensor gap, 1,502 sensor scans and three heartbeat attempts during search, 130,544 bytes free internal heap, a 104,436-byte largest internal block, 7,430,496 bytes free PSRAM, and 16,808 bytes task-stack headroom. The magnet activated only inside pickup/drag and was LOW in the final report. Setup also demonstrated recoverable feedback for an intermittently detected `d7` pawn before the accepted move; no warning remained when execution began. The complete serial transcript is retained locally under `tmp/offline-quiet-motion-hardware-2026-07-15.log`.
+
+Still deferred: real captures, en passant, castling, promotions, Z/I travel, graveyard drops, gameplay LEDs, persistence, reconnect state transfer, offline undo/redo, and production automatic offline ownership.

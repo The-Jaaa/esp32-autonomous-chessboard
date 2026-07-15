@@ -53,6 +53,9 @@ if (-not $SkipFirmware) {
     Invoke-Checked 'ESP32 motor-locked offline phase execution diagnostic firmware builds' {
         & (Join-Path $PSScriptRoot 'verify-offline-phase-execution.ps1')
     }
+    Invoke-Checked 'ESP32 guarded real quiet-motion diagnostic firmware builds' {
+        & (Join-Path $PSScriptRoot 'verify-offline-quiet-motion.ps1')
+    }
 }
 
 Write-Host "`nFoundation verification passed." -ForegroundColor Green

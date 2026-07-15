@@ -1,15 +1,16 @@
 #include "offline_runtime_diagnostics.h"
 
-#if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS
 
 #include "offline_ownership_diagnostics.h"
+#include "offline_diagnostic_serial.h"
+#include "offline_quiet_motion_hardware.h"
 
 #include <AccelStepper.h>
 #include <ArduinoJson.h>
 #include <esp_heap_caps.h>
 #include <esp_memory_utils.h>
-#include <esp_rom_sys.h>
-
 #include <algorithm>
 #include <cstdint>
 #include <memory>
@@ -53,15 +54,18 @@ offline::OfflineRuntimeEvent lastLoggedEvent = offline::OfflineRuntimeEvent::Non
 
 constexpr bool kPhaseExecutionDiagnostic =
     ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS != 0;
+constexpr bool kQuietMotionDiagnostic =
+    ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS != 0;
 
 const char* diagnosticPrefix() {
+  if (kQuietMotionDiagnostic) return "OFFLINE_QUIET_MOTION_DIAG";
   return kPhaseExecutionDiagnostic ? "OFFLINE_PHASE_DIAG" : "OFFLINE_RUNTIME_DIAG";
 }
 
 void emitDocument(JsonDocument& document) {
   String payload;
   serializeJson(document, payload);
-  esp_rom_printf("[%s] %s\n", diagnosticPrefix(), payload.c_str());
+  emitOfflineDiagnosticJson(diagnosticPrefix(), payload);
 }
 
 void emitCheck(const char* name, bool pass) {
@@ -278,7 +282,8 @@ bool emitMotionPlan(const offline::OfflineReadOnlyRuntime& runtime) {
          transaction->currentPhase == 0 && noneVerified;
 }
 
-#if ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS
 
 struct PhaseExecutionDiagnosticResult {
   bool committed = false;
@@ -488,6 +493,345 @@ PhaseExecutionDiagnosticResult runSimulatedPhaseExecution(
   return diagnostic;
 }
 
+#if ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS
+
+struct QuietMotionDiagnosticResult {
+  bool homeSucceeded = false;
+  bool programCompiled = false;
+  bool primitiveOrderValid = false;
+  bool retryObserved = false;
+  bool retryExhausted = false;
+  bool recoveryRequired = false;
+  bool opponentMoveCommitted = false;
+  bool finalOccupancyMatched = false;
+  bool motorActivity = false;
+  bool magnetEverHigh = false;
+  bool magnetLow = true;
+  std::string selectedMove;
+  std::string committedFen;
+  std::string actualOccupancy;
+  std::string expectedOccupancy;
+  String error;
+};
+
+void emitQuietHardwareResult(
+    const OfflineQuietHardwareResult& result,
+    const char* stage) {
+  DynamicJsonDocument document(1536);
+  document["type"] = "hardware-result";
+  document["stage"] = stage;
+  document["requestId"] = result.requestId;
+  document["success"] = result.success;
+  document["homed"] = result.homed;
+  document["motorActivity"] = result.motorActivity;
+  document["magnetEverHigh"] = result.magnetEverHigh;
+  document["magnetLow"] = result.magnetLow;
+  document["motorA"] = result.motorAPosition;
+  document["motorB"] = result.motorBPosition;
+  document["x"] = result.x;
+  document["y"] = result.y;
+  document["occupancy"] = occupancyHex(result.observedOccupancy).c_str();
+  if (result.error.length() > 0) document["error"] = result.error;
+  emitDocument(document);
+}
+
+void emitQuietProgram(const offline::QuietMotionProgram& program) {
+  DynamicJsonDocument document(4096);
+  document["type"] = "quiet-program";
+  document["status"] = offline::quietMotionCompileStatusName(program.status);
+  document["message"] = program.blockedReason.c_str();
+  document["move"] = program.moveUci.c_str();
+  document["from"] = program.from.c_str();
+  document["to"] = program.to.c_str();
+  document["sourceRawIndex"] = program.sourceRawIndex;
+  document["targetRawIndex"] = program.targetRawIndex;
+  document["routeMode"] = offline::externalRouteModeName(program.routeMode);
+  document["routeCost"] = program.routeCost;
+  document["transactionId"] = program.token.transactionId;
+  document["phaseIndex"] = program.token.phaseIndex;
+  document["attempt"] = program.token.attempt;
+  document["expectedBefore"] = occupancyHex(program.expectedBefore).c_str();
+  document["expectedAfter"] = occupancyHex(program.expectedAfter).c_str();
+  addStrings(document.createNestedArray("rawPath"), program.rawPathSquares);
+  addStrings(
+      document.createNestedArray("compressedPath"),
+      program.compressedPathSquares);
+  JsonArray primitives = document.createNestedArray("primitives");
+  for (const offline::QuietMotionPrimitive& primitive : program.primitives) {
+    JsonObject item = primitives.createNestedObject();
+    item["kind"] = offline::quietMotionPrimitiveKindName(primitive.kind);
+    if (primitive.sourceRawIndex >= 0) {
+      item["sourceRawIndex"] = primitive.sourceRawIndex;
+    }
+    if (primitive.targetRawIndex >= 0) {
+      item["targetRawIndex"] = primitive.targetRawIndex;
+    }
+    item["finalBoardDrop"] = primitive.finalBoardDrop;
+  }
+  emitDocument(document);
+}
+
+bool waitForQuietHardwareResult(
+    std::uint32_t requestId,
+    std::uint32_t timeoutMs,
+    OfflineQuietHardwareResult& result) {
+  const std::uint32_t startedAt = millis();
+  while (millis() - startedAt < timeoutMs) {
+    if (takeOfflineQuietHardwareResult(requestId, result)) return true;
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+  return false;
+}
+
+bool runQuietHomeGate(QuietMotionDiagnosticResult& diagnostic) {
+  StaticJsonDocument<256> waiting;
+  waiting["type"] = "home";
+  waiting["event"] = "waiting_for_offline_idle";
+  waiting["axisTimeoutMs"] = 20000;
+  emitDocument(waiting);
+
+  OfflineOwnershipDiagnosticSnapshot ownership;
+  for (;;) {
+    if (copyOfflineOwnershipDiagnosticSnapshot(ownership) &&
+        ownership.valid &&
+        ownership.state == offline::OwnershipState::OfflineIdle &&
+        ownership.allowOfflineControl) {
+      break;
+    }
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+
+  constexpr std::uint32_t kHomeRequestId = 1;
+  if (!queueOfflineQuietHome(kHomeRequestId)) {
+    diagnostic.error = "Could not queue the bounded homing job.";
+    return false;
+  }
+  StaticJsonDocument<256> queued;
+  queued["type"] = "home";
+  queued["event"] = "queued";
+  queued["requestId"] = kHomeRequestId;
+  emitDocument(queued);
+
+  OfflineQuietHardwareResult result;
+  if (!waitForQuietHardwareResult(kHomeRequestId, 50000, result)) {
+    abortOfflineQuietMotionHardware();
+    diagnostic.error = "Bounded homing did not return a result within 50 seconds.";
+    return false;
+  }
+  emitQuietHardwareResult(result, "home");
+  diagnostic.homeSucceeded = result.success && result.homed &&
+                             result.magnetLow && result.motorActivity;
+  if (!diagnostic.homeSucceeded) {
+    diagnostic.error = result.error.length() > 0
+                           ? result.error
+                           : String("Bounded homing failed its safety checks.");
+  }
+  return diagnostic.homeSucceeded;
+}
+
+bool expectedQuietPrimitiveOrder(const offline::QuietMotionProgram& program) {
+  if (program.primitives.size() < 5 ||
+      program.primitives.front().kind != offline::QuietMotionPrimitiveKind::Travel ||
+      program.primitives[1].kind != offline::QuietMotionPrimitiveKind::Pickup ||
+      program.primitives[program.primitives.size() - 2].kind !=
+          offline::QuietMotionPrimitiveKind::Drop ||
+      program.primitives.back().kind != offline::QuietMotionPrimitiveKind::Verify) {
+    return false;
+  }
+  std::size_t finalDragCount = 0;
+  for (std::size_t index = 2; index + 2 < program.primitives.size(); ++index) {
+    if (program.primitives[index].kind != offline::QuietMotionPrimitiveKind::Drag) {
+      return false;
+    }
+    if (program.primitives[index].finalBoardDrop) finalDragCount++;
+  }
+  return finalDragCount == 1 &&
+         program.primitives[program.primitives.size() - 3].finalBoardDrop;
+}
+
+QuietMotionDiagnosticResult runRealQuietMotionExecution(
+    offline::OfflineReadOnlyRuntime& runtime,
+    const std::string& previewAfterFen) {
+  QuietMotionDiagnosticResult diagnostic;
+  diagnostic.homeSucceeded = true;
+  const auto transaction = runtime.coordinator().pendingMotionTransaction();
+  if (!transaction || transaction->motion.phases.size() != 1) {
+    diagnostic.error = "The opponent plan is not one quiet motion phase.";
+    return diagnostic;
+  }
+  diagnostic.selectedMove = transaction->selectedMove;
+
+  offline::OfflinePhaseExecutionAdapter adapter(runtime);
+  auto update = adapter.begin();
+  emitExecutionUpdate(update);
+  if (update.state != offline::OfflinePhaseExecutionState::PhaseReady ||
+      !update.request) {
+    diagnostic.error = "The phase adapter did not issue the quiet phase.";
+    return diagnostic;
+  }
+
+  std::uint32_t hardwareRequestId = 10;
+  for (std::size_t guard = 0; guard < 4; ++guard) {
+    if ((adapter.state() != offline::OfflinePhaseExecutionState::PhaseReady &&
+         adapter.state() != offline::OfflinePhaseExecutionState::RetryReady) ||
+        !adapter.currentRequest()) {
+      break;
+    }
+
+    const auto request = *adapter.currentRequest();
+    const offline::QuietMotionProgram program =
+        offline::OfflineQuietMotionCompiler{}.compile(request);
+    emitQuietProgram(program);
+    diagnostic.programCompiled = program.success();
+    diagnostic.primitiveOrderValid = expectedQuietPrimitiveOrder(program);
+    diagnostic.expectedOccupancy = occupancyHex(program.expectedAfter);
+    if (!program.success() || !diagnostic.primitiveOrderValid) {
+      diagnostic.error = program.blockedReason.c_str();
+      return diagnostic;
+    }
+    if (!offline::quietMotionAttemptAllowed(request.token)) {
+      diagnostic.retryExhausted = true;
+      diagnostic.error = "The single automatic retry was exhausted.";
+      return diagnostic;
+    }
+
+    update = adapter.takeCurrentRequest();
+    emitExecutionUpdate(update);
+    if (update.state != offline::OfflinePhaseExecutionState::AwaitingReport) {
+      diagnostic.error = "The adapter did not accept the quiet hardware request.";
+      return diagnostic;
+    }
+
+    const std::uint32_t requestId = hardwareRequestId++;
+    if (!queueOfflineQuietProgram(requestId, program)) {
+      diagnostic.error = "Could not queue the quiet hardware program.";
+      return diagnostic;
+    }
+    OfflineQuietHardwareResult hardware;
+    if (!waitForQuietHardwareResult(requestId, 120000, hardware)) {
+      abortOfflineQuietMotionHardware();
+      diagnostic.error = "Quiet hardware execution timed out after 120 seconds.";
+      return diagnostic;
+    }
+    emitQuietHardwareResult(hardware, "quiet-move");
+    diagnostic.motorActivity = diagnostic.motorActivity || hardware.motorActivity;
+    diagnostic.magnetEverHigh = diagnostic.magnetEverHigh || hardware.magnetEverHigh;
+    diagnostic.magnetLow = hardware.magnetLow;
+    diagnostic.actualOccupancy = occupancyHex(hardware.observedOccupancy);
+
+    offline::OfflinePhaseExecutionReport report;
+    report.token = request.token;
+    report.success = hardware.success;
+    report.occupancy = hardware.observedOccupancy;
+    emitPhaseReport(report, hardware.success ? "real-success" : "real-failure");
+    update = adapter.submitReport(report);
+    emitExecutionUpdate(update);
+
+    if (hardware.success) {
+      diagnostic.finalOccupancyMatched =
+          hardware.observedOccupancy == program.expectedAfter;
+    } else if (hardware.observedOccupancy == program.expectedBefore &&
+               request.token.attempt == 1 &&
+               update.state == offline::OfflinePhaseExecutionState::RetryReady) {
+      diagnostic.retryObserved = true;
+      continue;
+    } else if (update.state ==
+               offline::OfflinePhaseExecutionState::RecoveryRequired) {
+      diagnostic.recoveryRequired = true;
+      diagnostic.error = hardware.error;
+      return diagnostic;
+    }
+
+    if (adapter.state() == offline::OfflinePhaseExecutionState::Complete ||
+        adapter.state() == offline::OfflinePhaseExecutionState::GameOver) {
+      diagnostic.committedFen = runtime.coordinator().physical().game().fen();
+      diagnostic.opponentMoveCommitted =
+          diagnostic.committedFen == previewAfterFen;
+      return diagnostic;
+    }
+  }
+
+  if (diagnostic.error.length() == 0) {
+    diagnostic.error = "Quiet execution stopped before the opponent move committed.";
+  }
+  return diagnostic;
+}
+
+void emitQuietSummary(
+    const QuietMotionDiagnosticResult& diagnostic,
+    std::uint32_t searchSensorScans,
+    std::uint32_t searchHeartbeatAttempts,
+    std::uint32_t searchElapsedMs) {
+  const std::size_t internalFree =
+      heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  const std::size_t largestInternal =
+      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  const std::size_t psramFree = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+  const std::size_t stackHeadroom = uxTaskGetStackHighWaterMark(nullptr);
+
+  emitCheck("bounded-home", diagnostic.homeSucceeded);
+  emitCheck("quiet-program-compiled", diagnostic.programCompiled);
+  emitCheck("ordered-primitives", diagnostic.primitiveOrderValid);
+  emitCheck("real-motor-activity", diagnostic.motorActivity);
+  emitCheck("magnet-activated-for-drag", diagnostic.magnetEverHigh);
+  emitCheck("magnet-low", diagnostic.magnetLow && offlineRuntimeMagnetIsLow());
+  emitCheck("final-occupancy", diagnostic.finalOccupancyMatched);
+  emitCheck("opponent-move-committed", diagnostic.opponentMoveCommitted);
+  emitCheck("retry-limit", !diagnostic.retryExhausted);
+  emitCheck("no-unresolved-recovery", !diagnostic.recoveryRequired);
+  emitCheck("internal-heap-threshold", internalFree >= kMinimumInternalHeapBytes);
+  emitCheck(
+      "largest-internal-block-threshold",
+      largestInternal >= kMinimumLargestInternalBlockBytes);
+  emitCheck("psram-threshold", psramFree >= kMinimumFreePsramBytes);
+  emitCheck("stack-threshold", stackHeadroom >= kMinimumStackHeadroomBytes);
+  emitCheck(
+      "sensor-loop-progress",
+      searchSensorScans > 0 && offlineRuntimeSensorMaxGapMs < kMaximumSensorGapMs);
+  emitCheck("heartbeat-progress", searchHeartbeatAttempts >= 2);
+  emitCheck(
+      "search-deadline",
+      searchElapsedMs <= 3000U + kSearchOverrunAllowanceMs);
+
+  DynamicJsonDocument document(2048);
+  document["type"] = "summary";
+  document["pass"] = overallPass;
+  document["homeSucceeded"] = diagnostic.homeSucceeded;
+  document["realMotionEnabled"] = true;
+  document["motorActivity"] = diagnostic.motorActivity;
+  document["magnetEverHigh"] = diagnostic.magnetEverHigh;
+  document["magnetLow"] = diagnostic.magnetLow && offlineRuntimeMagnetIsLow();
+  document["commandConsumptionBlocked"] = true;
+  document["programCompiled"] = diagnostic.programCompiled;
+  document["orderedPrimitives"] = diagnostic.primitiveOrderValid;
+  document["retryObserved"] = diagnostic.retryObserved;
+  document["retryExhausted"] = diagnostic.retryExhausted;
+  document["recoveryRequired"] = diagnostic.recoveryRequired;
+  document["finalOccupancyMatched"] = diagnostic.finalOccupancyMatched;
+  document["opponentMoveCommitted"] = diagnostic.opponentMoveCommitted;
+  document["selectedMove"] = diagnostic.selectedMove.c_str();
+  document["committedFen"] = diagnostic.committedFen.c_str();
+  document["actualOccupancy"] = diagnostic.actualOccupancy.c_str();
+  document["expectedOccupancy"] = diagnostic.expectedOccupancy.c_str();
+  if (diagnostic.error.length() > 0) document["error"] = diagnostic.error;
+  document["sensorScans"] = offlineRuntimeSensorScanCount;
+  document["sensorMaxGapMs"] = offlineRuntimeSensorMaxGapMs;
+  document["searchSensorScans"] = searchSensorScans;
+  document["heartbeatAttempts"] = ownershipDiagnosticHeartbeatAttempts;
+  document["searchHeartbeatAttempts"] = searchHeartbeatAttempts;
+  document["heartbeatMaxElapsedMs"] = ownershipDiagnosticHeartbeatMaxElapsedMs;
+  document["searchElapsedMs"] = searchElapsedMs;
+  document["internalFree"] = internalFree;
+  document["largestInternal"] = largestInternal;
+  document["psramFree"] = psramFree;
+  document["stackHeadroom"] = stackHeadroom;
+  document["core"] = xPortGetCoreID();
+  document["priority"] = uxTaskPriorityGet(nullptr);
+  emitDocument(document);
+}
+
+#endif
+
 #endif
 
 void emitSummary(
@@ -573,7 +917,8 @@ void runtimeTask(void*) {
   const long initialMotorB = motorB.currentPosition();
   StaticJsonDocument<384> start;
   start["type"] = "start";
-  start["motorsLocked"] = true;
+  start["motorsLocked"] = !kQuietMotionDiagnostic;
+  start["realMotionEnabled"] = kQuietMotionDiagnostic;
   start["magnetLow"] = offlineRuntimeMagnetIsLow();
   start["core"] = xPortGetCoreID();
   start["priority"] = uxTaskPriorityGet(nullptr);
@@ -622,6 +967,17 @@ void runtimeTask(void*) {
     vTaskDelete(nullptr);
     return;
   }
+
+#if ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS
+  QuietMotionDiagnosticResult quietDiagnostic;
+  if (!runQuietHomeGate(quietDiagnostic)) {
+    quietDiagnostic.magnetLow = offlineRuntimeMagnetIsLow();
+    emitQuietSummary(quietDiagnostic, 0, 0, 0);
+    summaryEmitted = true;
+    vTaskDelete(nullptr);
+    return;
+  }
+#endif
 
   offline::OfflineEngine engine;
   std::uint32_t consumedRevision = 0;
@@ -698,6 +1054,22 @@ void runtimeTask(void*) {
           searchElapsedMs,
           initialMotorA,
           initialMotorB);
+#elif ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS
+      const auto state = runtime->coordinator().currentState();
+      const auto transaction = runtime->coordinator().pendingMotionTransaction();
+      QuietMotionDiagnosticResult execution;
+      execution.homeSucceeded = quietDiagnostic.homeSucceeded;
+      if (planFrozen && state.opponentPlan && transaction) {
+        execution = runRealQuietMotionExecution(
+            *runtime, state.opponentPlan->afterFen);
+      } else {
+        execution.error = "The opponent plan was not frozen before hardware execution.";
+      }
+      emitQuietSummary(
+          execution,
+          searchSensorScans,
+          searchHeartbeatAttempts,
+          searchElapsedMs);
 #else
       emitSummary(
           planFrozen,
@@ -731,10 +1103,11 @@ void beginOfflineRuntimeDiagnostics() {
       nullptr,
       0);
   if (created != pdPASS) {
-    esp_rom_printf(
-        "[%s] {\"type\":\"summary\",\"pass\":false,"
-        "\"error\":\"task-create-failed\"}\n",
-        diagnosticPrefix());
+    StaticJsonDocument<192> document;
+    document["type"] = "summary";
+    document["pass"] = false;
+    document["error"] = "task-create-failed";
+    emitDocument(document);
   }
 }
 

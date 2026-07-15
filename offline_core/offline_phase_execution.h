@@ -58,6 +58,7 @@ struct OfflinePhaseExecutionToken {
 
 struct OfflinePhaseExecutionRequest {
   OfflinePhaseExecutionToken token;
+  MoveInfo move;
   MotionPhase phase;
   std::string graveyardSlotKey;
   GraveyardSlotState graveyardState = GraveyardSlotState::Free;

@@ -1,7 +1,9 @@
 #include "offline_ownership_diagnostics.h"
+#include "offline_diagnostic_serial.h"
 
 #if ENABLE_OFFLINE_OWNERSHIP_DIAGNOSTICS || ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || \
-    ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS
+    ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS
 
 #include <OfflineCore.h>
 
@@ -9,12 +11,11 @@
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
-#include <esp_rom_sys.h>
-
 #include <cstdint>
 #include <string>
 
-#if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS
 #include "offline_runtime_diagnostics.h"
 #endif
 
@@ -53,7 +54,8 @@ offline::OwnershipSafety idleSafety() {
 }
 
 offline::OwnershipSafety diagnosticSafety() {
-#if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS
   return offlineRuntimeOwnershipSafety();
 #else
   return idleSafety();
@@ -72,10 +74,13 @@ void storeDecision(const offline::OwnershipDecision& decision) {
 
 void emitCheck(const char* name, bool pass) {
   if (!pass) overallPass = false;
-  esp_rom_printf(
-      "[OWNERSHIP_DIAG] {\"type\":\"check\",\"name\":\"%s\",\"pass\":%s}\n",
-      name,
-      pass ? "true" : "false");
+  StaticJsonDocument<192> document;
+  document["type"] = "check";
+  document["name"] = name;
+  document["pass"] = pass;
+  String payload;
+  serializeJson(document, payload);
+  emitOfflineDiagnosticJson("OWNERSHIP_DIAG", payload);
 }
 
 void publishDecision(
@@ -90,14 +95,16 @@ void publishDecision(
 
   if (decision.state == previous && decision.event == offline::OwnershipEvent::None) return;
 
-  esp_rom_printf(
-      "[OWNERSHIP_DIAG] {\"type\":\"transition\",\"from\":\"%s\","
-      "\"to\":\"%s\",\"event\":\"%s\",\"failures\":%u,\"successes\":%u}\n",
-      offline::ownershipStateName(previous),
-      offline::ownershipStateName(decision.state),
-      offline::ownershipEventName(decision.event),
-      static_cast<unsigned>(decision.consecutiveFailures),
-      static_cast<unsigned>(decision.consecutiveSuccesses));
+  StaticJsonDocument<384> document;
+  document["type"] = "transition";
+  document["from"] = offline::ownershipStateName(previous);
+  document["to"] = offline::ownershipStateName(decision.state);
+  document["event"] = offline::ownershipEventName(decision.event);
+  document["failures"] = decision.consecutiveFailures;
+  document["successes"] = decision.consecutiveSuccesses;
+  String payload;
+  serializeJson(document, payload);
+  emitOfflineDiagnosticJson("OWNERSHIP_DIAG", payload);
 }
 
 offline::ServerHeartbeat probeServer() {
@@ -205,11 +212,14 @@ void runOfflineOwnershipNetworkStep(uint32_t nowMs) {
 
   if (!startEmitted) {
     startEmitted = true;
-    esp_rom_printf(
-        "[OWNERSHIP_DIAG] {\"type\":\"start\",\"motorsLocked\":true,"
-        "\"core\":%d,\"priority\":%u}\n",
-        xPortGetCoreID(),
-        static_cast<unsigned>(uxTaskPriorityGet(nullptr)));
+    StaticJsonDocument<192> document;
+    document["type"] = "start";
+    document["motorsLocked"] = true;
+    document["core"] = xPortGetCoreID();
+    document["priority"] = uxTaskPriorityGet(nullptr);
+    String payload;
+    serializeJson(document, payload);
+    emitOfflineDiagnosticJson("OWNERSHIP_DIAG", payload);
   }
 
   const offline::OwnershipState beforeTick = liveManager.state();
@@ -230,13 +240,15 @@ void runOfflineOwnershipNetworkStep(uint32_t nowMs) {
         liveManager.observeHeartbeat(nowMs, heartbeat, diagnosticSafety());
     if (heartbeat.success) ownershipDiagnosticSuccessfulHeartbeats++;
     publishDecision(beforeHeartbeat, observed, nowMs);
-    esp_rom_printf(
-        "[OWNERSHIP_DIAG] {\"type\":\"heartbeat\",\"success\":%s,"
-        "\"state\":\"%s\",\"generation\":%u,\"elapsedMs\":%u}\n",
-        heartbeat.success ? "true" : "false",
-        offline::ownershipStateName(observed.state),
-        static_cast<unsigned>(heartbeat.sessionGeneration),
-        static_cast<unsigned>(heartbeatElapsedMs));
+    StaticJsonDocument<256> document;
+    document["type"] = "heartbeat";
+    document["success"] = heartbeat.success;
+    document["state"] = offline::ownershipStateName(observed.state);
+    document["generation"] = heartbeat.sessionGeneration;
+    document["elapsedMs"] = heartbeatElapsedMs;
+    String payload;
+    serializeJson(document, payload);
+    emitOfflineDiagnosticJson("OWNERSHIP_DIAG", payload);
   }
 
   if (!summaryEmitted && liveManager.state() == offline::OwnershipState::OnlineOwned &&
@@ -246,21 +258,25 @@ void runOfflineOwnershipNetworkStep(uint32_t nowMs) {
     emitCheck("synthetic-ownership-transitions", syntheticPass);
     const bool timingPass = ownershipDiagnosticSensorMaxGapMs < 25;
     emitCheck("sensor-loop-timing", timingPass);
-    esp_rom_printf(
-        "[OWNERSHIP_DIAG] {\"type\":\"timing\",\"sensorScans\":%u,"
-        "\"sensorMaxGapMs\":%u,\"successfulHeartbeats\":%u,"
-        "\"heartbeatMaxElapsedMs\":%u}\n",
-        static_cast<unsigned>(ownershipDiagnosticSensorScanCount),
-        static_cast<unsigned>(ownershipDiagnosticSensorMaxGapMs),
-        static_cast<unsigned>(ownershipDiagnosticSuccessfulHeartbeats),
-        static_cast<unsigned>(heartbeatMaxElapsedMs));
+    StaticJsonDocument<256> timing;
+    timing["type"] = "timing";
+    timing["sensorScans"] = ownershipDiagnosticSensorScanCount;
+    timing["sensorMaxGapMs"] = ownershipDiagnosticSensorMaxGapMs;
+    timing["successfulHeartbeats"] = ownershipDiagnosticSuccessfulHeartbeats;
+    timing["heartbeatMaxElapsedMs"] = heartbeatMaxElapsedMs;
+    String timingPayload;
+    serializeJson(timing, timingPayload);
+    emitOfflineDiagnosticJson("OWNERSHIP_DIAG", timingPayload);
     summaryEmitted = true;
-    esp_rom_printf(
-        "[OWNERSHIP_DIAG] {\"type\":\"summary\",\"pass\":%s,"
-        "\"motorsLocked\":true,\"core\":%d,\"priority\":%u}\n",
-        overallPass ? "true" : "false",
-        xPortGetCoreID(),
-        static_cast<unsigned>(uxTaskPriorityGet(nullptr)));
+    StaticJsonDocument<192> summary;
+    summary["type"] = "summary";
+    summary["pass"] = overallPass;
+    summary["motorsLocked"] = true;
+    summary["core"] = xPortGetCoreID();
+    summary["priority"] = uxTaskPriorityGet(nullptr);
+    String summaryPayload;
+    serializeJson(summary, summaryPayload);
+    emitOfflineDiagnosticJson("OWNERSHIP_DIAG", summaryPayload);
   }
 }
 

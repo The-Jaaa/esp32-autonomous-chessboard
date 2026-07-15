@@ -6,8 +6,10 @@
 #include <math.h>
 
 #include "offline_embedded_diagnostics.h"
+#include "offline_diagnostic_serial.h"
 #include "offline_ownership_diagnostics.h"
 #include "offline_runtime_diagnostics.h"
+#include "offline_quiet_motion_hardware.h"
 
 #if __has_include("firmware_secrets.h")
 #include "firmware_secrets.h"
@@ -94,6 +96,21 @@ bool hasPendingJobResult = false;
 String lastMotionFailedPhase = "";
 int lastMotionFailedStep = -1;
 
+#if ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS
+struct OfflineQuietHardwareJob {
+  std::uint32_t requestId = 0;
+  OfflineQuietHardwareJobKind kind = OfflineQuietHardwareJobKind::None;
+  offline::QuietMotionProgram program;
+};
+
+OfflineQuietHardwareJob pendingOfflineQuietHardwareJob;
+bool hasPendingOfflineQuietHardwareJob = false;
+OfflineQuietHardwareResult completedOfflineQuietHardwareResult;
+bool hasCompletedOfflineQuietHardwareResult = false;
+volatile bool offlineQuietMagnetAuthorized = false;
+volatile bool offlineQuietAbortRequested = false;
+#endif
+
 enum LedAnimationMode {
   LED_ANIM_NONE,
   LED_ANIM_CHECKMATE,
@@ -139,7 +156,8 @@ void applyCaptureStart(JsonObject step);
 void runLedRunway(JsonObject step);
 bool enqueueMotionCommand(const String& commandJson);
 
-#if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS
 bool offlineRuntimeMagnetIsLow() {
   return digitalRead(MAGNET_PIN) == LOW;
 }
@@ -151,6 +169,12 @@ void setup() {
 
   Serial.begin(115200);
   delay(200);
+
+#if ENABLE_OFFLINE_EMBEDDED_DIAGNOSTICS || ENABLE_OFFLINE_OWNERSHIP_DIAGNOSTICS || \
+    ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS
+  beginOfflineDiagnosticSerial();
+#endif
 
   sharedMutex = xSemaphoreCreateMutex();
 
@@ -176,29 +200,41 @@ void setup() {
   WiFi.setSleep(false);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
+  Serial.println("[BOOT] Physical board firmware started.");
+
   beginOfflineRuntimeDiagnostics();
   beginOfflineOwnershipDiagnostics();
   xTaskCreatePinnedToCore(networkTask, "networkTask", 12288, nullptr, 1, nullptr, 0);
-
-  Serial.println("[BOOT] Physical board firmware started.");
   beginOfflineEmbeddedDiagnostics();
 }
 
 void loop() {
   if (offlineEmbeddedDiagnosticsActive() || offlineOwnershipDiagnosticsActive() ||
       offlineRuntimeDiagnosticsActive()) {
+#if ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS
+    if (!offlineQuietMotionMagnetAuthorized()) {
+      digitalWrite(MAGNET_PIN, LOW);
+    }
+#else
     digitalWrite(MAGNET_PIN, LOW);
+#endif
   }
 
   scanSensors();
-#if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS
   publishOfflineRuntimeStableSnapshot(stableOccupancy, millis());
 #endif
 #if ENABLE_OFFLINE_OWNERSHIP_DIAGNOSTICS || ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || \
-    ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS
+    ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS
   updateOfflineOwnershipDiagnosticLeds(millis());
 #else
   updateLedAnimation();
+#endif
+
+#if ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS
+  serviceOfflineQuietMotionHardware();
 #endif
 
   String commandJson;
@@ -235,7 +271,8 @@ void networkTask(void* parameter) {
     }
 
 #if ENABLE_OFFLINE_OWNERSHIP_DIAGNOSTICS || ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || \
-    ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS
+    ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS
     runOfflineOwnershipNetworkStep(now);
     vTaskDelay(pdMS_TO_TICKS(25));
     continue;
@@ -284,7 +321,8 @@ void scanSensors() {
   ownershipDiagnosticSensorScanCount++;
 #endif
 
-#if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS
   static uint32_t previousRuntimeScanMs = 0;
   const uint32_t runtimeScanStartedMs = millis();
   if (previousRuntimeScanMs != 0) {
@@ -830,6 +868,415 @@ void goToSquareWithDragOvershoot(int index) {
   const long overshootY = targetY + lroundf((dy / distance) * DRAG_OVERSHOOT_STEPS);
   goToXY(overshootX, overshootY, true);
 }
+
+#if ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS
+namespace {
+
+constexpr std::uint32_t OFFLINE_HOME_AXIS_TIMEOUT_MS = 20000;
+constexpr std::uint32_t OFFLINE_HOME_BACKOFF_TIMEOUT_MS = 3000;
+constexpr std::uint32_t OFFLINE_QUIET_SETTLE_TIMEOUT_MS = 1500;
+constexpr long OFFLINE_HOME_RELEASE_INCREMENT_STEPS = 100;
+constexpr long OFFLINE_HOME_MAX_RELEASE_STEPS = 1200;
+constexpr long OFFLINE_HOME_FINAL_RELEASE_STEPS = 100;
+constexpr long OFFLINE_HOME_APPROACH_STEPS = 1000000;
+
+void copyOfflineQuietOccupancy(offline::Occupancy& occupancy) {
+  for (std::size_t index = 0; index < occupancy.size(); ++index) {
+    occupancy[index] = stableOccupancy[index];
+  }
+}
+
+void stopOfflineQuietMotors() {
+  const long positionA = motorA.currentPosition();
+  const long positionB = motorB.currentPosition();
+  motorA.setCurrentPosition(positionA);
+  motorB.setCurrentPosition(positionB);
+}
+
+bool runOfflineQuietRelative(
+    long deltaA,
+    long deltaB,
+    std::uint32_t timeoutMs,
+    bool& motorActivity,
+    String& error) {
+  motorA.move(deltaA);
+  motorB.move(deltaB);
+  motorActivity = motorActivity || deltaA != 0 || deltaB != 0;
+  const std::uint32_t startedAt = millis();
+  std::uint32_t lastScanMs = 0;
+  while (motorA.distanceToGo() != 0 || motorB.distanceToGo() != 0) {
+    motorA.run();
+    motorB.run();
+    const std::uint32_t nowMs = millis();
+    if (nowMs - lastScanMs >= 4) {
+      lastScanMs = nowMs;
+      scanSensors();
+      yield();
+    }
+    if (nowMs - startedAt >= timeoutMs) {
+      stopOfflineQuietMotors();
+      error = "Bounded homing backoff timed out.";
+      return false;
+    }
+  }
+  return true;
+}
+
+bool approachOfflineQuietLimit(
+    uint8_t limitPin,
+    long deltaA,
+    long deltaB,
+    const char* axis,
+    bool& motorActivity,
+    String& error) {
+  motorA.move(deltaA);
+  motorB.move(deltaB);
+  motorActivity = true;
+  const std::uint32_t startedAt = millis();
+  std::uint32_t lastScanMs = 0;
+  std::uint32_t lastSwitchSampleMs = 0;
+  uint8_t pressedSamples = 0;
+  while (millis() - startedAt < OFFLINE_HOME_AXIS_TIMEOUT_MS) {
+    motorA.run();
+    motorB.run();
+    const std::uint32_t nowMs = millis();
+    if (nowMs - lastSwitchSampleMs >= 2) {
+      lastSwitchSampleMs = nowMs;
+      if (digitalRead(limitPin) == SWITCH_PRESSED) {
+        if (++pressedSamples >= 3) {
+          stopOfflineQuietMotors();
+          return true;
+        }
+      } else {
+        pressedSamples = 0;
+      }
+    }
+    if (nowMs - lastScanMs >= 4) {
+      lastScanMs = nowMs;
+      scanSensors();
+      yield();
+    }
+  }
+  stopOfflineQuietMotors();
+  error = String("Bounded ") + axis + " homing timed out after 20000 ms.";
+  return false;
+}
+
+bool releaseOfflineQuietLimit(
+    uint8_t limitPin,
+    long releaseA,
+    long releaseB,
+    const char* axis,
+    bool& motorActivity,
+    String& error,
+    long& releasedSteps) {
+  releasedSteps = 0;
+  while (releasedSteps < OFFLINE_HOME_MAX_RELEASE_STEPS) {
+    if (!runOfflineQuietRelative(
+            releaseA * OFFLINE_HOME_RELEASE_INCREMENT_STEPS,
+            releaseB * OFFLINE_HOME_RELEASE_INCREMENT_STEPS,
+            OFFLINE_HOME_BACKOFF_TIMEOUT_MS,
+            motorActivity,
+            error)) {
+      return false;
+    }
+    releasedSteps += OFFLINE_HOME_RELEASE_INCREMENT_STEPS;
+    if (digitalRead(limitPin) == SWITCH_UNPRESSED) return true;
+  }
+
+  error = String(axis) + " limit switch did not release within " +
+          String(OFFLINE_HOME_MAX_RELEASE_STEPS) + " steps.";
+  return false;
+}
+
+bool homeOfflineQuietAxis(
+    uint8_t limitPin,
+    long releaseA,
+    long releaseB,
+    long approachA,
+    long approachB,
+    const char* axis,
+    bool& motorActivity,
+    String& error) {
+  if (digitalRead(limitPin) == SWITCH_PRESSED) {
+    long initialReleaseSteps = 0;
+    if (!releaseOfflineQuietLimit(
+            limitPin,
+            releaseA,
+            releaseB,
+            axis,
+            motorActivity,
+            error,
+            initialReleaseSteps)) return false;
+  }
+
+  if (!approachOfflineQuietLimit(
+          limitPin,
+          approachA * OFFLINE_HOME_APPROACH_STEPS,
+          approachB * OFFLINE_HOME_APPROACH_STEPS,
+          axis,
+          motorActivity,
+          error)) {
+    return false;
+  }
+
+  long finalReleaseSteps = 0;
+  if (!releaseOfflineQuietLimit(
+          limitPin,
+          releaseA,
+          releaseB,
+          axis,
+          motorActivity,
+          error,
+          finalReleaseSteps)) return false;
+
+  // Preserve the accepted 100-step logical origin after proving the switch
+  // releases. The incremental limit handles normal mechanical hysteresis.
+  const long returnSteps = finalReleaseSteps - OFFLINE_HOME_FINAL_RELEASE_STEPS;
+  if (returnSteps > 0) {
+    if (!runOfflineQuietRelative(
+            -releaseA * returnSteps,
+            -releaseB * returnSteps,
+            OFFLINE_HOME_BACKOFF_TIMEOUT_MS,
+            motorActivity,
+            error)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool executeOfflineQuietHome(OfflineQuietHardwareResult& result) {
+  offlineQuietMagnetAuthorized = false;
+  digitalWrite(MAGNET_PIN, LOW);
+  setMotionProfile(false);
+  String error;
+
+  // CoreXY negative X is A positive/B negative; positive X releases it.
+  if (!homeOfflineQuietAxis(
+          LIMIT_X_PIN, -1, 1, 1, -1, "X", result.motorActivity, error)) {
+    result.error = error;
+    return false;
+  }
+  // CoreXY negative Y is A negative/B negative; positive Y releases it.
+  if (!homeOfflineQuietAxis(
+          LIMIT_Y_PIN, 1, 1, -1, -1, "Y", result.motorActivity, error)) {
+    result.error = error;
+    return false;
+  }
+
+  motorA.setCurrentPosition(0);
+  motorB.setCurrentPosition(0);
+  currentX = 0;
+  currentY = 0;
+  result.homed = true;
+  return true;
+}
+
+bool waitForOfflineQuietOccupancy(
+    const offline::Occupancy& expected,
+    std::uint32_t timeoutMs) {
+  const std::uint32_t startedAt = millis();
+  while (millis() - startedAt < timeoutMs) {
+    scanSensors();
+    offline::Occupancy observed;
+    copyOfflineQuietOccupancy(observed);
+    if (observed == expected) return true;
+    delay(10);
+  }
+  return false;
+}
+
+void offlineQuietDelayWithSensorScans(std::uint32_t durationMs) {
+  const std::uint32_t startedAt = millis();
+  while (millis() - startedAt < durationMs) {
+    scanSensors();
+    delay(4);
+  }
+}
+
+bool executeOfflineQuietProgram(
+    const offline::QuietMotionProgram& program,
+    OfflineQuietHardwareResult& result) {
+  offline::Occupancy observed;
+  scanSensors();
+  copyOfflineQuietOccupancy(observed);
+  if (!program.success() || observed != program.expectedBefore) {
+    result.error = program.success()
+                       ? "Observed occupancy does not match the quiet phase before-state."
+                       : "The quiet motion program is not executable.";
+    return false;
+  }
+
+  bool pickedUp = false;
+  for (const offline::QuietMotionPrimitive& primitive : program.primitives) {
+    if (offlineQuietAbortRequested) {
+      result.error = "Quiet motion was aborted by the diagnostic watchdog.";
+      return false;
+    }
+    switch (primitive.kind) {
+      case offline::QuietMotionPrimitiveKind::Travel:
+        if (primitive.targetRawIndex < 0 || primitive.targetRawIndex >= 64) {
+          result.error = "Travel primitive has an invalid board target.";
+          return false;
+        }
+        digitalWrite(MAGNET_PIN, LOW);
+        offlineQuietMagnetAuthorized = false;
+        result.motorActivity = true;
+        goToSquare(primitive.targetRawIndex, false);
+        break;
+      case offline::QuietMotionPrimitiveKind::Pickup:
+        offlineQuietMagnetAuthorized = true;
+        digitalWrite(MAGNET_PIN, HIGH);
+        result.magnetEverHigh = true;
+        pickedUp = true;
+        offlineQuietDelayWithSensorScans(160);
+        break;
+      case offline::QuietMotionPrimitiveKind::Drag:
+        if (!pickedUp || primitive.targetRawIndex < 0 ||
+            primitive.targetRawIndex >= 64) {
+          result.error = "Drag primitive is out of order or has an invalid target.";
+          return false;
+        }
+        offlineQuietMagnetAuthorized = true;
+        digitalWrite(MAGNET_PIN, HIGH);
+        result.magnetEverHigh = true;
+        result.motorActivity = true;
+        if (primitive.finalBoardDrop) {
+          goToSquareWithDragOvershoot(primitive.targetRawIndex);
+        } else {
+          goToSquare(primitive.targetRawIndex, true);
+        }
+        break;
+      case offline::QuietMotionPrimitiveKind::Drop:
+        digitalWrite(MAGNET_PIN, LOW);
+        offlineQuietMagnetAuthorized = false;
+        pickedUp = false;
+        offlineQuietDelayWithSensorScans(80);
+        break;
+      case offline::QuietMotionPrimitiveKind::Verify:
+        break;
+    }
+  }
+
+  digitalWrite(MAGNET_PIN, LOW);
+  offlineQuietMagnetAuthorized = false;
+  if (!waitForOfflineQuietOccupancy(
+          program.expectedAfter, OFFLINE_QUIET_SETTLE_TIMEOUT_MS)) {
+    result.error = "Final board occupancy did not match the quiet phase after-state.";
+    return false;
+  }
+  return true;
+}
+
+}  // namespace
+
+bool queueOfflineQuietHome(std::uint32_t requestId) {
+  bool queued = false;
+  if (xSemaphoreTake(sharedMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+    if (!hasPendingOfflineQuietHardwareJob &&
+        !hasCompletedOfflineQuietHardwareResult) {
+      pendingOfflineQuietHardwareJob = {};
+      pendingOfflineQuietHardwareJob.requestId = requestId;
+      pendingOfflineQuietHardwareJob.kind = OfflineQuietHardwareJobKind::Home;
+      offlineQuietAbortRequested = false;
+      hasPendingOfflineQuietHardwareJob = true;
+      queued = true;
+    }
+    xSemaphoreGive(sharedMutex);
+  }
+  return queued;
+}
+
+bool queueOfflineQuietProgram(
+    std::uint32_t requestId,
+    const offline::QuietMotionProgram& program) {
+  bool queued = false;
+  if (xSemaphoreTake(sharedMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+    if (!hasPendingOfflineQuietHardwareJob &&
+        !hasCompletedOfflineQuietHardwareResult) {
+      pendingOfflineQuietHardwareJob = {};
+      pendingOfflineQuietHardwareJob.requestId = requestId;
+      pendingOfflineQuietHardwareJob.kind = OfflineQuietHardwareJobKind::Program;
+      pendingOfflineQuietHardwareJob.program = program;
+      offlineQuietAbortRequested = false;
+      hasPendingOfflineQuietHardwareJob = true;
+      queued = true;
+    }
+    xSemaphoreGive(sharedMutex);
+  }
+  return queued;
+}
+
+bool takeOfflineQuietHardwareResult(
+    std::uint32_t requestId,
+    OfflineQuietHardwareResult& result) {
+  bool available = false;
+  if (xSemaphoreTake(sharedMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+    if (hasCompletedOfflineQuietHardwareResult &&
+        completedOfflineQuietHardwareResult.requestId == requestId) {
+      result = completedOfflineQuietHardwareResult;
+      completedOfflineQuietHardwareResult = {};
+      hasCompletedOfflineQuietHardwareResult = false;
+      available = true;
+    }
+    xSemaphoreGive(sharedMutex);
+  }
+  return available;
+}
+
+void serviceOfflineQuietMotionHardware() {
+  OfflineQuietHardwareJob job;
+  bool hasJob = false;
+  if (xSemaphoreTake(sharedMutex, pdMS_TO_TICKS(2)) == pdTRUE) {
+    if (hasPendingOfflineQuietHardwareJob) {
+      job = pendingOfflineQuietHardwareJob;
+      pendingOfflineQuietHardwareJob = {};
+      hasPendingOfflineQuietHardwareJob = false;
+      hasJob = true;
+    }
+    xSemaphoreGive(sharedMutex);
+  }
+  if (!hasJob) return;
+
+  OfflineQuietHardwareResult result;
+  result.requestId = job.requestId;
+  result.kind = job.kind;
+  if (job.kind == OfflineQuietHardwareJobKind::Home) {
+    result.success = executeOfflineQuietHome(result);
+  } else if (job.kind == OfflineQuietHardwareJobKind::Program) {
+    result.success = executeOfflineQuietProgram(job.program, result);
+  } else {
+    result.error = "Unknown quiet-motion hardware job.";
+  }
+
+  digitalWrite(MAGNET_PIN, LOW);
+  offlineQuietMagnetAuthorized = false;
+  scanSensors();
+  copyOfflineQuietOccupancy(result.observedOccupancy);
+  result.magnetLow = digitalRead(MAGNET_PIN) == LOW;
+  result.motorAPosition = motorA.currentPosition();
+  result.motorBPosition = motorB.currentPosition();
+  result.x = currentX;
+  result.y = currentY;
+
+  if (xSemaphoreTake(sharedMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+    completedOfflineQuietHardwareResult = result;
+    hasCompletedOfflineQuietHardwareResult = true;
+    xSemaphoreGive(sharedMutex);
+  }
+}
+
+void abortOfflineQuietMotionHardware() {
+  offlineQuietAbortRequested = true;
+  offlineQuietMagnetAuthorized = false;
+  digitalWrite(MAGNET_PIN, LOW);
+}
+
+bool offlineQuietMotionMagnetAuthorized() {
+  return offlineQuietMagnetAuthorized;
+}
+#endif
 
 void homeGantry() {
   Serial.println("[MOTION] Homing gantry.");

@@ -69,6 +69,7 @@ OfflinePhaseExecutionUpdate OfflinePhaseExecutionAdapter::issueCurrentPhase(
     attempt = lastAttempt + 1;
   }
   request.token.attempt = attempt;
+  request.move = transaction->motion.move;
   request.phase = transaction->motion.phases[transaction->currentPhase];
   request.graveyardSlotKey = transaction->graveyardSlotKey;
   request.graveyardState = transaction->graveyardState;

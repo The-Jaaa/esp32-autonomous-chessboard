@@ -22,7 +22,8 @@
     "test:offline-ownership": "node scripts/offline-ownership-regression.js",
     "test:offline-runtime": "node scripts/offline-runtime-regression.js",
     "test:offline-phase-execution": "node scripts/offline-phase-execution-regression.js",
-    "test:foundation": "npm run test:physical && npm run test:offline-rules && npm run test:offline-physical && npm run test:offline-engine && npm run test:offline-coordinator && npm run test:offline-integration && npm run test:offline-route && npm run test:offline-external-route && npm run test:offline-motion && npm run test:offline-motion-execution && npm run test:offline-ownership && npm run test:offline-runtime && npm run test:offline-phase-execution"
+    "test:offline-quiet-motion": "node scripts/offline-quiet-motion-regression.js",
+    "test:foundation": "npm run test:physical && npm run test:offline-rules && npm run test:offline-physical && npm run test:offline-engine && npm run test:offline-coordinator && npm run test:offline-integration && npm run test:offline-route && npm run test:offline-external-route && npm run test:offline-motion && npm run test:offline-motion-execution && npm run test:offline-ownership && npm run test:offline-runtime && npm run test:offline-phase-execution && npm run test:offline-quiet-motion"
   },
   "dependencies": {
     "@google/genai": "*",
