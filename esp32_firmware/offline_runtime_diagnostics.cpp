@@ -2,12 +2,14 @@
 
 #if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS || \
     ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS || \
-    ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS
+    ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
 
 #include "offline_ownership_diagnostics.h"
 #include "offline_diagnostic_serial.h"
 #include "offline_quiet_motion_hardware.h"
 #include "offline_capture_motion_hardware.h"
+#include "offline_lane_motion_hardware.h"
 
 #include <AccelStepper.h>
 #include <ArduinoJson.h>
@@ -62,12 +64,16 @@ constexpr bool kCaptureMotionDiagnostic =
     ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS != 0;
 constexpr bool kStagedCaptureMotionDiagnostic =
     ENABLE_OFFLINE_STAGED_CAPTURE_MOTION_DIAGNOSTICS != 0;
+constexpr bool kLaneMotionDiagnostic =
+    ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS != 0;
+constexpr bool kLaneBoardFixture = OFFLINE_LANE_MOTION_FIXTURE == 1;
 
 const char* diagnosticPrefix() {
   if (kStagedCaptureMotionDiagnostic) {
     return "OFFLINE_STAGED_CAPTURE_MOTION_DIAG";
   }
   if (kCaptureMotionDiagnostic) return "OFFLINE_CAPTURE_MOTION_DIAG";
+  if (kLaneMotionDiagnostic) return "OFFLINE_LANE_MOTION_DIAG";
   if (kQuietMotionDiagnostic) return "OFFLINE_QUIET_MOTION_DIAG";
   return kPhaseExecutionDiagnostic ? "OFFLINE_PHASE_DIAG" : "OFFLINE_RUNTIME_DIAG";
 }
@@ -294,7 +300,8 @@ bool emitMotionPlan(const offline::OfflineReadOnlyRuntime& runtime) {
 
 #if ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS || \
     ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS || \
-    ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS
+    ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
 
 struct PhaseExecutionDiagnosticResult {
   bool committed = false;
@@ -1326,6 +1333,374 @@ void emitCaptureSummary(
 
 #endif
 
+#if ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
+
+struct LaneMotionDiagnosticResult {
+  bool homeSucceeded = false;
+  bool programCompiled = false;
+  bool primitiveOrderValid = false;
+  bool sameSideLane = false;
+  bool finalOvershootOnly = false;
+  bool noGraveyardState = false;
+  bool retryObserved = false;
+  bool retryExhausted = false;
+  bool recoveryRequired = false;
+  bool opponentMoveCommitted = false;
+  bool finalOccupancyMatched = false;
+  bool motorActivity = false;
+  bool magnetEverHigh = false;
+  bool magnetLow = true;
+  std::size_t verifiedPhaseCount = 0;
+  std::string selectedMove;
+  std::string routeMode;
+  std::string committedFen;
+  std::string actualOccupancy;
+  std::string expectedOccupancy;
+  String error;
+};
+
+void emitLaneHardwareResult(
+    const OfflineLaneHardwareResult& result,
+    const char* stage) {
+  DynamicJsonDocument document(1536);
+  document["type"] = "hardware-result";
+  document["stage"] = stage;
+  document["requestId"] = result.requestId;
+  document["success"] = result.success;
+  document["homed"] = result.homed;
+  document["motorActivity"] = result.motorActivity;
+  document["magnetEverHigh"] = result.magnetEverHigh;
+  document["magnetLow"] = result.magnetLow;
+  document["motorA"] = result.motorAPosition;
+  document["motorB"] = result.motorBPosition;
+  document["x"] = result.x;
+  document["y"] = result.y;
+  document["occupancy"] = occupancyHex(result.observedOccupancy).c_str();
+  if (result.error.length() > 0) document["error"] = result.error;
+  emitDocument(document);
+}
+
+void emitLaneProgram(const offline::LaneMotionProgram& program) {
+  DynamicJsonDocument document(8192);
+  document["type"] = "lane-program";
+  document["status"] = offline::laneMotionCompileStatusName(program.status);
+  document["phaseKind"] = offline::motionPhaseKindName(program.phaseKind);
+  document["move"] = program.moveUci.c_str();
+  document["from"] = program.from.c_str();
+  document["to"] = program.to.c_str();
+  document["routeMode"] = offline::externalRouteModeName(program.routeMode);
+  document["routeCost"] = program.routeCost;
+  document["expectedBefore"] = occupancyHex(program.expectedBefore).c_str();
+  document["expectedAfter"] = occupancyHex(program.expectedAfter).c_str();
+  document["graveyardSlot"] = program.graveyardSlotKey.c_str();
+  addStrings(document.createNestedArray("rawPath"), program.rawPathSquares);
+  addStrings(document.createNestedArray("compressedPath"), program.compressedPathSquares);
+  addRouteTargets(document.createNestedArray("targets"), program.routeTargets);
+  JsonArray primitives = document.createNestedArray("primitives");
+  for (const auto& value : program.primitives) {
+    JsonObject primitive = primitives.createNestedObject();
+    primitive["kind"] = offline::laneMotionPrimitiveKindName(value.kind);
+    primitive["sourceRawIndex"] = value.sourceRawIndex;
+    primitive["targetRawIndex"] = value.targetRawIndex;
+    primitive["x"] = value.targetX;
+    primitive["y"] = value.targetY;
+    primitive["finalBoardDrop"] = value.finalBoardDrop;
+  }
+  if (!program.blockedReason.empty()) {
+    document["blockedReason"] = program.blockedReason.c_str();
+  }
+  emitDocument(document);
+}
+
+bool waitForLaneHardwareResult(
+    std::uint32_t requestId,
+    std::uint32_t timeoutMs,
+    OfflineLaneHardwareResult& result) {
+  const std::uint32_t startedAt = millis();
+  while (millis() - startedAt < timeoutMs) {
+    if (takeOfflineLaneHardwareResult(requestId, result)) return true;
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+  return false;
+}
+
+bool runLaneHomeGate(LaneMotionDiagnosticResult& diagnostic) {
+  constexpr std::uint32_t kHomeRequestId = 1;
+  if (!queueOfflineLaneHome(kHomeRequestId)) {
+    diagnostic.error = "Could not queue bounded lane diagnostic homing.";
+    return false;
+  }
+  OfflineLaneHardwareResult hardware;
+  if (!waitForLaneHardwareResult(kHomeRequestId, 50000, hardware)) {
+    abortOfflineLaneMotionHardware();
+    diagnostic.error = "Bounded lane diagnostic homing timed out.";
+    return false;
+  }
+  emitLaneHardwareResult(hardware, "home");
+  diagnostic.homeSucceeded = hardware.success && hardware.homed;
+  diagnostic.motorActivity = hardware.motorActivity;
+  diagnostic.magnetEverHigh = hardware.magnetEverHigh;
+  diagnostic.magnetLow = hardware.magnetLow;
+  if (!diagnostic.homeSucceeded) diagnostic.error = hardware.error;
+  return diagnostic.homeSucceeded;
+}
+
+bool validateLaneProgram(
+    const offline::LaneMotionProgram& program,
+    bool& sameSideLane,
+    bool& finalOvershootOnly) {
+  const std::size_t expectedBoardDrags = kLaneBoardFixture ? 5U : 1U;
+  if (!program.success() || program.primitives.size() != expectedBoardDrags + 6U ||
+      program.primitives[0].kind !=
+          offline::LaneMotionPrimitiveKind::TravelBoard ||
+      program.primitives[1].kind != offline::LaneMotionPrimitiveKind::Pickup ||
+      program.primitives[2].kind !=
+          offline::LaneMotionPrimitiveKind::DragCoordinate ||
+      program.primitives[3].kind !=
+          offline::LaneMotionPrimitiveKind::DragCoordinate ||
+      program.primitives[program.primitives.size() - 2].kind !=
+          offline::LaneMotionPrimitiveKind::Drop ||
+      program.primitives.back().kind !=
+          offline::LaneMotionPrimitiveKind::Verify) {
+    return false;
+  }
+  for (std::size_t index = 0; index < expectedBoardDrags; ++index) {
+    if (program.primitives[index + 4].kind !=
+        offline::LaneMotionPrimitiveKind::DragBoard) return false;
+  }
+
+  std::size_t overshoots = 0;
+  for (const auto& primitive : program.primitives) {
+    if (primitive.finalBoardDrop) ++overshoots;
+  }
+  const auto& finalDrag = program.primitives[3 + expectedBoardDrags];
+  finalOvershootOnly = overshoots == 1 && finalDrag.finalBoardDrop &&
+      finalDrag.targetRawIndex == offline::squareToRawIndex("e3");
+
+  if (program.routeTargets.size() < 3 ||
+      program.routeTargets[0].type != offline::ExternalTargetType::Coordinate ||
+      program.routeTargets[1].type != offline::ExternalTargetType::Coordinate) {
+    return false;
+  }
+  sameSideLane = program.routeTargets[0].lane == 'Z' &&
+      program.routeTargets[1].lane == 'Z' &&
+      program.routeTargets[0].label == "Z5" &&
+      program.routeTargets[1].label == "Z3" &&
+      program.routeTargets[0].x == 13300 &&
+      program.routeTargets[0].y == 34450 &&
+      program.routeTargets[1].x == 21300 &&
+      program.routeTargets[1].y == 34450;
+  return sameSideLane && finalOvershootOnly;
+}
+
+LaneMotionDiagnosticResult runRealLaneMotionExecution(
+    offline::OfflineReadOnlyRuntime& runtime,
+    const std::string& previewAfterFen) {
+  LaneMotionDiagnosticResult diagnostic;
+  diagnostic.homeSucceeded = true;
+  const auto transaction = runtime.coordinator().pendingMotionTransaction();
+  const offline::ExternalRouteMode expectedMode = kLaneBoardFixture
+      ? offline::ExternalRouteMode::LaneBoard
+      : offline::ExternalRouteMode::Lane;
+  const int expectedCost = kLaneBoardFixture ? 1366 : 1300;
+  if (!transaction || transaction->selectedMove != "d5e3" ||
+      transaction->motion.strategy != offline::MotionStrategy::Quiet ||
+      transaction->motion.phases.size() != 1 ||
+      !transaction->motion.phases[0].transfer ||
+      transaction->motion.phases[0].transfer->mode != expectedMode ||
+      transaction->motion.phases[0].transfer->routeCost != expectedCost ||
+      !transaction->graveyardSlotKey.empty() ||
+      transaction->graveyardState != offline::GraveyardSlotState::Free) {
+    diagnostic.error = "The opponent plan is not the controlled d5e3 lane fixture.";
+    return diagnostic;
+  }
+  diagnostic.selectedMove = transaction->selectedMove;
+  diagnostic.routeMode = offline::externalRouteModeName(expectedMode);
+  diagnostic.noGraveyardState = true;
+
+  offline::OfflinePhaseExecutionAdapter adapter(runtime);
+  auto update = adapter.begin();
+  emitExecutionUpdate(update);
+  if (update.state != offline::OfflinePhaseExecutionState::PhaseReady ||
+      !update.request) {
+    diagnostic.error = "The phase adapter did not issue the lane phase.";
+    return diagnostic;
+  }
+
+  std::uint32_t hardwareRequestId = 30;
+  for (std::size_t guard = 0; guard < 3; ++guard) {
+    if ((adapter.state() != offline::OfflinePhaseExecutionState::PhaseReady &&
+         adapter.state() != offline::OfflinePhaseExecutionState::RetryReady) ||
+        !adapter.currentRequest()) {
+      break;
+    }
+    const auto request = *adapter.currentRequest();
+    const offline::LaneMotionProgram program =
+        offline::OfflineLaneMotionCompiler{}.compile(request);
+    emitLaneProgram(program);
+    diagnostic.programCompiled = program.success();
+    diagnostic.primitiveOrderValid = validateLaneProgram(
+        program, diagnostic.sameSideLane, diagnostic.finalOvershootOnly);
+    diagnostic.expectedOccupancy = occupancyHex(program.expectedAfter);
+    if (!program.success() || !diagnostic.primitiveOrderValid) {
+      diagnostic.error = program.blockedReason.empty()
+          ? "The lane primitive sequence did not match the fixture."
+          : program.blockedReason.c_str();
+      return diagnostic;
+    }
+    if (!offline::laneMotionAttemptAllowed(request.token)) {
+      diagnostic.retryExhausted = true;
+      diagnostic.error = "The lane phase retry limit was exhausted.";
+      return diagnostic;
+    }
+
+    update = adapter.takeCurrentRequest();
+    emitExecutionUpdate(update);
+    if (update.state != offline::OfflinePhaseExecutionState::AwaitingReport) {
+      diagnostic.error = "The adapter did not accept the lane hardware request.";
+      return diagnostic;
+    }
+    const std::uint32_t requestId = hardwareRequestId++;
+    if (!queueOfflineLaneProgram(requestId, program)) {
+      diagnostic.error = "Could not queue the lane hardware program.";
+      return diagnostic;
+    }
+    OfflineLaneHardwareResult hardware;
+    if (!waitForLaneHardwareResult(requestId, 150000, hardware)) {
+      abortOfflineLaneMotionHardware();
+      diagnostic.error = "Lane hardware execution timed out after 150 seconds.";
+      return diagnostic;
+    }
+    emitLaneHardwareResult(hardware, "lane-transfer");
+    diagnostic.motorActivity = diagnostic.motorActivity || hardware.motorActivity;
+    diagnostic.magnetEverHigh = diagnostic.magnetEverHigh || hardware.magnetEverHigh;
+    diagnostic.magnetLow = hardware.magnetLow;
+    diagnostic.actualOccupancy = occupancyHex(hardware.observedOccupancy);
+
+    offline::OfflinePhaseExecutionReport report;
+    report.token = request.token;
+    report.success = hardware.success;
+    report.occupancy = hardware.observedOccupancy;
+    emitPhaseReport(report, hardware.success ? "real-success" : "real-failure");
+    update = adapter.submitReport(report);
+    emitExecutionUpdate(update);
+
+    if (hardware.success) {
+      diagnostic.verifiedPhaseCount = 1;
+      diagnostic.finalOccupancyMatched =
+          hardware.observedOccupancy == program.expectedAfter;
+    } else if (hardware.observedOccupancy == program.expectedBefore &&
+               request.token.attempt == 1 &&
+               update.state == offline::OfflinePhaseExecutionState::RetryReady) {
+      diagnostic.retryObserved = true;
+      continue;
+    } else if (update.state ==
+               offline::OfflinePhaseExecutionState::RecoveryRequired) {
+      diagnostic.recoveryRequired = true;
+      diagnostic.error = hardware.error;
+      return diagnostic;
+    }
+
+    if (adapter.state() == offline::OfflinePhaseExecutionState::Complete ||
+        adapter.state() == offline::OfflinePhaseExecutionState::GameOver) {
+      diagnostic.committedFen = runtime.coordinator().physical().game().fen();
+      diagnostic.opponentMoveCommitted =
+          diagnostic.committedFen == previewAfterFen &&
+          runtime.coordinator().physical().game().status().outcome ==
+              offline::GameOutcome::Checkmate;
+      return diagnostic;
+    }
+  }
+  if (diagnostic.error.length() == 0) {
+    diagnostic.error = "Lane execution stopped before the move committed.";
+  }
+  return diagnostic;
+}
+
+void emitLaneSummary(
+    const LaneMotionDiagnosticResult& diagnostic,
+    std::uint32_t searchSensorScans,
+    std::uint32_t searchHeartbeatAttempts,
+    std::uint32_t searchElapsedMs) {
+  const std::size_t internalFree =
+      heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  const std::size_t largestInternal =
+      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  const std::size_t psramFree = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+  const std::size_t stackHeadroom = uxTaskGetStackHighWaterMark(nullptr);
+
+  emitCheck("bounded-home", diagnostic.homeSucceeded);
+  emitCheck("lane-program-compiled", diagnostic.programCompiled);
+  emitCheck("ordered-primitives", diagnostic.primitiveOrderValid);
+  emitCheck("same-side-lane", diagnostic.sameSideLane);
+  emitCheck("final-board-only-overshoot", diagnostic.finalOvershootOnly);
+  emitCheck("no-graveyard-state", diagnostic.noGraveyardState);
+  emitCheck("one-phase-verified", diagnostic.verifiedPhaseCount == 1);
+  emitCheck("real-motor-activity", diagnostic.motorActivity);
+  emitCheck("magnet-activated-for-drag", diagnostic.magnetEverHigh);
+  emitCheck("magnet-low", diagnostic.magnetLow && offlineRuntimeMagnetIsLow());
+  emitCheck("final-occupancy", diagnostic.finalOccupancyMatched);
+  emitCheck("opponent-move-committed", diagnostic.opponentMoveCommitted);
+  emitCheck("retry-limit", !diagnostic.retryExhausted);
+  emitCheck("no-unresolved-recovery", !diagnostic.recoveryRequired);
+  emitCheck("internal-heap-threshold", internalFree >= kMinimumInternalHeapBytes);
+  emitCheck(
+      "largest-internal-block-threshold",
+      largestInternal >= kMinimumLargestInternalBlockBytes);
+  emitCheck("psram-threshold", psramFree >= kMinimumFreePsramBytes);
+  emitCheck("stack-threshold", stackHeadroom >= kMinimumStackHeadroomBytes);
+  emitCheck(
+      "sensor-loop-progress",
+      searchSensorScans > 0 && offlineRuntimeSensorMaxGapMs < kMaximumSensorGapMs);
+  emitCheck(
+      "search-deadline",
+      searchElapsedMs <= 3000U + kSearchOverrunAllowanceMs);
+
+  DynamicJsonDocument document(2560);
+  document["type"] = "summary";
+  document["pass"] = overallPass;
+  document["fixture"] = kLaneBoardFixture ? "LaneBoard" : "DirectLane";
+  document["homeSucceeded"] = diagnostic.homeSucceeded;
+  document["realMotionEnabled"] = true;
+  document["motorActivity"] = diagnostic.motorActivity;
+  document["magnetEverHigh"] = diagnostic.magnetEverHigh;
+  document["magnetLow"] = diagnostic.magnetLow && offlineRuntimeMagnetIsLow();
+  document["commandConsumptionBlocked"] = true;
+  document["programCompiled"] = diagnostic.programCompiled;
+  document["orderedPrimitives"] = diagnostic.primitiveOrderValid;
+  document["sameSideLane"] = diagnostic.sameSideLane;
+  document["finalOvershootOnly"] = diagnostic.finalOvershootOnly;
+  document["noGraveyardState"] = diagnostic.noGraveyardState;
+  document["verifiedPhaseCount"] = diagnostic.verifiedPhaseCount;
+  document["retryObserved"] = diagnostic.retryObserved;
+  document["retryExhausted"] = diagnostic.retryExhausted;
+  document["recoveryRequired"] = diagnostic.recoveryRequired;
+  document["finalOccupancyMatched"] = diagnostic.finalOccupancyMatched;
+  document["opponentMoveCommitted"] = diagnostic.opponentMoveCommitted;
+  document["selectedMove"] = diagnostic.selectedMove.c_str();
+  document["routeMode"] = diagnostic.routeMode.c_str();
+  document["committedFen"] = diagnostic.committedFen.c_str();
+  document["actualOccupancy"] = diagnostic.actualOccupancy.c_str();
+  document["expectedOccupancy"] = diagnostic.expectedOccupancy.c_str();
+  if (diagnostic.error.length() > 0) document["error"] = diagnostic.error;
+  document["sensorScans"] = offlineRuntimeSensorScanCount;
+  document["sensorMaxGapMs"] = offlineRuntimeSensorMaxGapMs;
+  document["searchSensorScans"] = searchSensorScans;
+  document["heartbeatAttempts"] = ownershipDiagnosticHeartbeatAttempts;
+  document["searchHeartbeatAttempts"] = searchHeartbeatAttempts;
+  document["heartbeatMaxElapsedMs"] = ownershipDiagnosticHeartbeatMaxElapsedMs;
+  document["searchElapsedMs"] = searchElapsedMs;
+  document["internalFree"] = internalFree;
+  document["largestInternal"] = largestInternal;
+  document["psramFree"] = psramFree;
+  document["stackHeadroom"] = stackHeadroom;
+  document["core"] = xPortGetCoreID();
+  document["priority"] = uxTaskPriorityGet(nullptr);
+  emitDocument(document);
+}
+
+#endif
+
 #endif
 
 void emitSummary(
@@ -1412,9 +1787,11 @@ void runtimeTask(void*) {
   StaticJsonDocument<384> start;
   start["type"] = "start";
   start["motorsLocked"] =
-      !(kQuietMotionDiagnostic || kCaptureMotionDiagnostic);
+      !(kQuietMotionDiagnostic || kCaptureMotionDiagnostic ||
+        kLaneMotionDiagnostic);
   start["realMotionEnabled"] =
-      kQuietMotionDiagnostic || kCaptureMotionDiagnostic;
+      kQuietMotionDiagnostic || kCaptureMotionDiagnostic ||
+      kLaneMotionDiagnostic;
   start["magnetLow"] = offlineRuntimeMagnetIsLow();
   start["core"] = xPortGetCoreID();
   start["priority"] = uxTaskPriorityGet(nullptr);
@@ -1424,6 +1801,8 @@ void runtimeTask(void*) {
   start["maxDepth"] = 12;
   if (kStagedCaptureMotionDiagnostic) {
     start["fixture"] = "staged-e2d1-i4";
+  } else if (kLaneMotionDiagnostic) {
+    start["fixture"] = kLaneBoardFixture ? "LaneBoard" : "DirectLane";
   }
   emitDocument(start);
 
@@ -1461,6 +1840,14 @@ void runtimeTask(void*) {
   config.initialFen = "k7/8/8/8/8/8/1NPPbP2/2B2n1K w - - 0 1";
 #elif ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS
   config.initialFen = "k7/8/8/3p4/8/8/4R3/4K3 w - - 0 1";
+#elif ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
+#if OFFLINE_LANE_MOTION_FIXTURE == 1
+  config.initialFen =
+      "k7/8/8/3n4/pppppppp/2p3p1/4NN1R/4BKR1 w - - 0 1";
+#else
+  config.initialFen =
+      "k7/8/8/3n4/pppppppp/8/4NN1R/4BKR1 w - - 0 1";
+#endif
 #endif
   std::unique_ptr<offline::OfflineReadOnlyRuntime> runtime(
       new (std::nothrow) offline::OfflineReadOnlyRuntime(config));
@@ -1486,6 +1873,15 @@ void runtimeTask(void*) {
   if (!runCaptureHomeGate(captureDiagnostic)) {
     captureDiagnostic.magnetLow = offlineRuntimeMagnetIsLow();
     emitCaptureSummary(captureDiagnostic, 0, 0, 0);
+    summaryEmitted = true;
+    vTaskDelete(nullptr);
+    return;
+  }
+#elif ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
+  LaneMotionDiagnosticResult laneDiagnostic;
+  if (!runLaneHomeGate(laneDiagnostic)) {
+    laneDiagnostic.magnetLow = offlineRuntimeMagnetIsLow();
+    emitLaneSummary(laneDiagnostic, 0, 0, 0);
     summaryEmitted = true;
     vTaskDelete(nullptr);
     return;
@@ -1605,6 +2001,23 @@ void runtimeTask(void*) {
             "The controlled capture plan was not frozen before execution.";
       }
       emitCaptureSummary(
+          execution,
+          searchSensorScans,
+          searchHeartbeatAttempts,
+          searchElapsedMs);
+#elif ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
+      const auto state = runtime->coordinator().currentState();
+      const auto transaction = runtime->coordinator().pendingMotionTransaction();
+      LaneMotionDiagnosticResult execution;
+      execution.homeSucceeded = laneDiagnostic.homeSucceeded;
+      if (planFrozen && state.opponentPlan && transaction) {
+        execution = runRealLaneMotionExecution(
+            *runtime, state.opponentPlan->afterFen);
+      } else {
+        execution.error =
+            "The controlled lane plan was not frozen before execution.";
+      }
+      emitLaneSummary(
           execution,
           searchSensorScans,
           searchHeartbeatAttempts,

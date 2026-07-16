@@ -2362,17 +2362,27 @@ function makeTransferSteps(fromTarget, dragTargets, verify = {}, options = {}) {
 }
 
 function laneRouteTargets(game, fromSquare, toSquare, preferredLane = preferredLaneForSquare(fromSquare), ignoredSquares = []) {
-  const sourceLaneSlot = chooseClearLaneSlot(game, fromSquare, preferredLane, ignoredSquares);
-  if (!sourceLaneSlot) return [];
+  const sourceRank = squareRank(fromSquare);
+  const targetRank = squareRank(toSquare);
+  const sourceSlots = sortedLaneCandidates(fromSquare, preferredLane)
+    .filter((slot) => Number(slot.rank) === sourceRank)
+    .filter((slot) => lanePathClear(game, fromSquare, slot.lane, ignoredSquares));
 
-  const targetLaneSlot = chooseClearLaneSlot(game, toSquare, sourceLaneSlot.lane || preferredLane, ignoredSquares);
-  if (!targetLaneSlot) return [];
+  for (const sourceSlot of sourceSlots) {
+    const targetSlot = sortedLaneCandidates(toSquare, sourceSlot.lane)
+      .find((slot) => slot.lane === sourceSlot.lane &&
+        Number(slot.rank) === targetRank &&
+        lanePathClear(game, toSquare, slot.lane, ignoredSquares) &&
+        laneSlotTransitClear(sourceSlot, slot));
+    if (!targetSlot) continue;
 
-  return dedupePlanTargets([
-    coordinateTarget(sourceLaneSlot, 'lane'),
-    coordinateTarget(targetLaneSlot, 'lane'),
-    squareTarget(toSquare)
-  ]);
+    return dedupePlanTargets([
+      coordinateTarget(sourceSlot, 'lane'),
+      coordinateTarget(targetSlot, 'lane'),
+      squareTarget(toSquare)
+    ]);
+  }
+  return [];
 }
 
 function laneBoardRoute(game, fromSquare, toSquare, preferredLane = preferredLaneForSquare(fromSquare), ignoredSquares = []) {

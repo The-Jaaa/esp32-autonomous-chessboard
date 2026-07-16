@@ -11,6 +11,7 @@
 #include "offline_runtime_diagnostics.h"
 #include "offline_quiet_motion_hardware.h"
 #include "offline_capture_motion_hardware.h"
+#include "offline_lane_motion_hardware.h"
 
 #if __has_include("firmware_secrets.h")
 #include "firmware_secrets.h"
@@ -123,8 +124,22 @@ OfflineCaptureHardwareResult completedOfflineCaptureHardwareResult;
 bool hasCompletedOfflineCaptureHardwareResult = false;
 #endif
 
+#if ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
+struct OfflineLaneHardwareJob {
+  std::uint32_t requestId = 0;
+  OfflineQuietHardwareJobKind kind = OfflineQuietHardwareJobKind::None;
+  offline::LaneMotionProgram program;
+};
+
+OfflineLaneHardwareJob pendingOfflineLaneHardwareJob;
+bool hasPendingOfflineLaneHardwareJob = false;
+OfflineLaneHardwareResult completedOfflineLaneHardwareResult;
+bool hasCompletedOfflineLaneHardwareResult = false;
+#endif
+
 #if ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS || \
-    ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS
+    ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
 volatile bool offlineQuietMagnetAuthorized = false;
 volatile bool offlineQuietAbortRequested = false;
 #endif
@@ -176,7 +191,8 @@ bool enqueueMotionCommand(const String& commandJson);
 
 #if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS || \
     ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS || \
-    ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS
+    ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
 bool offlineRuntimeMagnetIsLow() {
   return digitalRead(MAGNET_PIN) == LOW;
 }
@@ -192,7 +208,8 @@ void setup() {
 #if ENABLE_OFFLINE_EMBEDDED_DIAGNOSTICS || ENABLE_OFFLINE_OWNERSHIP_DIAGNOSTICS || \
     ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS || \
     ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS || \
-    ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS
+    ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
   beginOfflineDiagnosticSerial();
 #endif
 
@@ -232,7 +249,8 @@ void loop() {
   if (offlineEmbeddedDiagnosticsActive() || offlineOwnershipDiagnosticsActive() ||
       offlineRuntimeDiagnosticsActive()) {
 #if ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS || \
-    ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS
+    ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
     if (!offlineQuietMotionMagnetAuthorized()) {
       digitalWrite(MAGNET_PIN, LOW);
     }
@@ -244,13 +262,15 @@ void loop() {
   scanSensors();
 #if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS || \
     ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS || \
-    ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS
+    ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
   publishOfflineRuntimeStableSnapshot(stableOccupancy, millis());
 #endif
 #if ENABLE_OFFLINE_OWNERSHIP_DIAGNOSTICS || ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || \
     ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS || \
     ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS || \
-    ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS
+    ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
   updateOfflineOwnershipDiagnosticLeds(millis());
 #else
   updateLedAnimation();
@@ -260,6 +280,8 @@ void loop() {
   serviceOfflineQuietMotionHardware();
 #elif ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS
   serviceOfflineCaptureMotionHardware();
+#elif ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
+  serviceOfflineLaneMotionHardware();
 #endif
 
   String commandJson;
@@ -298,7 +320,8 @@ void networkTask(void* parameter) {
 #if ENABLE_OFFLINE_OWNERSHIP_DIAGNOSTICS || ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || \
     ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS || \
     ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS || \
-    ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS
+    ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
     runOfflineOwnershipNetworkStep(now);
     vTaskDelay(pdMS_TO_TICKS(25));
     continue;
@@ -349,7 +372,8 @@ void scanSensors() {
 
 #if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS || \
     ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS || \
-    ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS
+    ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
   static uint32_t previousRuntimeScanMs = 0;
   const uint32_t runtimeScanStartedMs = millis();
   if (previousRuntimeScanMs != 0) {
@@ -897,7 +921,8 @@ void goToSquareWithDragOvershoot(int index) {
 }
 
 #if ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS || \
-    ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS
+    ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
 namespace {
 
 constexpr std::uint32_t OFFLINE_HOME_AXIS_TIMEOUT_MS = 20000;
@@ -1300,6 +1325,106 @@ bool executeOfflineCaptureProgram(
 }
 #endif
 
+#if ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
+bool executeOfflineLaneProgram(
+    const offline::LaneMotionProgram& program,
+    OfflineLaneHardwareResult& result) {
+  offline::Occupancy observed;
+  scanSensors();
+  copyOfflineQuietOccupancy(observed);
+  if (!program.success() || observed != program.expectedBefore) {
+    result.error = program.success()
+                       ? "Observed occupancy does not match the lane phase before-state."
+                       : "The lane motion program is not executable.";
+    return false;
+  }
+
+  bool pickedUp = false;
+  for (const offline::LaneMotionPrimitive& primitive : program.primitives) {
+    if (offlineQuietAbortRequested) {
+      result.error = "Lane motion was aborted by the diagnostic watchdog.";
+      return false;
+    }
+    switch (primitive.kind) {
+      case offline::LaneMotionPrimitiveKind::TravelBoard:
+        if (primitive.targetRawIndex < 0 || primitive.targetRawIndex >= 64) {
+          result.error = "Lane travel has an invalid board target.";
+          return false;
+        }
+        digitalWrite(MAGNET_PIN, LOW);
+        offlineQuietMagnetAuthorized = false;
+        result.motorActivity = true;
+        goToSquare(primitive.targetRawIndex, false);
+        break;
+      case offline::LaneMotionPrimitiveKind::Pickup:
+        if (pickedUp) {
+          result.error = "Lane pickup occurred while a piece was already held.";
+          return false;
+        }
+        offlineQuietMagnetAuthorized = true;
+        digitalWrite(MAGNET_PIN, HIGH);
+        result.magnetEverHigh = true;
+        pickedUp = true;
+        offlineQuietDelayWithSensorScans(160);
+        break;
+      case offline::LaneMotionPrimitiveKind::DragCoordinate:
+        if (!pickedUp || !isfinite(primitive.targetX) ||
+            !isfinite(primitive.targetY)) {
+          result.error = "Lane coordinate drag is out of order or invalid.";
+          return false;
+        }
+        offlineQuietMagnetAuthorized = true;
+        digitalWrite(MAGNET_PIN, HIGH);
+        result.magnetEverHigh = true;
+        result.motorActivity = true;
+        goToXY(lround(primitive.targetX), lround(primitive.targetY), true);
+        break;
+      case offline::LaneMotionPrimitiveKind::DragBoard:
+        if (!pickedUp || primitive.targetRawIndex < 0 ||
+            primitive.targetRawIndex >= 64) {
+          result.error = "Lane board drag is out of order or invalid.";
+          return false;
+        }
+        offlineQuietMagnetAuthorized = true;
+        digitalWrite(MAGNET_PIN, HIGH);
+        result.magnetEverHigh = true;
+        result.motorActivity = true;
+        if (primitive.finalBoardDrop) {
+          goToSquareWithDragOvershoot(primitive.targetRawIndex);
+        } else {
+          goToSquare(primitive.targetRawIndex, true);
+        }
+        break;
+      case offline::LaneMotionPrimitiveKind::Drop:
+        if (!pickedUp) {
+          result.error = "Lane drop occurred without a held piece.";
+          return false;
+        }
+        digitalWrite(MAGNET_PIN, LOW);
+        offlineQuietMagnetAuthorized = false;
+        pickedUp = false;
+        offlineQuietDelayWithSensorScans(80);
+        break;
+      case offline::LaneMotionPrimitiveKind::Verify:
+        if (pickedUp) {
+          result.error = "Lane verification occurred before drop.";
+          return false;
+        }
+        break;
+    }
+  }
+
+  digitalWrite(MAGNET_PIN, LOW);
+  offlineQuietMagnetAuthorized = false;
+  if (!waitForOfflineQuietOccupancy(
+          program.expectedAfter, OFFLINE_QUIET_SETTLE_TIMEOUT_MS)) {
+    result.error = "Board occupancy did not match the lane phase after-state.";
+    return false;
+  }
+  return true;
+}
+#endif
+
 }  // namespace
 
 #if ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS
@@ -1514,7 +1639,112 @@ void abortOfflineCaptureMotionHardware() {
 }
 #endif
 
-#if ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
+bool queueOfflineLaneHome(std::uint32_t requestId) {
+  bool queued = false;
+  if (xSemaphoreTake(sharedMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+    if (!hasPendingOfflineLaneHardwareJob &&
+        !hasCompletedOfflineLaneHardwareResult) {
+      pendingOfflineLaneHardwareJob = {};
+      pendingOfflineLaneHardwareJob.requestId = requestId;
+      pendingOfflineLaneHardwareJob.kind = OfflineQuietHardwareJobKind::Home;
+      offlineQuietAbortRequested = false;
+      hasPendingOfflineLaneHardwareJob = true;
+      queued = true;
+    }
+    xSemaphoreGive(sharedMutex);
+  }
+  return queued;
+}
+
+bool queueOfflineLaneProgram(
+    std::uint32_t requestId,
+    const offline::LaneMotionProgram& program) {
+  bool queued = false;
+  if (xSemaphoreTake(sharedMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+    if (!hasPendingOfflineLaneHardwareJob &&
+        !hasCompletedOfflineLaneHardwareResult) {
+      pendingOfflineLaneHardwareJob = {};
+      pendingOfflineLaneHardwareJob.requestId = requestId;
+      pendingOfflineLaneHardwareJob.kind = OfflineQuietHardwareJobKind::Program;
+      pendingOfflineLaneHardwareJob.program = program;
+      offlineQuietAbortRequested = false;
+      hasPendingOfflineLaneHardwareJob = true;
+      queued = true;
+    }
+    xSemaphoreGive(sharedMutex);
+  }
+  return queued;
+}
+
+bool takeOfflineLaneHardwareResult(
+    std::uint32_t requestId,
+    OfflineLaneHardwareResult& result) {
+  bool available = false;
+  if (xSemaphoreTake(sharedMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+    if (hasCompletedOfflineLaneHardwareResult &&
+        completedOfflineLaneHardwareResult.requestId == requestId) {
+      result = completedOfflineLaneHardwareResult;
+      completedOfflineLaneHardwareResult = {};
+      hasCompletedOfflineLaneHardwareResult = false;
+      available = true;
+    }
+    xSemaphoreGive(sharedMutex);
+  }
+  return available;
+}
+
+void serviceOfflineLaneMotionHardware() {
+  OfflineLaneHardwareJob job;
+  bool hasJob = false;
+  if (xSemaphoreTake(sharedMutex, pdMS_TO_TICKS(2)) == pdTRUE) {
+    if (hasPendingOfflineLaneHardwareJob) {
+      job = pendingOfflineLaneHardwareJob;
+      pendingOfflineLaneHardwareJob = {};
+      hasPendingOfflineLaneHardwareJob = false;
+      hasJob = true;
+    }
+    xSemaphoreGive(sharedMutex);
+  }
+  if (!hasJob) return;
+
+  OfflineLaneHardwareResult result;
+  result.requestId = job.requestId;
+  result.kind = job.kind;
+  if (job.kind == OfflineQuietHardwareJobKind::Home) {
+    result.success = executeOfflineQuietHome(result);
+  } else if (job.kind == OfflineQuietHardwareJobKind::Program) {
+    result.success = executeOfflineLaneProgram(job.program, result);
+  } else {
+    result.error = "Unknown lane-motion hardware job.";
+  }
+
+  digitalWrite(MAGNET_PIN, LOW);
+  offlineQuietMagnetAuthorized = false;
+  scanSensors();
+  copyOfflineQuietOccupancy(result.observedOccupancy);
+  result.magnetLow = digitalRead(MAGNET_PIN) == LOW;
+  result.motorAPosition = motorA.currentPosition();
+  result.motorBPosition = motorB.currentPosition();
+  result.x = currentX;
+  result.y = currentY;
+
+  if (xSemaphoreTake(sharedMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+    completedOfflineLaneHardwareResult = result;
+    hasCompletedOfflineLaneHardwareResult = true;
+    xSemaphoreGive(sharedMutex);
+  }
+}
+
+void abortOfflineLaneMotionHardware() {
+  offlineQuietAbortRequested = true;
+  offlineQuietMagnetAuthorized = false;
+  digitalWrite(MAGNET_PIN, LOW);
+}
+#endif
+
+#if ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
 bool offlineQuietMotionMagnetAuthorized() {
   return offlineQuietMagnetAuthorized;
 }

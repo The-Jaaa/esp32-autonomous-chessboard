@@ -62,6 +62,9 @@ if (-not $SkipFirmware) {
     Invoke-Checked 'ESP32 guarded real staged-capture diagnostic firmware builds' {
         & (Join-Path $PSScriptRoot 'verify-offline-staged-capture-motion.ps1')
     }
+    Invoke-Checked 'ESP32 guarded real lane-motion diagnostic firmware builds' {
+        & (Join-Path $PSScriptRoot 'verify-offline-lane-motion.ps1')
+    }
 }
 
 Write-Host "`nFoundation verification passed." -ForegroundColor Green

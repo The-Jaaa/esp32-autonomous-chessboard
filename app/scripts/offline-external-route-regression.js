@@ -30,6 +30,11 @@ const fixtures = [
   { kind: 'T', id: 'forced-i-lane', fen: '7k/8/8/8/8/8/8/4K2R w - - 0 1', from: 'h1', to: 'h8', forceLane: true },
   { kind: 'T', id: 'board-blocked-lane-fallback', fen: '7k/8/8/8/pppppppp/8/1R6/K7 w - - 0 1', from: 'b2', to: 'g7' },
   { kind: 'T', id: 'opposite-lane-fallback', fen: '7k/8/8/8/2pR4/8/8/K7 w - - 0 1', from: 'd4', to: 'd6', forceLane: true },
+  {
+    kind: 'T', id: 'same-side-pair-required',
+    fen: 'k7/8/8/3n4/pppppppp/2p5/4NNR1/4BKR1 b - - 1 1',
+    from: 'd5', to: 'e3', forceLane: true
+  },
   { kind: 'T', id: 'occupied-source-slot', fen: '7k/8/8/8/8/8/8/R3K3 w - - 0 1', from: 'a1', to: 'a8', forceLane: true, occupied: ['Z1'] },
   {
     kind: 'T', id: 'lane-board-reentry',
@@ -330,6 +335,14 @@ for (const fixture of fixtures) {
 
 assert.deepStrictEqual(results.get('repeat-lane-a'), results.get('repeat-lane-b'),
   'Repeated lane planning must be deterministic.');
+const sameSideRoute = results.get('same-side-pair-required');
+assert.strictEqual(sameSideRoute.status, 'success',
+  'The mixed-side safety fixture must retain a routable same-side fallback.');
+const laneTargets = sameSideRoute.targets.split(',').filter((target) => target.startsWith('C:lane:'));
+assert.strictEqual(laneTargets.length, 2,
+  'A direct lane route must expose one exit and one entry coordinate.');
+assert.strictEqual(laneTargets[0].split(':')[3], laneTargets[1].split(':')[3],
+  'A direct lane route must never connect Z directly to I.');
 
 console.log(JSON.stringify({
   success: true,

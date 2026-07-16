@@ -189,21 +189,6 @@ std::vector<ExternalSlot> sortedLaneCandidates(
   return candidates;
 }
 
-std::optional<ExternalSlot> chooseClearLaneSlot(
-    const Occupancy& expected,
-    const std::vector<ExternalSlot>& slots,
-    const std::vector<std::string>& occupiedKeys,
-    const std::string& square,
-    char preferredLane,
-    const std::vector<std::string>& ignoredSquares) {
-  const std::vector<ExternalSlot> candidates = sortedLaneCandidates(
-      slots, occupiedKeys, square, preferredLane);
-  const auto selected = std::find_if(candidates.begin(), candidates.end(), [&](const ExternalSlot& slot) {
-    return lanePathClear(expected, square, slot.lane, ignoredSquares);
-  });
-  return selected == candidates.end() ? std::nullopt : std::optional<ExternalSlot>(*selected);
-}
-
 bool laneTransitClear(
     const std::vector<ExternalSlot>& slots,
     const std::vector<std::string>& occupiedKeys,
@@ -425,26 +410,37 @@ ExternalTransferResult OfflineExternalRoutePlanner::planTransfer(
   std::vector<std::string> ignored{request.from, request.to};
   ignored.insert(ignored.end(), request.ignoredSquares.begin(), request.ignoredSquares.end());
 
-  const std::optional<ExternalSlot> source = chooseClearLaneSlot(
-      request.expectedOccupancy, slots, request.occupiedSlotKeys,
-      request.from, preferred, ignored);
-  if (source) {
-    const std::optional<ExternalSlot> target = chooseClearLaneSlot(
-        request.expectedOccupancy, slots, request.occupiedSlotKeys,
-        request.to, source->lane, ignored);
-    if (target) {
+  const int sourceRank = rankNumber(request.from);
+  const int targetRank = rankNumber(request.to);
+  const std::vector<ExternalSlot> directSources = sortedLaneCandidates(
+      slots, request.occupiedSlotKeys, request.from, preferred);
+  for (const ExternalSlot& source : directSources) {
+    if (source.rank != sourceRank ||
+        !lanePathClear(request.expectedOccupancy, request.from, source.lane, ignored)) {
+      continue;
+    }
+    const std::vector<ExternalSlot> directTargets = sortedLaneCandidates(
+        slots, request.occupiedSlotKeys, request.to, source.lane);
+    const auto target = std::find_if(
+        directTargets.begin(), directTargets.end(), [&](const ExternalSlot& candidate) {
+          return candidate.lane == source.lane && candidate.rank == targetRank &&
+                 lanePathClear(
+                     request.expectedOccupancy, request.to, candidate.lane, ignored) &&
+                 laneTransitClear(slots, request.occupiedSlotKeys, source, candidate);
+        });
+    if (target != directTargets.end()) {
       ExternalTransferResult result;
       result.status = ExternalRouteStatus::Success;
       result.mode = ExternalRouteMode::Lane;
       result.rawPathSquares = {request.from, request.to};
       result.compressedPathSquares = result.rawPathSquares;
       result.targets = dedupeTargets({
-          coordinateTarget(*source, "lane"),
+          coordinateTarget(source, "lane"),
           coordinateTarget(*target, "lane"),
           squareTarget(request.to)});
       result.routeCost = 1000 + static_cast<int>(result.targets.size()) * 100;
       result.sourceSlot = source;
-      result.entrySlot = target;
+      result.entrySlot = *target;
       return result;
     }
   }
@@ -452,7 +448,6 @@ ExternalTransferResult OfflineExternalRoutePlanner::planTransfer(
   ExternalTransferResult result;
   result.status = ExternalRouteStatus::NoLanePath;
   result.blockedReason = "The configured Z/I lane path is blocked.";
-  const int sourceRank = rankNumber(request.from);
   std::vector<ExternalSlot> sourceSlots = sortedLaneCandidates(
       slots, request.occupiedSlotKeys, request.from, preferred);
   sourceSlots.erase(std::remove_if(sourceSlots.begin(), sourceSlots.end(), [&](const ExternalSlot& slot) {

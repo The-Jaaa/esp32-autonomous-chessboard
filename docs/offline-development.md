@@ -678,3 +678,50 @@ Physical COM11 acceptance passed on 2026-07-16. Bounded homing succeeded, physic
 The final report recorded the magnet LOW, a 5 ms maximum sensor gap, 1,502 search-time sensor scans, three search-time heartbeat attempts, 143,436 bytes free internal heap, an 81,908-byte largest internal block, 7,432,264 bytes free PSRAM, and 18,416 bytes task-stack headroom. Every routing, primitive-order, overshoot, graveyard, occupancy, timing, memory, and safety assertion passed. Production firmware was restored automatically, and Serial evidence is retained locally at `tmp/offline-staged-capture-motion-hardware-2026-07-16.log`.
 
 The staged-capture milestone is accepted. Arbitrary active-piece Z/I lane motion remains the next isolated gate. En passant, castling, promotions, gameplay LEDs, persistent graveyard state, reconnect transfer, offline undo/redo, and production automatic switching remain deferred.
+
+## Guarded Real Offline Z/I Lane-Motion Diagnostics
+
+`offline_core/offline_lane_motion.h/.cpp` adds a portable compiler for active-piece transfers that leave and re-enter the chessboard. It accepts `Lane` and `LaneBoard` transfer phases and emits guarded `TravelBoard`, `Pickup`, `DragCoordinate`, `DragBoard`, `Drop`, and `Verify` primitives. Ordinary quiet transfers are supported now; ordinary `AttackerStage` and `AttackerFinal` phases are validated for later capture reuse.
+
+Only the final drag onto the real board receives the existing 250-step compensation. External Z/I coordinates, lane entry points, and intermediate board waypoints never receive overshoot. The compiler rejects captured removal, castling, en passant, promotion, graveyard phases, malformed paths, non-finite coordinates, mixed Z/I segments, occupied board targets, and incorrect occupancy transitions. Inputs remain immutable and each phase retains the accepted two-attempt limit.
+
+The external route planner now enforces a narrow safety rule in both C++ and the online JavaScript parity reference: a direct lane transfer must use a complete same-side pair. A Z exit can connect only to a Z re-entry, and an I exit only to an I re-entry. The planner tries a complete pair on the preferred side, then a complete pair on the opposite side; it never creates a direct Z-to-I segment that would cross the occupied board. The focused parity corpus includes a case that requires this rule.
+
+Two deterministic forced-mate fixtures are available:
+
+- `DirectLane`: initial FEN `k7/8/8/3n4/pppppppp/8/4NN1R/4BKR1 w - - 0 1`, human `h2g2`, engine `d5e3#`, route `d5 -> Z5 -> Z3 -> e3`, mode `lane`, cost `1300`.
+- `LaneBoard`: initial FEN `k7/8/8/3n4/pppppppp/2p3p1/4NN1R/4BKR1 w - - 0 1`, human `h2g2`, engine `d5e3#`, external route `Z5 -> Z3`, then compressed board route `a3 -> a2 -> b1 -> c1 -> e3`, mode `lane-board`, cost `1366`.
+
+`ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS` defaults to `0` and is mutually exclusive with all prior diagnostics. `OFFLINE_LANE_MOTION_FIXTURE` selects DirectLane or LaneBoard. The enabled build reuses accepted bounded homing, heartbeat, sensor mailbox, engine/coordinator planning, phase tokens, guarded core-1 motion execution, speed profiles, and production restoration. Normal HTTP movement, diagnostics movement, normal homing, command execution, gameplay LEDs, and nudge recovery remain blocked.
+
+The physical executor requires exact before occupancy immediately before pickup and exact final board occupancy before reporting success. The magnet stays authorized continuously from pickup through external travel and board re-entry, then is forced LOW at drop and on every failure or exit. One unchanged-board retry is allowed. If both source and destination are empty after a failure, the piece is treated as stranded off-board and the diagnostic freezes in synchronization warning without restarting the move.
+
+Run the focused host suite or compile/run either USB gate with:
+
+```powershell
+Set-Location .\app
+npm run test:offline-lane-motion
+
+Set-Location ..
+.\tools\verify-offline-lane-motion.ps1 -Fixture DirectLane
+.\tools\verify-offline-lane-motion.ps1 -Fixture LaneBoard
+.\tools\verify-offline-lane-motion.ps1 -Fixture DirectLane -UploadPort COM11 -SerialLogPath tmp/offline-lane-direct-hardware-2026-07-16.log
+.\tools\verify-offline-lane-motion.ps1 -Fixture LaneBoard -UploadPort COM11 -SerialLogPath tmp/offline-lane-board-hardware-2026-07-16.log
+```
+
+The verifier compiles production and both fixture variants on every run. An uploaded diagnostic is always followed by production restoration in `finally`.
+
+Automated acceptance on 2026-07-16 passes the lane compiler regression, C++/JavaScript external-route parity, online physical planner regressions, motion/capture regressions, the complete foundation suite, client build, zero-warning lint, and the deterministic 100-game/6,758-ply soak. The soak covered 1,160 captures, 34 castlings, 8 en-passant moves, 66 promotions, and all injected recoveries.
+
+Production remains exactly 1,042,543 bytes flash / 47,128 bytes static RAM. DirectLane diagnostics compile at 1,310,195 / 52,000 and LaneBoard at 1,310,239 / 52,000. All earlier resource, ownership, runtime, simulated-phase, quiet-motion, direct-capture, and staged-capture firmware compile gates remain green.
+
+Both physical COM11 fixtures passed on 2026-07-16:
+
+- DirectLane accepted physical `h2g2`, selected deterministic mate `d5e3#`, and executed `d5 -> Z5 -> Z3 -> e3`. Exact final occupancy matched, the checkmate FEN committed, no retry or recovery was needed, and the magnet ended LOW. The run recorded a 5 ms maximum sensor gap, 134,148 bytes free internal heap, a 106,484-byte largest internal block, 7,432,264 bytes free PSRAM, and 15,488 bytes stack headroom. A temporarily intermittent `g4` pawn correctly produced recoverable setup and wrong-color-lift warnings before the accepted move.
+- LaneBoard accepted physical `h2g2`, selected the same deterministic mate, and executed `d5 -> Z5 -> Z3 -> a3 -> a2 -> b1 -> c1 -> e3`. Route mode/cost were exactly `lane-board / 1366`; all intermediate board waypoints avoided overshoot and only `e3` received final board compensation. Exact occupancy and FEN committed with no retry or recovery. The run recorded a 5 ms maximum sensor gap, 130,888 bytes free internal heap, a 102,388-byte largest internal block, 7,432,264 bytes free PSRAM, and 15,488 bytes stack headroom.
+
+Every routing, primitive-order, same-side-lane, overshoot, occupancy, resource, and magnet-safety assertion passed. Serial evidence is retained locally at `tmp/offline-lane-direct-hardware-2026-07-16.log` and `tmp/offline-lane-board-hardware-2026-07-16.log`. Production firmware was restored automatically after both runs and COM11 remains healthy.
+
+The guarded real Z/I lane-motion milestone is accepted.
+
+Still deferred: generalized lane use inside captures, en passant, castling, promotions, gameplay LEDs, continuous offline gameplay, persistence, reconnect transfer, offline undo/redo, and production automatic switching.
