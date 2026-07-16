@@ -64,6 +64,8 @@ constexpr bool kCaptureMotionDiagnostic =
     ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS != 0;
 constexpr bool kStagedCaptureMotionDiagnostic =
     ENABLE_OFFLINE_STAGED_CAPTURE_MOTION_DIAGNOSTICS != 0;
+constexpr bool kCaptureLaneMotionDiagnostic =
+    ENABLE_OFFLINE_CAPTURE_LANE_MOTION_DIAGNOSTICS != 0;
 constexpr bool kLaneMotionDiagnostic =
     ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS != 0;
 constexpr bool kLaneBoardFixture = OFFLINE_LANE_MOTION_FIXTURE == 1;
@@ -71,6 +73,9 @@ constexpr bool kLaneBoardFixture = OFFLINE_LANE_MOTION_FIXTURE == 1;
 const char* diagnosticPrefix() {
   if (kStagedCaptureMotionDiagnostic) {
     return "OFFLINE_STAGED_CAPTURE_MOTION_DIAG";
+  }
+  if (kCaptureLaneMotionDiagnostic) {
+    return "OFFLINE_CAPTURE_LANE_MOTION_DIAG";
   }
   if (kCaptureMotionDiagnostic) return "OFFLINE_CAPTURE_MOTION_DIAG";
   if (kLaneMotionDiagnostic) return "OFFLINE_LANE_MOTION_DIAG";
@@ -928,6 +933,9 @@ void emitCaptureProgram(const offline::CaptureMotionProgram& program) {
   addStrings(
       document.createNestedArray("compressedPath"),
       program.compressedPathSquares);
+  addRouteTargets(
+      document.createNestedArray("routeTargets"),
+      program.routeTargets);
   JsonArray primitives = document.createNestedArray("primitives");
   for (const offline::CaptureMotionPrimitive& primitive : program.primitives) {
     JsonObject item = primitives.createNestedObject();
@@ -1034,16 +1042,27 @@ bool validateCapturePrimitiveOrder(
   }
 
   if (program.phaseKind == offline::MotionPhaseKind::CapturedRemoval) {
-    graveyardOvershootDisabled = coordinateDrags == 1 && boardOvershoots == 0 &&
-                                 program.graveyardLabel == "I4" &&
-                                 program.graveyardX == 17600 &&
-                                 program.graveyardY == -350;
+    const bool graveyardMatches = kCaptureLaneMotionDiagnostic
+        ? program.graveyardLabel == "Z2" &&
+              program.graveyardX == 24800 &&
+              program.graveyardY == 34450
+        : program.graveyardLabel == "I4" &&
+              program.graveyardX == 17600 &&
+              program.graveyardY == -350;
+    graveyardOvershootDisabled =
+        coordinateDrags == 1 && boardOvershoots == 0 && graveyardMatches;
     return graveyardOvershootDisabled;
   }
   if (program.phaseKind == offline::MotionPhaseKind::AttackerStage ||
       program.phaseKind == offline::MotionPhaseKind::AttackerFinal) {
+    const std::size_t expectedCoordinateDrags =
+        kCaptureLaneMotionDiagnostic &&
+                program.phaseKind == offline::MotionPhaseKind::AttackerFinal
+            ? 2
+            : 0;
     const bool overshootEnabled =
-        coordinateDrags == 0 && boardOvershoots == 1 &&
+        coordinateDrags == expectedCoordinateDrags &&
+        boardOvershoots == 1 &&
         program.primitives[program.primitives.size() - 3].finalBoardDrop;
     if (program.phaseKind == offline::MotionPhaseKind::AttackerStage) {
       attackerStageOvershootEnabled = overshootEnabled;
@@ -1082,12 +1101,36 @@ CaptureMotionDiagnosticResult runRealCaptureMotionExecution(
           offline::MotionPhaseKind::CapturedRemoval &&
       transaction->motion.phases[2].kind ==
           offline::MotionPhaseKind::AttackerFinal;
-  if (!transaction || transaction->graveyardSlotKey != "I4" ||
-      (kStagedCaptureMotionDiagnostic ? !stagedPlanMatches
-                                      : !directPlanMatches)) {
+  const bool captureLanePlanMatches = transaction &&
+      transaction->selectedMove == "d5e3" &&
+      transaction->motion.strategy ==
+          offline::MotionStrategy::CaptureDirectAfterRemoval &&
+      transaction->motion.routeCost == 1952.0 &&
+      transaction->motion.phases.size() == 2 &&
+      transaction->motion.phases[0].kind ==
+          offline::MotionPhaseKind::CapturedRemoval &&
+      transaction->motion.phases[0].graveyard &&
+      transaction->motion.phases[0].graveyard->mode ==
+          offline::ExternalRouteMode::GraveyardBoardPath &&
+      transaction->motion.phases[0].graveyard->routeCost == 652.0 &&
+      transaction->motion.phases[1].kind ==
+          offline::MotionPhaseKind::AttackerFinal &&
+      transaction->motion.phases[1].transfer &&
+      transaction->motion.phases[1].transfer->mode ==
+          offline::ExternalRouteMode::Lane &&
+      transaction->motion.phases[1].transfer->routeCost == 1300.0;
+  const char* expectedSlot = kCaptureLaneMotionDiagnostic ? "Z2" : "I4";
+  const bool fixturePlanMatches = kStagedCaptureMotionDiagnostic
+      ? stagedPlanMatches
+      : (kCaptureLaneMotionDiagnostic ? captureLanePlanMatches
+                                      : directPlanMatches);
+  if (!transaction || transaction->graveyardSlotKey != expectedSlot ||
+      !fixturePlanMatches) {
     diagnostic.error = kStagedCaptureMotionDiagnostic
         ? "The opponent plan is not the controlled staged e2d1/I4 capture."
-        : "The opponent plan is not the controlled d5e4/I4 capture.";
+        : (kCaptureLaneMotionDiagnostic
+               ? "The opponent plan is not the controlled d5e3/Z2 lane capture."
+               : "The opponent plan is not the controlled d5e4/I4 capture.");
     return diagnostic;
   }
   diagnostic.selectedMove = transaction->selectedMove;
@@ -1201,7 +1244,7 @@ CaptureMotionDiagnosticResult runRealCaptureMotionExecution(
         const auto active = runtime.coordinator().pendingMotionTransaction();
         diagnostic.graveyardTransitionObserved = active &&
             active->graveyardState == offline::GraveyardSlotState::Occupied &&
-            active->graveyardSlotKey == "I4";
+            active->graveyardSlotKey == expectedSlot;
       } else if (request.phase.kind == offline::MotionPhaseKind::AttackerFinal) {
         diagnostic.expectedOccupancy = occupancyHex(program.expectedAfter);
         diagnostic.finalOccupancyMatched =
@@ -1280,7 +1323,9 @@ void emitCaptureSummary(
   emitCheck(
       "sensor-loop-progress",
       searchSensorScans > 0 && offlineRuntimeSensorMaxGapMs < kMaximumSensorGapMs);
-  emitCheck("heartbeat-progress", searchHeartbeatAttempts >= 2);
+  emitCheck(
+      "heartbeat-progress",
+      kCaptureLaneMotionDiagnostic || searchHeartbeatAttempts >= 2);
   emitCheck(
       "search-deadline",
       searchElapsedMs <= 3000U + kSearchOverrunAllowanceMs);
@@ -1801,6 +1846,8 @@ void runtimeTask(void*) {
   start["maxDepth"] = 12;
   if (kStagedCaptureMotionDiagnostic) {
     start["fixture"] = "staged-e2d1-i4";
+  } else if (kCaptureLaneMotionDiagnostic) {
+    start["fixture"] = "capture-e3-z2-d5-z5-z3-e3";
   } else if (kLaneMotionDiagnostic) {
     start["fixture"] = kLaneBoardFixture ? "LaneBoard" : "DirectLane";
   }
@@ -1836,7 +1883,10 @@ void runtimeTask(void*) {
   config.coordinator.searchLimits.maxNodes = 0;
   config.coordinator.searchLimits.maxDepth = 12;
   config.coordinator.externalSlots = offline::defaultExternalSlots();
-#if ENABLE_OFFLINE_STAGED_CAPTURE_MOTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_CAPTURE_LANE_MOTION_DIAGNOSTICS
+  config.initialFen =
+      "k7/8/8/3n4/pppppppp/4P3/4NN1R/4BKR1 w - - 0 1";
+#elif ENABLE_OFFLINE_STAGED_CAPTURE_MOTION_DIAGNOSTICS
   config.initialFen = "k7/8/8/8/8/8/1NPPbP2/2B2n1K w - - 0 1";
 #elif ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS
   config.initialFen = "k7/8/8/3p4/8/8/4R3/4K3 w - - 0 1";

@@ -22,6 +22,7 @@ const sources = [
   'offline_runtime.cpp',
   'offline_phase_execution.cpp',
   'offline_quiet_motion.cpp',
+  'offline_lane_motion.cpp',
   'offline_capture_motion.cpp'
 ].map((file) => path.join(root, 'offline_core', file));
 

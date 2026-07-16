@@ -388,8 +388,8 @@ void verifyRejections() {
           "Attacker final accepted a pending graveyard slot.");
   request = fixture.attacker;
   request.phase.transfer->mode = ExternalRouteMode::Lane;
-  require(compiler.compile(request).status == CaptureMotionCompileStatus::UnsupportedRoute,
-          "Attacker final accepted lane routing.");
+  require(!compiler.compile(request).success(),
+          "Attacker final accepted malformed lane routing.");
   request = fixture.attacker;
   request.phase.expectedAfter = request.phase.expectedBefore;
   require(compiler.compile(request).status == CaptureMotionCompileStatus::InvalidOccupancy,
@@ -402,8 +402,8 @@ void verifyRejections() {
           "Attacker stage accepted an occupied graveyard slot.");
   request = staged.requests[0];
   request.phase.transfer->mode = ExternalRouteMode::Lane;
-  require(compiler.compile(request).status == CaptureMotionCompileStatus::UnsupportedRoute,
-          "Attacker stage accepted lane routing.");
+  require(!compiler.compile(request).success(),
+          "Attacker stage accepted malformed lane routing.");
   request = staged.requests[0];
   request.phase.expectedAfter = request.phase.expectedBefore;
   require(compiler.compile(request).status == CaptureMotionCompileStatus::InvalidOccupancy,

@@ -1,5 +1,6 @@
 #include "offline_capture_motion.h"
 
+#include "offline_lane_motion.h"
 #include "offline_quiet_motion.h"
 
 #include <cmath>
@@ -157,6 +158,38 @@ CaptureMotionPrimitive convertQuietPrimitive(
       quiet.finalBoardDrop);
 }
 
+CaptureMotionPrimitive convertLanePrimitive(
+    const LaneMotionPrimitive& lane) {
+  CaptureMotionPrimitiveKind kind = CaptureMotionPrimitiveKind::TravelBoard;
+  switch (lane.kind) {
+    case LaneMotionPrimitiveKind::TravelBoard:
+      kind = CaptureMotionPrimitiveKind::TravelBoard;
+      break;
+    case LaneMotionPrimitiveKind::Pickup:
+      kind = CaptureMotionPrimitiveKind::Pickup;
+      break;
+    case LaneMotionPrimitiveKind::DragCoordinate:
+      kind = CaptureMotionPrimitiveKind::DragCoordinate;
+      break;
+    case LaneMotionPrimitiveKind::DragBoard:
+      kind = CaptureMotionPrimitiveKind::DragBoard;
+      break;
+    case LaneMotionPrimitiveKind::Drop:
+      kind = CaptureMotionPrimitiveKind::Drop;
+      break;
+    case LaneMotionPrimitiveKind::Verify:
+      kind = CaptureMotionPrimitiveKind::Verify;
+      break;
+  }
+  return primitive(
+      kind,
+      lane.sourceRawIndex,
+      lane.targetRawIndex,
+      lane.targetX,
+      lane.targetY,
+      lane.finalBoardDrop);
+}
+
 bool ordinaryCapture(const OfflinePhaseExecutionRequest& request) {
   return request.move.capture && !request.move.castling &&
          !request.move.enPassant && request.move.promotion.empty() &&
@@ -164,16 +197,74 @@ bool ordinaryCapture(const OfflinePhaseExecutionRequest& request) {
          request.move.capturedSquare == request.move.to;
 }
 
-CaptureMotionProgram compileAttackerBoardTransfer(
+CaptureMotionCompileStatus mapLaneStatus(LaneMotionCompileStatus status) {
+  switch (status) {
+    case LaneMotionCompileStatus::Success:
+      return CaptureMotionCompileStatus::Success;
+    case LaneMotionCompileStatus::InvalidPhase:
+      return CaptureMotionCompileStatus::InvalidPhase;
+    case LaneMotionCompileStatus::UnsupportedMove:
+      return CaptureMotionCompileStatus::UnsupportedMove;
+    case LaneMotionCompileStatus::UnsupportedRoute:
+    case LaneMotionCompileStatus::InvalidCoordinate:
+      return CaptureMotionCompileStatus::UnsupportedRoute;
+    case LaneMotionCompileStatus::InvalidOccupancy:
+      return CaptureMotionCompileStatus::InvalidOccupancy;
+    case LaneMotionCompileStatus::InvalidPath:
+      return CaptureMotionCompileStatus::InvalidPath;
+    case LaneMotionCompileStatus::InvalidGraveyard:
+      return CaptureMotionCompileStatus::InvalidGraveyard;
+  }
+  return CaptureMotionCompileStatus::InvalidPhase;
+}
+
+CaptureMotionProgram compileAttackerLaneTransfer(
     const OfflinePhaseExecutionRequest& request) {
-  if (request.phase.graveyard || !request.phase.transfer ||
-      !boardOnlyMode(request.phase.transfer->mode)) {
+  const LaneMotionProgram lane = OfflineLaneMotionCompiler{}.compile(request);
+  if (!lane.success()) {
+    return reject(request, mapLaneStatus(lane.status), lane.blockedReason);
+  }
+
+  CaptureMotionProgram program;
+  program.status = CaptureMotionCompileStatus::Success;
+  program.token = request.token;
+  program.phaseKind = request.phase.kind;
+  program.moveUci = request.move.uci;
+  program.from = request.phase.from;
+  program.to = request.phase.to;
+  program.sourceRawIndex = lane.sourceRawIndex;
+  program.targetRawIndex = lane.targetRawIndex;
+  program.routeMode = lane.routeMode;
+  program.routeCost = lane.routeCost;
+  program.rawPathSquares = lane.rawPathSquares;
+  program.compressedPathSquares = lane.compressedPathSquares;
+  program.routeTargets = lane.routeTargets;
+  program.graveyardSlotKey = request.graveyardSlotKey;
+  program.expectedBefore = request.phase.expectedBefore;
+  program.expectedAfter = request.phase.expectedAfter;
+  for (const LaneMotionPrimitive& item : lane.primitives) {
+    program.primitives.push_back(convertLanePrimitive(item));
+  }
+  return program;
+}
+
+CaptureMotionProgram compileAttackerTransfer(
+    const OfflinePhaseExecutionRequest& request) {
+  if (request.phase.graveyard || !request.phase.transfer) {
     return reject(
         request,
-        request.phase.transfer && !boardOnlyMode(request.phase.transfer->mode)
-            ? CaptureMotionCompileStatus::UnsupportedRoute
-            : CaptureMotionCompileStatus::InvalidPhase,
-        "The attacker phase requires one board-only transfer route.");
+        CaptureMotionCompileStatus::InvalidPhase,
+        "The attacker phase requires one transfer route.");
+  }
+  if (request.phase.transfer->mode == ExternalRouteMode::Lane ||
+      request.phase.transfer->mode == ExternalRouteMode::LaneBoard) {
+    return compileAttackerLaneTransfer(request);
+  }
+  if (!boardOnlyMode(request.phase.transfer->mode)) {
+    return reject(
+        request,
+        CaptureMotionCompileStatus::UnsupportedRoute,
+        "The attacker phase route is not a supported board or lane transfer.");
   }
 
   OfflinePhaseExecutionRequest quietRequest = request;
@@ -219,6 +310,7 @@ CaptureMotionProgram compileAttackerBoardTransfer(
   program.routeCost = quiet.routeCost;
   program.rawPathSquares = quiet.rawPathSquares;
   program.compressedPathSquares = quiet.compressedPathSquares;
+  program.routeTargets = request.phase.transfer->targets;
   program.graveyardSlotKey = request.graveyardSlotKey;
   program.expectedBefore = request.phase.expectedBefore;
   program.expectedAfter = request.phase.expectedAfter;
@@ -245,7 +337,7 @@ CaptureMotionProgram compileAttackerStage(
         CaptureMotionCompileStatus::InvalidGraveyard,
         "AttackerStage requires the capture graveyard slot to remain pending.");
   }
-  return compileAttackerBoardTransfer(request);
+  return compileAttackerTransfer(request);
 }
 
 CaptureMotionProgram compileAttackerFinal(
@@ -262,9 +354,9 @@ CaptureMotionProgram compileAttackerFinal(
     return reject(
         request,
         CaptureMotionCompileStatus::InvalidGraveyard,
-        "AttackerFinal requires an occupied graveyard slot and a board-only route.");
+        "AttackerFinal requires an occupied graveyard slot.");
   }
-  return compileAttackerBoardTransfer(request);
+  return compileAttackerTransfer(request);
 }
 
 CaptureMotionProgram compileCapturedRemoval(
@@ -333,6 +425,7 @@ CaptureMotionProgram compileCapturedRemoval(
   program.routeCost = graveyard.routeCost;
   program.rawPathSquares = graveyard.rawPathSquares;
   program.compressedPathSquares = graveyard.compressedPathSquares;
+  program.routeTargets = graveyard.targets;
   program.graveyardSlotKey = request.graveyardSlotKey;
   program.graveyardLabel = graveyard.slot.label;
   program.graveyardX = graveyard.slot.x;

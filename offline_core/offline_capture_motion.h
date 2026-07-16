@@ -58,6 +58,7 @@ struct CaptureMotionProgram {
   double routeCost = 0.0;
   std::vector<std::string> rawPathSquares;
   std::vector<std::string> compressedPathSquares;
+  std::vector<ExternalRouteTarget> routeTargets;
   std::string graveyardSlotKey;
   std::string graveyardLabel;
   double graveyardX = 0.0;

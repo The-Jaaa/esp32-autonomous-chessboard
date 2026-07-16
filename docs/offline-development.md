@@ -725,3 +725,89 @@ Every routing, primitive-order, same-side-lane, overshoot, occupancy, resource, 
 The guarded real Z/I lane-motion milestone is accepted.
 
 Still deferred: generalized lane use inside captures, en passant, castling, promotions, gameplay LEDs, continuous offline gameplay, persistence, reconnect transfer, offline undo/redo, and production automatic switching.
+
+## Guarded Real Offline Capture With Lane Routing
+
+`OfflineCaptureMotionCompiler` now delegates ordinary `AttackerStage` and
+`AttackerFinal` phases to the accepted lane compiler when their route mode is
+`Lane` or `LaneBoard`. Existing board-only direct and staged capture output is
+unchanged. Converted capture programs retain route targets, phase tokens,
+occupancy checkpoints, and graveyard state while using the existing guarded
+capture executor's `TravelBoard`, `Pickup`, `DragCoordinate`, `DragBoard`,
+`Drop`, and `Verify` primitives.
+
+Overshoot remains restricted to the final board destination. Captured-piece
+graveyard drops, Z/I coordinates, lane entry points, and intermediate board
+waypoints never receive the 250-step board-drop compensation. Mixed Z/I lane
+segments, malformed coordinates, occupied re-entry paths, special moves, and
+incorrect graveyard state are rejected before hardware execution.
+
+The controlled fixture is:
+
+- initial FEN `k7/8/8/3n4/pppppppp/4P3/4NN1R/4BKR1 w - - 0 1`;
+- human move `h2g2` (`Rhg2`);
+- deterministic reply `d5e3` (`Nxe3#`);
+- strategy `capture-direct-after-removal`, total route cost `1952`;
+- phase 0 removes the White pawn through
+  `e3 -> d2 -> a2 -> Z2`, with Z2 at `(24800, 34450)` and route cost `652`;
+- phase 1 moves the Black knight through
+  `d5 -> Z5 -> Z3 -> e3`, with route cost `1300`;
+- final FEN `k7/8/8/8/pppppppp/4n3/4NNR1/4BKR1 w - - 0 2`.
+
+Z2 changes from `Pending` to `Occupied` only after captured removal verifies.
+Chess state remains at the post-human FEN until the lane-routed attacker phase
+also matches exact occupancy. Each phase allows one unchanged-state retry. A
+partial removal or an attacker missing from both `d5` and `e3` enters recovery
+without committing the move.
+
+Run the focused host suite or compile/run the USB diagnostic with:
+
+```powershell
+Set-Location .\app
+npm run test:offline-capture-lane-motion
+
+Set-Location ..
+.\tools\verify-offline-capture-lane-motion.ps1
+.\tools\verify-offline-capture-lane-motion.ps1 `
+  -UploadPort COM11 `
+  -SerialTimeoutSeconds 360 `
+  -SerialLogPath tmp/offline-capture-lane-motion-hardware-2026-07-16.log
+```
+
+`ENABLE_OFFLINE_CAPTURE_LANE_MOTION_DIAGNOSTICS` defaults to `0` and selects
+the controlled fixture while reusing the accepted capture hardware mailbox,
+bounded homing, sensor snapshots, engine/coordinator transaction, ownership
+heartbeat, and production restoration. Normal HTTP movement, normal homing,
+gameplay LEDs, and nudge recovery remain blocked.
+
+Automated acceptance on 2026-07-16 passes the focused capture-lane suite,
+legacy direct/staged capture and lane suites, the complete foundation suite,
+the 100-game/6,758-ply soak, client build, zero-warning lint, and every
+firmware compile gate. Production remains exactly 1,042,543 bytes flash /
+47,128 bytes static RAM. The capture-lane diagnostic compiles at
+1,328,463 / 52,048 with 1,817,265 bytes of application-partition headroom.
+
+Physical COM11 acceptance passed. Bounded homing succeeded, setup recovered
+from an intermittently detected `g4` pawn, and physical `h2g2` was accepted.
+The engine selected `d5e3#` in 71 ms at depth 1 across 600 nodes. The robot
+moved the pawn through `e3 -> d2 -> a2 -> Z2`, verified Z2 as transactionally
+occupied, then moved the knight through `d5 -> Z5 -> Z3 -> e3`. Both phase
+tokens passed on attempt one, exact final occupancy matched, checkmate
+committed, and the magnet ended LOW.
+
+Final metrics were a 5 ms maximum sensor gap, 37 sensor scans during search,
+143,388 bytes free internal heap, an 83,956-byte largest internal block,
+7,432,264 bytes free PSRAM, and 18,384 bytes task-stack headroom. The forced
+mate completed before another heartbeat was due; prior resource diagnostics
+remain the accepted concurrency gate for three-second searches. Production
+firmware was restored automatically. Serial evidence is retained locally at
+`tmp/offline-capture-lane-motion-hardware-2026-07-16.log`.
+
+Arduino firmware verifier scripts should be run sequentially. Parallel
+`arduino-cli` builds can reuse the same sketch cache while applying different
+diagnostic macros, producing invalid mixed-object link errors.
+
+The capture-with-lane milestone is accepted. En passant is the next isolated
+real-motion milestone. Castling, promotion replacement, gameplay LEDs,
+continuous offline play, persistence, reconnect transfer, offline undo/redo,
+and production automatic switching remain deferred.
