@@ -638,3 +638,43 @@ Physical USB acceptance passed on COM11. Bounded homing succeeded, physical `e2e
 Two preliminary mechanically successful runs exposed diagnostic-only memory-lifetime issues: copied plan/state objects and the last runtime update remained alive until resource measurement. Narrowing those lifetimes raised free internal heap and the largest contiguous block above their accepted thresholds without changing production behavior. The final run also exposed a strict-mode verifier assumption that every execution event contained `graveyardStateAfter`; the parser now checks field presence and validates the saved passing telemetry correctly.
 
 Still deferred: generalized captures, staged capture choreography, en passant, castling, promotions, arbitrary Z/I transit, gameplay LEDs, persistent graveyard state, reconnect transfer, offline undo/redo, and production automatic offline ownership.
+
+## Guarded Real Offline Staged-Capture Diagnostics
+
+`OfflineCaptureMotionCompiler` now supports the accepted three-phase `CaptureStageFirstBoard` shape while preserving the existing direct-capture path. `AttackerStage` and staged `AttackerFinal` are compiled as ordinary board-only transfers against their exact phase-local occupancy. Staging and final placement receive the existing final board-drop overshoot; captured removal to an external graveyard coordinate does not.
+
+The controlled fixture is:
+
+- initial FEN `k7/8/8/8/8/8/1NPPbP2/2B2n1K w - - 0 1`;
+- human move `b2d1` (`Nd1`);
+- deterministic opponent move `e2d1` (`Bxd1`);
+- strategy `capture-stage-first-board`, staging square `e1`, and graveyard slot `I4` at `(17600, -350)`;
+- phase 0: bishop `e2 -> e1`;
+- phase 1: knight `d1 -> e2 -> f3 -> g4 -> h4 -> I4`, compressed to board waypoints `d1 -> g4 -> h4` before the external drop;
+- phase 2: bishop `e1 -> d1`;
+- final FEN `k7/8/8/8/8/8/2PP1P2/2Bb1n1K w - - 0 2`.
+
+The compiler validates tokens, exact before/after occupancy, phase source and destination, graveyard state, and board-only attacker routes. Direct captures remain supported. En passant, castling, promotion, attacker lane routing, malformed staging, and unexpected phases remain rejected. Every phase keeps the accepted two-attempt maximum; a retry is available only when sensors prove that the phase left the exact before-state.
+
+`ENABLE_OFFLINE_STAGED_CAPTURE_MOTION_DIAGNOSTICS` defaults to `0`. In the enabled build it selects the staged fixture and telemetry while reusing the accepted capture diagnostic's bounded homing, heartbeat, sensor mailbox, engine/coordinator transaction, guarded core-1 executor, and magnet authorization. Normal HTTP movement and unbounded homing remain blocked. I4 becomes transactionally occupied only after captured removal verifies, and chess FEN/history remain unchanged until attacker final verifies.
+
+Run the host regression or compile/run the USB gate with:
+
+```powershell
+Set-Location .\app
+npm run test:offline-staged-capture-motion
+
+Set-Location ..
+.\tools\verify-offline-staged-capture-motion.ps1
+.\tools\verify-offline-staged-capture-motion.ps1 -UploadPort COM11 -SerialTimeoutSeconds 300 -SerialLogPath tmp/offline-staged-capture-motion-hardware-2026-07-15.log
+```
+
+The USB verifier checks the exact engine move, strategy, staging square, all raw/compressed paths, primitive order, overshoot policy, token order, graveyard transition, final occupancy/FEN, safety/resource thresholds, and production restoration in `finally`.
+
+Automated host acceptance on 2026-07-15 passes the staged regression, the complete foundation suite, and the deterministic 100-game/6,758-ply soak. The soak again covered 1,160 captures, 34 castlings, 8 en-passant moves, 66 promotions, and all injected recoveries. Production remains exactly 1,042,543 bytes flash / 47,128 bytes static RAM. The staged diagnostic compiles at 1,316,795 / 52,032 with 1,828,933 bytes of application-partition headroom. The accepted direct-capture diagnostic also still compiles at 1,316,631 / 52,032.
+
+Physical COM11 acceptance passed on 2026-07-16. Bounded homing succeeded, physical `b2d1` was accepted, and the engine selected `e2d1` after a 3,004 ms depth-5 search across 32,832 nodes. The robot staged the bishop `e2 -> e1`, moved the knight through `d1 -> g4 -> h4 -> I4`, then moved the bishop `e1 -> d1`. All three phase tokens verified on their first attempt, I4 changed `Pending -> Occupied`, exact final occupancy matched, and the coordinator committed FEN `k7/8/8/8/8/8/2PP1P2/2Bb1n1K w - - 0 2`.
+
+The final report recorded the magnet LOW, a 5 ms maximum sensor gap, 1,502 search-time sensor scans, three search-time heartbeat attempts, 143,436 bytes free internal heap, an 81,908-byte largest internal block, 7,432,264 bytes free PSRAM, and 18,416 bytes task-stack headroom. Every routing, primitive-order, overshoot, graveyard, occupancy, timing, memory, and safety assertion passed. Production firmware was restored automatically, and Serial evidence is retained locally at `tmp/offline-staged-capture-motion-hardware-2026-07-16.log`.
+
+The staged-capture milestone is accepted. Arbitrary active-piece Z/I lane motion remains the next isolated gate. En passant, castling, promotions, gameplay LEDs, persistent graveyard state, reconnect transfer, offline undo/redo, and production automatic switching remain deferred.

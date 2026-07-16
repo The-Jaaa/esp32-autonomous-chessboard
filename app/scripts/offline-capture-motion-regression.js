@@ -49,8 +49,9 @@ assert.strictEqual(run.status, 0,
 console.log(JSON.stringify({
   success: true,
   compiler,
-  strategy: 'capture-direct-after-removal',
+  strategies: ['capture-direct-after-removal', 'capture-stage-first-board'],
   graveyardSlot: 'I4',
-  finalBoardOvershootOnly: true,
+  stagedPhases: ['attacker-stage', 'captured-removal', 'attacker-final'],
+  boardDropOvershootOnly: true,
   maximumAutomaticAttemptsPerPhase: 2
 }, null, 2));

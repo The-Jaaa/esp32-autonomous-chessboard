@@ -60,8 +60,13 @@ constexpr bool kQuietMotionDiagnostic =
     ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS != 0;
 constexpr bool kCaptureMotionDiagnostic =
     ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS != 0;
+constexpr bool kStagedCaptureMotionDiagnostic =
+    ENABLE_OFFLINE_STAGED_CAPTURE_MOTION_DIAGNOSTICS != 0;
 
 const char* diagnosticPrefix() {
+  if (kStagedCaptureMotionDiagnostic) {
+    return "OFFLINE_STAGED_CAPTURE_MOTION_DIAG";
+  }
   if (kCaptureMotionDiagnostic) return "OFFLINE_CAPTURE_MOTION_DIAG";
   if (kQuietMotionDiagnostic) return "OFFLINE_QUIET_MOTION_DIAG";
   return kPhaseExecutionDiagnostic ? "OFFLINE_PHASE_DIAG" : "OFFLINE_RUNTIME_DIAG";
@@ -846,6 +851,7 @@ struct CaptureMotionDiagnosticResult {
   bool primitiveOrderValid = false;
   bool graveyardTransitionObserved = false;
   bool graveyardOvershootDisabled = false;
+  bool attackerStageOvershootEnabled = false;
   bool attackerOvershootEnabled = false;
   bool retryObserved = false;
   bool retryExhausted = false;
@@ -994,6 +1000,7 @@ bool runCaptureHomeGate(CaptureMotionDiagnosticResult& diagnostic) {
 bool validateCapturePrimitiveOrder(
     const offline::CaptureMotionProgram& program,
     bool& graveyardOvershootDisabled,
+    bool& attackerStageOvershootEnabled,
     bool& attackerOvershootEnabled) {
   if (program.primitives.size() < 5 ||
       program.primitives.front().kind !=
@@ -1026,11 +1033,17 @@ bool validateCapturePrimitiveOrder(
                                  program.graveyardY == -350;
     return graveyardOvershootDisabled;
   }
-  if (program.phaseKind == offline::MotionPhaseKind::AttackerFinal) {
-    attackerOvershootEnabled = coordinateDrags == 0 && boardOvershoots == 1 &&
-                               program.primitives[program.primitives.size() - 3]
-                                   .finalBoardDrop;
-    return attackerOvershootEnabled;
+  if (program.phaseKind == offline::MotionPhaseKind::AttackerStage ||
+      program.phaseKind == offline::MotionPhaseKind::AttackerFinal) {
+    const bool overshootEnabled =
+        coordinateDrags == 0 && boardOvershoots == 1 &&
+        program.primitives[program.primitives.size() - 3].finalBoardDrop;
+    if (program.phaseKind == offline::MotionPhaseKind::AttackerStage) {
+      attackerStageOvershootEnabled = overshootEnabled;
+    } else {
+      attackerOvershootEnabled = overshootEnabled;
+    }
+    return overshootEnabled;
   }
   return false;
 }
@@ -1041,16 +1054,33 @@ CaptureMotionDiagnosticResult runRealCaptureMotionExecution(
   CaptureMotionDiagnosticResult diagnostic;
   diagnostic.homeSucceeded = true;
   const auto transaction = runtime.coordinator().pendingMotionTransaction();
-  if (!transaction || transaction->selectedMove != "d5e4" ||
-      transaction->motion.strategy !=
-          offline::MotionStrategy::CaptureDirectAfterRemoval ||
-      transaction->motion.phases.size() != 2 ||
-      transaction->graveyardSlotKey != "I4" ||
-      transaction->motion.phases[0].kind !=
-          offline::MotionPhaseKind::CapturedRemoval ||
-      transaction->motion.phases[1].kind !=
-          offline::MotionPhaseKind::AttackerFinal) {
-    diagnostic.error = "The opponent plan is not the controlled d5e4/I4 capture.";
+  const bool directPlanMatches = transaction &&
+      transaction->selectedMove == "d5e4" &&
+      transaction->motion.strategy ==
+          offline::MotionStrategy::CaptureDirectAfterRemoval &&
+      transaction->motion.phases.size() == 2 &&
+      transaction->motion.phases[0].kind ==
+          offline::MotionPhaseKind::CapturedRemoval &&
+      transaction->motion.phases[1].kind ==
+          offline::MotionPhaseKind::AttackerFinal;
+  const bool stagedPlanMatches = transaction &&
+      transaction->selectedMove == "e2d1" &&
+      transaction->motion.strategy ==
+          offline::MotionStrategy::CaptureStageFirstBoard &&
+      transaction->motion.stagingSquare == "e1" &&
+      transaction->motion.phases.size() == 3 &&
+      transaction->motion.phases[0].kind ==
+          offline::MotionPhaseKind::AttackerStage &&
+      transaction->motion.phases[1].kind ==
+          offline::MotionPhaseKind::CapturedRemoval &&
+      transaction->motion.phases[2].kind ==
+          offline::MotionPhaseKind::AttackerFinal;
+  if (!transaction || transaction->graveyardSlotKey != "I4" ||
+      (kStagedCaptureMotionDiagnostic ? !stagedPlanMatches
+                                      : !directPlanMatches)) {
+    diagnostic.error = kStagedCaptureMotionDiagnostic
+        ? "The opponent plan is not the controlled staged e2d1/I4 capture."
+        : "The opponent plan is not the controlled d5e4/I4 capture.";
     return diagnostic;
   }
   diagnostic.selectedMove = transaction->selectedMove;
@@ -1061,11 +1091,12 @@ CaptureMotionDiagnosticResult runRealCaptureMotionExecution(
   emitExecutionUpdate(update);
   if (update.state != offline::OfflinePhaseExecutionState::PhaseReady ||
       !update.request) {
-    diagnostic.error = "The phase adapter did not issue captured removal.";
+    diagnostic.error = "The phase adapter did not issue the first capture phase.";
     return diagnostic;
   }
 
   std::uint32_t hardwareRequestId = 20;
+  bool stageCompiled = false;
   bool removalCompiled = false;
   bool attackerCompiled = false;
   for (std::size_t guard = 0; guard < 8; ++guard) {
@@ -1080,9 +1111,17 @@ CaptureMotionDiagnosticResult runRealCaptureMotionExecution(
         offline::OfflineCaptureMotionCompiler{}.compile(request);
     emitCaptureProgram(program);
     bool graveyardOvershootDisabled = false;
+    bool attackerStageOvershootEnabled = false;
     bool attackerOvershootEnabled = false;
     const bool orderValid = validateCapturePrimitiveOrder(
-        program, graveyardOvershootDisabled, attackerOvershootEnabled);
+        program,
+        graveyardOvershootDisabled,
+        attackerStageOvershootEnabled,
+        attackerOvershootEnabled);
+    if (program.success() &&
+        request.phase.kind == offline::MotionPhaseKind::AttackerStage) {
+      stageCompiled = true;
+    }
     if (program.success() &&
         request.phase.kind == offline::MotionPhaseKind::CapturedRemoval) {
       removalCompiled = true;
@@ -1091,10 +1130,14 @@ CaptureMotionDiagnosticResult runRealCaptureMotionExecution(
         request.phase.kind == offline::MotionPhaseKind::AttackerFinal) {
       attackerCompiled = true;
     }
-    diagnostic.programsCompiled = removalCompiled && attackerCompiled;
+    diagnostic.programsCompiled = removalCompiled && attackerCompiled &&
+        (!kStagedCaptureMotionDiagnostic || stageCompiled);
     diagnostic.primitiveOrderValid = orderValid;
     diagnostic.graveyardOvershootDisabled =
         diagnostic.graveyardOvershootDisabled || graveyardOvershootDisabled;
+    diagnostic.attackerStageOvershootEnabled =
+        diagnostic.attackerStageOvershootEnabled ||
+        attackerStageOvershootEnabled;
     diagnostic.attackerOvershootEnabled =
         diagnostic.attackerOvershootEnabled || attackerOvershootEnabled;
     if (!program.success() || !orderValid) {
@@ -1127,9 +1170,11 @@ CaptureMotionDiagnosticResult runRealCaptureMotionExecution(
     }
     emitCaptureHardwareResult(
         hardware,
-        request.phase.kind == offline::MotionPhaseKind::CapturedRemoval
-            ? "captured-removal"
-            : "attacker-final");
+        request.phase.kind == offline::MotionPhaseKind::AttackerStage
+            ? "attacker-stage"
+            : (request.phase.kind == offline::MotionPhaseKind::CapturedRemoval
+                   ? "captured-removal"
+                   : "attacker-final"));
     diagnostic.motorActivity = diagnostic.motorActivity || hardware.motorActivity;
     diagnostic.magnetEverHigh = diagnostic.magnetEverHigh || hardware.magnetEverHigh;
     diagnostic.magnetLow = hardware.magnetLow;
@@ -1150,7 +1195,7 @@ CaptureMotionDiagnosticResult runRealCaptureMotionExecution(
         diagnostic.graveyardTransitionObserved = active &&
             active->graveyardState == offline::GraveyardSlotState::Occupied &&
             active->graveyardSlotKey == "I4";
-      } else {
+      } else if (request.phase.kind == offline::MotionPhaseKind::AttackerFinal) {
         diagnostic.expectedOccupancy = occupancyHex(program.expectedAfter);
         diagnostic.finalOccupancyMatched =
             hardware.observedOccupancy == program.expectedAfter;
@@ -1172,7 +1217,8 @@ CaptureMotionDiagnosticResult runRealCaptureMotionExecution(
       diagnostic.committedFen = runtime.coordinator().physical().game().fen();
       diagnostic.opponentMoveCommitted =
           diagnostic.committedFen == previewAfterFen;
-      diagnostic.programsCompiled = removalCompiled && attackerCompiled;
+      diagnostic.programsCompiled = removalCompiled && attackerCompiled &&
+          (!kStagedCaptureMotionDiagnostic || stageCompiled);
       return diagnostic;
     }
   }
@@ -1199,9 +1245,18 @@ void emitCaptureSummary(
   emitCheck("capture-programs-compiled", diagnostic.programsCompiled);
   emitCheck("ordered-primitives", diagnostic.primitiveOrderValid);
   emitCheck("graveyard-no-overshoot", diagnostic.graveyardOvershootDisabled);
+  if (kStagedCaptureMotionDiagnostic) {
+    emitCheck(
+        "attacker-stage-overshoot",
+        diagnostic.attackerStageOvershootEnabled);
+  }
   emitCheck("attacker-final-overshoot", diagnostic.attackerOvershootEnabled);
   emitCheck("graveyard-pending-to-occupied", diagnostic.graveyardTransitionObserved);
-  emitCheck("two-phases-verified", diagnostic.verifiedPhaseCount == 2);
+  emitCheck(
+      kStagedCaptureMotionDiagnostic ? "three-phases-verified"
+                                     : "two-phases-verified",
+      diagnostic.verifiedPhaseCount ==
+          (kStagedCaptureMotionDiagnostic ? 3U : 2U));
   emitCheck("real-motor-activity", diagnostic.motorActivity);
   emitCheck("magnet-activated-for-drag", diagnostic.magnetEverHigh);
   emitCheck("magnet-low", diagnostic.magnetLow && offlineRuntimeMagnetIsLow());
@@ -1238,6 +1293,8 @@ void emitCaptureSummary(
       diagnostic.graveyardTransitionObserved;
   document["graveyardOvershootDisabled"] =
       diagnostic.graveyardOvershootDisabled;
+  document["attackerStageOvershootEnabled"] =
+      diagnostic.attackerStageOvershootEnabled;
   document["attackerOvershootEnabled"] = diagnostic.attackerOvershootEnabled;
   document["verifiedPhaseCount"] = diagnostic.verifiedPhaseCount;
   document["retryObserved"] = diagnostic.retryObserved;
@@ -1365,6 +1422,9 @@ void runtimeTask(void*) {
   start["humanColor"] = "white";
   start["searchTimeMs"] = 3000;
   start["maxDepth"] = 12;
+  if (kStagedCaptureMotionDiagnostic) {
+    start["fixture"] = "staged-e2d1-i4";
+  }
   emitDocument(start);
 
   emitCheck("psram-found", psramFound());
@@ -1397,7 +1457,9 @@ void runtimeTask(void*) {
   config.coordinator.searchLimits.maxNodes = 0;
   config.coordinator.searchLimits.maxDepth = 12;
   config.coordinator.externalSlots = offline::defaultExternalSlots();
-#if ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_STAGED_CAPTURE_MOTION_DIAGNOSTICS
+  config.initialFen = "k7/8/8/8/8/8/1NPPbP2/2B2n1K w - - 0 1";
+#elif ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS
   config.initialFen = "k7/8/8/3p4/8/8/4R3/4K3 w - - 0 1";
 #endif
   std::unique_ptr<offline::OfflineReadOnlyRuntime> runtime(

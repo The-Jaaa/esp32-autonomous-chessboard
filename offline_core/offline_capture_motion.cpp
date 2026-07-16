@@ -157,34 +157,38 @@ CaptureMotionPrimitive convertQuietPrimitive(
       quiet.finalBoardDrop);
 }
 
-CaptureMotionProgram compileAttackerFinal(
+bool ordinaryCapture(const OfflinePhaseExecutionRequest& request) {
+  return request.move.capture && !request.move.castling &&
+         !request.move.enPassant && request.move.promotion.empty() &&
+         request.move.uci == request.move.from + request.move.to &&
+         request.move.capturedSquare == request.move.to;
+}
+
+CaptureMotionProgram compileAttackerBoardTransfer(
     const OfflinePhaseExecutionRequest& request) {
-  if (!request.move.capture || request.move.castling || request.move.enPassant ||
-      !request.move.promotion.empty() ||
-      request.move.uci != request.move.from + request.move.to ||
-      request.move.from != request.phase.from ||
-      request.move.to != request.phase.to ||
-      request.move.capturedSquare != request.phase.to) {
-    return reject(
-        request,
-        CaptureMotionCompileStatus::UnsupportedMove,
-        "AttackerFinal must describe one ordinary non-promotion capture.");
-  }
-  if (request.graveyardSlotKey.empty() ||
-      request.graveyardState != GraveyardSlotState::Occupied ||
-      request.phase.graveyard || !request.phase.transfer ||
+  if (request.phase.graveyard || !request.phase.transfer ||
       !boardOnlyMode(request.phase.transfer->mode)) {
     return reject(
         request,
-        CaptureMotionCompileStatus::InvalidGraveyard,
-        "AttackerFinal requires an occupied graveyard slot and a board-only route.");
+        request.phase.transfer && !boardOnlyMode(request.phase.transfer->mode)
+            ? CaptureMotionCompileStatus::UnsupportedRoute
+            : CaptureMotionCompileStatus::InvalidPhase,
+        "The attacker phase requires one board-only transfer route.");
   }
 
   OfflinePhaseExecutionRequest quietRequest = request;
   quietRequest.phase.kind = MotionPhaseKind::QuietTransfer;
+  quietRequest.move.uci = request.phase.from + request.phase.to;
+  quietRequest.move.from = request.phase.from;
+  quietRequest.move.to = request.phase.to;
   quietRequest.move.capture = false;
+  quietRequest.move.castling = false;
+  quietRequest.move.enPassant = false;
+  quietRequest.move.promotion.clear();
   quietRequest.move.capturedPiece.clear();
   quietRequest.move.capturedSquare.clear();
+  quietRequest.move.rookFrom.clear();
+  quietRequest.move.rookTo.clear();
   quietRequest.graveyardSlotKey.clear();
   quietRequest.graveyardState = GraveyardSlotState::Free;
   const QuietMotionProgram quiet = OfflineQuietMotionCompiler{}.compile(quietRequest);
@@ -196,6 +200,8 @@ CaptureMotionProgram compileAttackerFinal(
       status = CaptureMotionCompileStatus::InvalidOccupancy;
     } else if (quiet.status == QuietMotionCompileStatus::UnsupportedMove) {
       status = CaptureMotionCompileStatus::UnsupportedMove;
+    } else if (quiet.status == QuietMotionCompileStatus::InvalidPhase) {
+      status = CaptureMotionCompileStatus::InvalidPhase;
     }
     return reject(request, status, quiet.blockedReason);
   }
@@ -220,6 +226,45 @@ CaptureMotionProgram compileAttackerFinal(
     program.primitives.push_back(convertQuietPrimitive(item));
   }
   return program;
+}
+
+CaptureMotionProgram compileAttackerStage(
+    const OfflinePhaseExecutionRequest& request) {
+  if (!ordinaryCapture(request) || request.phase.from != request.move.from ||
+      request.phase.to == request.move.to ||
+      request.phase.to == request.move.capturedSquare) {
+    return reject(
+        request,
+        CaptureMotionCompileStatus::UnsupportedMove,
+        "AttackerStage must move an ordinary capture attacker to a distinct staging square.");
+  }
+  if (request.graveyardSlotKey.empty() ||
+      request.graveyardState != GraveyardSlotState::Pending) {
+    return reject(
+        request,
+        CaptureMotionCompileStatus::InvalidGraveyard,
+        "AttackerStage requires the capture graveyard slot to remain pending.");
+  }
+  return compileAttackerBoardTransfer(request);
+}
+
+CaptureMotionProgram compileAttackerFinal(
+    const OfflinePhaseExecutionRequest& request) {
+  if (!ordinaryCapture(request) || request.move.to != request.phase.to ||
+      request.phase.from == request.phase.to) {
+    return reject(
+        request,
+        CaptureMotionCompileStatus::UnsupportedMove,
+        "AttackerFinal must describe one ordinary non-promotion capture.");
+  }
+  if (request.graveyardSlotKey.empty() ||
+      request.graveyardState != GraveyardSlotState::Occupied) {
+    return reject(
+        request,
+        CaptureMotionCompileStatus::InvalidGraveyard,
+        "AttackerFinal requires an occupied graveyard slot and a board-only route.");
+  }
+  return compileAttackerBoardTransfer(request);
 }
 
 CaptureMotionProgram compileCapturedRemoval(
@@ -327,14 +372,15 @@ CaptureMotionProgram OfflineCaptureMotionCompiler::compile(
       return compileCapturedRemoval(request);
     case MotionPhaseKind::AttackerFinal:
       return compileAttackerFinal(request);
-    case MotionPhaseKind::QuietTransfer:
     case MotionPhaseKind::AttackerStage:
+      return compileAttackerStage(request);
+    case MotionPhaseKind::QuietTransfer:
     case MotionPhaseKind::CastleKing:
     case MotionPhaseKind::CastleRook:
       return reject(
           request,
           CaptureMotionCompileStatus::InvalidPhase,
-          "Only CapturedRemoval and AttackerFinal phases are supported.");
+          "Only staged or final capture attacker phases and captured removal are supported.");
   }
   return reject(
       request,
