@@ -72,11 +72,16 @@ constexpr bool kCastlingMotionDiagnostic =
     ENABLE_OFFLINE_CASTLING_MOTION_DIAGNOSTICS != 0;
 constexpr bool kPromotionMotionDiagnostic =
     ENABLE_OFFLINE_PROMOTION_MOTION_DIAGNOSTICS != 0;
+constexpr bool kUnifiedTurnDiagnostic =
+    ENABLE_OFFLINE_UNIFIED_TURN_DIAGNOSTICS != 0;
 constexpr bool kLaneMotionDiagnostic =
     ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS != 0;
 constexpr bool kLaneBoardFixture = OFFLINE_LANE_MOTION_FIXTURE == 1;
 
 const char* diagnosticPrefix() {
+  if (kUnifiedTurnDiagnostic) {
+    return "OFFLINE_UNIFIED_TURN_DIAG";
+  }
   if (kStagedCaptureMotionDiagnostic) {
     return "OFFLINE_STAGED_CAPTURE_MOTION_DIAG";
   }
@@ -2101,6 +2106,10 @@ void emitPromotionSummary(
 
 #endif
 
+#if ENABLE_OFFLINE_UNIFIED_TURN_DIAGNOSTICS
+#include "offline_unified_turn_diagnostic.inc"
+#endif
+
 #endif
 
 #if ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
@@ -2569,7 +2578,10 @@ void runtimeTask(void*) {
   start["humanColor"] = "white";
   start["searchTimeMs"] = 3000;
   start["maxDepth"] = 12;
-  if (kStagedCaptureMotionDiagnostic) {
+  if (kUnifiedTurnDiagnostic) {
+    start["fixture"] = "standard-three-turn";
+    start["targetTurns"] = 3;
+  } else if (kStagedCaptureMotionDiagnostic) {
     start["fixture"] = "staged-e2d1-i4";
   } else if (kCaptureLaneMotionDiagnostic) {
     start["fixture"] = "capture-e3-z2-d5-z5-z3-e3";
@@ -2614,7 +2626,10 @@ void runtimeTask(void*) {
   config.coordinator.searchLimits.maxNodes = 0;
   config.coordinator.searchLimits.maxDepth = 12;
   config.coordinator.externalSlots = offline::defaultExternalSlots();
-#if ENABLE_OFFLINE_PROMOTION_MOTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_UNIFIED_TURN_DIAGNOSTICS
+  config.initialFen =
+      "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+#elif ENABLE_OFFLINE_PROMOTION_MOTION_DIAGNOSTICS
   config.initialFen = "4k3/8/8/8/8/8/p7/4K3 w - - 0 1";
 #elif ENABLE_OFFLINE_CASTLING_MOTION_DIAGNOSTICS
   config.initialFen =
@@ -2648,7 +2663,19 @@ void runtimeTask(void*) {
     return;
   }
 
-#if ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_UNIFIED_TURN_DIAGNOSTICS
+  CaptureMotionDiagnosticResult unifiedHomeDiagnostic;
+  if (!runCaptureHomeGate(unifiedHomeDiagnostic)) {
+    UnifiedTurnDiagnosticResult unifiedDiagnostic;
+    unifiedDiagnostic.homeSucceeded = false;
+    unifiedDiagnostic.magnetLow = offlineRuntimeMagnetIsLow();
+    unifiedDiagnostic.error = unifiedHomeDiagnostic.error;
+    emitUnifiedSummary(unifiedDiagnostic);
+    summaryEmitted = true;
+    vTaskDelete(nullptr);
+    return;
+  }
+#elif ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS
   QuietMotionDiagnosticResult quietDiagnostic;
   if (!runQuietHomeGate(quietDiagnostic)) {
     quietDiagnostic.magnetLow = offlineRuntimeMagnetIsLow();
@@ -2707,6 +2734,9 @@ void runtimeTask(void*) {
   std::uint32_t searchSensorScans = 0;
   std::uint32_t searchHeartbeatAttempts = 0;
   std::uint32_t searchElapsedMs = 0;
+#if ENABLE_OFFLINE_UNIFIED_TURN_DIAGNOSTICS
+  bool initialTurnReadyEmitted = false;
+#endif
 
   for (;;) {
     offline::Occupancy occupancy;
@@ -2731,6 +2761,14 @@ void runtimeTask(void*) {
       emitRuntimeUpdate(update, nowMs);
     }
     storeSafety(runtime->ownershipSafety(occupancy));
+
+#if ENABLE_OFFLINE_UNIFIED_TURN_DIAGNOSTICS
+    if (!initialTurnReadyEmitted &&
+        runtime->phase() == offline::OfflineRuntimePhase::HumanTurn) {
+      emitUnifiedTurnReady(*runtime, 1);
+      initialTurnReadyEmitted = true;
+    }
+#endif
 
     const auto request = runtime->pendingEngineRequest();
     if (request && request->generation != searchedGeneration) {
@@ -2757,7 +2795,24 @@ void runtimeTask(void*) {
 
     if (!summaryEmitted && runtime->phase() == offline::OfflineRuntimePhase::PlanReady) {
       const bool planFrozen = emitMotionPlan(*runtime);
-#if ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_UNIFIED_TURN_DIAGNOSTICS
+      UnifiedTurnDiagnosticResult execution;
+      execution.homeSucceeded = unifiedHomeDiagnostic.homeSucceeded;
+      if (planFrozen) {
+        execution = runUnifiedThreeTurns(
+            *runtime,
+            engine,
+            searchSensorScans,
+            searchHeartbeatAttempts,
+            searchElapsedMs,
+            consumedRevision);
+        execution.homeSucceeded = unifiedHomeDiagnostic.homeSucceeded;
+      } else {
+        execution.error =
+            "The first unified opponent plan was not frozen before execution.";
+      }
+      emitUnifiedSummary(execution);
+#elif ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS
       const auto state = runtime->coordinator().currentState();
       const auto transaction = runtime->coordinator().pendingMotionTransaction();
       PhaseExecutionDiagnosticResult execution;

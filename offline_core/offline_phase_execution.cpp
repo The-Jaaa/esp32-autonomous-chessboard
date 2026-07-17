@@ -343,6 +343,46 @@ OfflinePhaseExecutionUpdate OfflinePhaseExecutionAdapter::confirmPromotion(
   return mapCoordinatorResult(std::move(result));
 }
 
+OfflinePhaseExecutionUpdate OfflinePhaseExecutionAdapter::openNextHumanTurn(
+    const Occupancy& occupancy) {
+  const Occupancy& expected = runtime_.coordinator_.physical().committedOccupancy();
+  if (state_ == OfflinePhaseExecutionState::Idle &&
+      runtime_.phase_ == OfflineRuntimePhase::HumanTurn && occupancy == expected) {
+    return updateFor(
+        OfflinePhaseExecutionEvent::None,
+        "The next human turn is already open.");
+  }
+  if (state_ != OfflinePhaseExecutionState::Complete ||
+      runtime_.phase_ != OfflineRuntimePhase::ExecutionComplete ||
+      runtime_.coordinator_.phase() != OfflineTurnPhase::HumanTurn) {
+    return updateFor(
+        OfflinePhaseExecutionEvent::Error,
+        "The completed opponent turn is not ready to reopen for the human.");
+  }
+  if (occupancy != expected) {
+    OfflinePhaseExecutionUpdate update = updateFor(
+        OfflinePhaseExecutionEvent::TurnBoundaryBlocked,
+        "The board must match the committed position before the next human turn opens.");
+    update.differenceFromExpected = compareOccupancy(expected, occupancy);
+    return update;
+  }
+
+  runtime_.latestOccupancy_ = occupancy;
+  runtime_.lastProcessedOccupancy_ = occupancy;
+  runtime_.hasLatestOccupancy_ = true;
+  runtime_.hasLastProcessedOccupancy_ = true;
+  runtime_.planningWarning_ = false;
+  runtime_.phase_ = OfflineRuntimePhase::HumanTurn;
+  state_ = OfflinePhaseExecutionState::Idle;
+  request_.reset();
+  issuedTokens_.clear();
+  lastAcceptedToken_.reset();
+  lastAcceptedOccupancy_.reset();
+  return updateFor(
+      OfflinePhaseExecutionEvent::HumanTurnOpened,
+      "The verified opponent turn is complete and the human turn is open.");
+}
+
 OfflinePhaseExecutionUpdate OfflinePhaseExecutionAdapter::currentState() const {
   return updateFor(OfflinePhaseExecutionEvent::None);
 }
@@ -378,6 +418,8 @@ const char* offlinePhaseExecutionEventName(OfflinePhaseExecutionEvent event) {
     case OfflinePhaseExecutionEvent::PromotionConfirmationReady: return "promotion_confirmation_ready";
     case OfflinePhaseExecutionEvent::PromotionConfirmationRejected: return "promotion_confirmation_rejected";
     case OfflinePhaseExecutionEvent::MoveCommitted: return "move_committed";
+    case OfflinePhaseExecutionEvent::HumanTurnOpened: return "human_turn_opened";
+    case OfflinePhaseExecutionEvent::TurnBoundaryBlocked: return "turn_boundary_blocked";
     case OfflinePhaseExecutionEvent::GameEnded: return "game_ended";
     case OfflinePhaseExecutionEvent::Error: return "error";
   }

@@ -27,6 +27,7 @@
 #include "../offline_promotion_motion.h"
 #include "../offline_route.h"
 #include "../offline_runtime.h"
+#include "../offline_unified_motion.h"
 #include "../offline_phase_execution.h"
 #include "../offline_quiet_motion.h"
 #endif

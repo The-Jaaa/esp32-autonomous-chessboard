@@ -928,6 +928,7 @@ namespace {
 constexpr std::uint32_t OFFLINE_HOME_AXIS_TIMEOUT_MS = 20000;
 constexpr std::uint32_t OFFLINE_HOME_BACKOFF_TIMEOUT_MS = 3000;
 constexpr std::uint32_t OFFLINE_QUIET_SETTLE_TIMEOUT_MS = 1500;
+constexpr std::uint32_t OFFLINE_GRAVEYARD_STABLE_MS = 500;
 constexpr long OFFLINE_HOME_RELEASE_INCREMENT_STEPS = 100;
 constexpr long OFFLINE_HOME_MAX_RELEASE_STEPS = 1200;
 constexpr long OFFLINE_HOME_FINAL_RELEASE_STEPS = 100;
@@ -1128,13 +1129,21 @@ bool executeOfflineQuietHome(OfflineQuietHardwareResult& result) {
 
 bool waitForOfflineQuietOccupancy(
     const offline::Occupancy& expected,
-    std::uint32_t timeoutMs) {
+    std::uint32_t timeoutMs,
+    std::uint32_t stableMs = 0) {
   const std::uint32_t startedAt = millis();
+  std::uint32_t matchingSince = 0;
   while (millis() - startedAt < timeoutMs) {
     scanSensors();
     offline::Occupancy observed;
     copyOfflineQuietOccupancy(observed);
-    if (observed == expected) return true;
+    if (observed == expected) {
+      if (stableMs == 0) return true;
+      if (matchingSince == 0) matchingSince = millis();
+      if (millis() - matchingSince >= stableMs) return true;
+    } else {
+      matchingSince = 0;
+    }
     delay(10);
   }
   return false;
@@ -1316,8 +1325,14 @@ bool executeOfflineCaptureProgram(
 
   digitalWrite(MAGNET_PIN, LOW);
   offlineQuietMagnetAuthorized = false;
+  const std::uint32_t requiredStableMs =
+      program.phaseKind == offline::MotionPhaseKind::CapturedRemoval
+          ? OFFLINE_GRAVEYARD_STABLE_MS
+          : 0;
   if (!waitForOfflineQuietOccupancy(
-          program.expectedAfter, OFFLINE_QUIET_SETTLE_TIMEOUT_MS)) {
+          program.expectedAfter,
+          OFFLINE_QUIET_SETTLE_TIMEOUT_MS,
+          requiredStableMs)) {
     result.error = "Board occupancy did not match the capture phase after-state.";
     return false;
   }

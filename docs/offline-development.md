@@ -1087,3 +1087,107 @@ The guarded real promotion-replacement milestone is accepted. Human physical
 promotion selection, online promotion support, gameplay LEDs, continuous
 offline play, persistence, reconnect transfer, offline undo/redo, and
 production automatic switching remain deferred.
+
+## Guarded Unified Three-Turn Offline Gameplay Diagnostic
+
+The accepted one-move hardware compilers are now available through one
+portable `OfflineUnifiedMotionCompiler`. It dispatches each phase to the
+promotion, castling, capture/en-passant, lane, or quiet compiler and normalizes
+successful output into `CaptureMotionProgram`. This keeps one primitive
+vocabulary for guarded board and external-coordinate execution while
+preserving the original phase token, occupancy checkpoints, route metadata,
+graveyard metadata, final-board-only compensation, and two-attempt limit.
+Inconsistent move/phase combinations fail without changing the request.
+
+`OfflinePhaseExecutionAdapter::openNextHumanTurn(occupancy)` now reopens the
+runtime only after a verified opponent commit, exact committed occupancy, and
+coordinator `HumanTurn`. Incorrect occupancy returns a missing/extra diff and
+leaves execution frozen. An exact duplicate after reopening is idempotent, and
+`GameOver` cannot reopen. The firmware caller separately requires the exact
+boundary to remain stable for 500 ms before invoking this operation.
+
+`ENABLE_OFFLINE_UNIFIED_TURN_DIAGNOSTICS` defaults to `0` and is mutually
+exclusive with every existing firmware diagnostic. The enabled build starts
+from the standard position with Human White, reuses bounded homing and the
+accepted ownership, sensor, engine, coordinator, phase, capture-executor, and
+speed-profile layers, then executes three real opponent replies. It retains
+verified robot graveyard occupancy across turns. Opponent promotion pauses for
+the accepted Serial prompt and occupied -> empty -> occupied replacement
+sequence. Human promotion remains deliberately unsupported and emits an
+explicit restore message rather than silently selecting a piece.
+
+Every phase requires exact before/after sensor occupancy. Only an exact
+unchanged before-state permits attempt two; earlier verified phases are never
+restarted, and attempt three is rejected. Ambiguous occupancy, route/compiler
+failure, exhausted graveyard capacity, or ownership handoff freezes motion and
+forces the magnet LOW. Normal HTTP motion, normal homing, diagnostics commands,
+and gameplay LEDs remain blocked. After the third robot reply, the exact third
+turn boundary reopens at `HumanTurn`, then the diagnostic freezes without
+changing the board.
+
+Host coverage includes quiet, Lane, LaneBoard, direct/staged/lane captures,
+en passant, all castling directions, Q/R/B/N promotions, normalized primitive
+parity, three-turn Human White and Human Black cycles, retry and mismatch
+handling, duplicate boundaries, game over, promotion non-commit before
+replacement, and distinct graveyard slots retained across consecutive turns.
+
+Run the focused suite or compile-only verifier with:
+
+```powershell
+Set-Location .\app
+npm run test:offline-unified-turn
+
+Set-Location ..
+.\tools\verify-offline-unified-turn.ps1
+```
+
+Run the guarded physical gate only after stopping the backend, arranging the
+standard position, powering the gantry, and clearing every Z/I transit and
+graveyard coordinate:
+
+```powershell
+.\tools\verify-offline-unified-turn.ps1 `
+  -UploadPort COM11 `
+  -SerialTimeoutSeconds 900 `
+  -SerialLogPath logs\offline-unified-turn-acceptance.log
+```
+
+Play `g1f3` first. After each robot reply, Serial prints the current FEN and
+sorted legal moves; choose one legal quiet White move for turns two and three.
+The verifier parses three accepted human moves, searches, plans, compiler
+dispatches, robot commits, and stable reopened boundaries, and restores the
+production image in `finally` even when the diagnostic or upload fails.
+
+Automated acceptance on 2026-07-17 passes the focused unified suite, complete
+foundation suite/verifier, client build, zero-warning lint, every prior
+firmware compile gate, and the deterministic 100-game/6,838-ply soak. The soak
+covered 1,171 captures, 37 castlings, 8 en-passant moves, 65 promotions, and 99
+terminal games. Production remains exactly 1,042,543 bytes flash / 47,128
+bytes static RAM. After the hardware-discovered graveyard verification
+hardening, the unified diagnostic compiles at 1,362,855 / 52,048 with
+1,782,873 bytes of application-partition headroom.
+
+Guarded COM11 testing verified bounded homing, standard-position setup, three
+accepted human moves and engine searches, two complete robot replies, two
+committed FEN updates, two stable reopened turn boundaries, route fallback,
+magnet shutdown, and automatic production restoration. On both attempts at the
+third reply, the planned `f8d6` bishop drag caught on a torn board sticker. The
+executor detected that `f8` was empty while `d6` was not occupied, refused to
+commit the move, forced the magnet LOW, and restored production. The user
+identified and accepted this as an external board-surface defect, so the strict
+three-opponent-commit physical counter remains incomplete rather than being
+reported as a clean pass.
+
+An exploratory `e2e4 d5xe4` run also found that a captured pawn could pause on
+`h5` before reaching unsensored `I5`. A short-lived expected sensor snapshot
+could previously confirm removal too early. Captured-removal phases now require
+their expected board occupancy to remain continuously stable for 500 ms before
+the phase succeeds and the graveyard slot becomes occupied. Quiet moves remain
+unchanged, and graveyard drops still receive no overshoot. Serial evidence is
+stored in ignored `logs/offline-unified-turn-acceptance.log`,
+`logs/offline-unified-turn-acceptance-rerun.log`, and
+`logs/offline-unified-turn-acceptance-final.log`.
+
+Continuous full-game operation, standalone gameplay LEDs and human-promotion
+selection, persistence, reconnect state transfer, offline undo/redo, and
+production automatic ownership switching remain deferred.

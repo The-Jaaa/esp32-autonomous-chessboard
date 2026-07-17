@@ -38,6 +38,8 @@ enum class OfflinePhaseExecutionEvent {
   PromotionConfirmationReady,
   PromotionConfirmationRejected,
   MoveCommitted,
+  HumanTurnOpened,
+  TurnBoundaryBlocked,
   GameEnded,
   Error
 };
@@ -93,6 +95,7 @@ class OfflinePhaseExecutionAdapter {
   OfflinePhaseExecutionUpdate processPromotionSnapshot(const Occupancy& occupancy);
   OfflinePhaseExecutionUpdate confirmPromotion(
       char promotionPiece, const Occupancy& occupancy);
+  OfflinePhaseExecutionUpdate openNextHumanTurn(const Occupancy& occupancy);
 
   [[nodiscard]] OfflinePhaseExecutionUpdate currentState() const;
   [[nodiscard]] std::optional<OfflinePhaseExecutionRequest> currentRequest() const {
