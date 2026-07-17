@@ -71,6 +71,12 @@ if (-not $SkipFirmware) {
     Invoke-Checked 'ESP32 guarded en passant diagnostic firmware builds' {
         & (Join-Path $PSScriptRoot 'verify-offline-en-passant-motion.ps1')
     }
+    Invoke-Checked 'ESP32 guarded castling diagnostic firmware builds' {
+        & (Join-Path $PSScriptRoot 'verify-offline-castling-motion.ps1')
+    }
+    Invoke-Checked 'ESP32 guarded promotion diagnostic firmware builds' {
+        & (Join-Path $PSScriptRoot 'verify-offline-promotion-motion.ps1')
+    }
 }
 
 Write-Host "`nFoundation verification passed." -ForegroundColor Green

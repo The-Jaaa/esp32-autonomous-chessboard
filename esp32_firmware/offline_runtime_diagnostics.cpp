@@ -70,6 +70,8 @@ constexpr bool kEnPassantMotionDiagnostic =
     ENABLE_OFFLINE_EN_PASSANT_MOTION_DIAGNOSTICS != 0;
 constexpr bool kCastlingMotionDiagnostic =
     ENABLE_OFFLINE_CASTLING_MOTION_DIAGNOSTICS != 0;
+constexpr bool kPromotionMotionDiagnostic =
+    ENABLE_OFFLINE_PROMOTION_MOTION_DIAGNOSTICS != 0;
 constexpr bool kLaneMotionDiagnostic =
     ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS != 0;
 constexpr bool kLaneBoardFixture = OFFLINE_LANE_MOTION_FIXTURE == 1;
@@ -86,6 +88,9 @@ const char* diagnosticPrefix() {
   }
   if (kCastlingMotionDiagnostic) {
     return "OFFLINE_CASTLING_MOTION_DIAG";
+  }
+  if (kPromotionMotionDiagnostic) {
+    return "OFFLINE_PROMOTION_MOTION_DIAG";
   }
   if (kCaptureMotionDiagnostic) return "OFFLINE_CAPTURE_MOTION_DIAG";
   if (kLaneMotionDiagnostic) return "OFFLINE_LANE_MOTION_DIAG";
@@ -1711,6 +1716,391 @@ void emitCastlingSummary(
 
 #endif
 
+#if ENABLE_OFFLINE_PROMOTION_MOTION_DIAGNOSTICS
+
+constexpr std::uint32_t kPromotionReplacementTimeoutMs = 180000;
+
+struct PromotionMotionDiagnosticResult {
+  bool homeSucceeded = false;
+  bool programCompiled = false;
+  bool primitiveOrderValid = false;
+  bool finalOvershootEnabled = false;
+  bool retryObserved = false;
+  bool retryExhausted = false;
+  bool recoveryRequired = false;
+  bool replacementTimedOut = false;
+  bool pawnPlacementVerified = false;
+  bool liftObserved = false;
+  bool replacementObserved = false;
+  bool identityConfirmed = false;
+  bool opponentMoveCommitted = false;
+  bool finalOccupancyMatched = false;
+  bool noMotionDuringReplacement = false;
+  bool motorActivity = false;
+  bool magnetEverHigh = false;
+  bool magnetLow = true;
+  std::size_t verifiedPhaseCount = 0;
+  std::string selectedMove;
+  std::string committedFen;
+  std::string actualOccupancy;
+  std::string expectedOccupancy;
+  String error;
+};
+
+bool validatePromotionPrimitiveOrder(
+    const offline::CaptureMotionProgram& program,
+    bool& finalOvershootEnabled) {
+  if (!program.success() ||
+      program.phaseKind != offline::MotionPhaseKind::QuietTransfer ||
+      program.moveUci != "a2a1q" || program.from != "a2" ||
+      program.to != "a1" || !program.graveyardSlotKey.empty() ||
+      program.primitives.size() != 5 ||
+      program.primitives[0].kind !=
+          offline::CaptureMotionPrimitiveKind::TravelBoard ||
+      program.primitives[1].kind !=
+          offline::CaptureMotionPrimitiveKind::Pickup ||
+      program.primitives[2].kind !=
+          offline::CaptureMotionPrimitiveKind::DragBoard ||
+      program.primitives[3].kind !=
+          offline::CaptureMotionPrimitiveKind::Drop ||
+      program.primitives[4].kind !=
+          offline::CaptureMotionPrimitiveKind::Verify) {
+    return false;
+  }
+  finalOvershootEnabled = program.primitives[2].finalBoardDrop &&
+      program.primitives[2].targetRawIndex == offline::squareToRawIndex("a1");
+  return finalOvershootEnabled;
+}
+
+void emitPromotionReplacementUpdate(
+    const offline::PromotionReplacementUpdate& update,
+    const offline::Occupancy& occupancy) {
+  DynamicJsonDocument document(1536);
+  document["type"] = "promotion-replacement";
+  document["state"] = offline::promotionReplacementStateName(update.state);
+  document["event"] = offline::promotionReplacementEventName(update.event);
+  document["square"] = "a1";
+  document["piece"] = "queen";
+  document["promotion"] = "q";
+  document["occupancy"] = occupancyHex(occupancy).c_str();
+  document["message"] = update.message.c_str();
+  if (!update.differenceFromEmpty.empty()) {
+    addDifference(
+        document.createNestedObject("differenceFromEmpty"),
+        update.differenceFromEmpty);
+  }
+  if (!update.differenceFromExpected.empty()) {
+    addDifference(
+        document.createNestedObject("differenceFromExpected"),
+        update.differenceFromExpected);
+  }
+  emitDocument(document);
+}
+
+PromotionMotionDiagnosticResult runRealPromotionMotionExecution(
+    offline::OfflineReadOnlyRuntime& runtime,
+    const std::string& previewAfterFen) {
+  PromotionMotionDiagnosticResult diagnostic;
+  diagnostic.homeSucceeded = true;
+  const auto transaction = runtime.coordinator().pendingMotionTransaction();
+  const bool fixturePlanMatches = transaction &&
+      transaction->selectedMove == "a2a1q" &&
+      transaction->motion.move.promotion == "q" &&
+      transaction->motion.strategy == offline::MotionStrategy::Quiet &&
+      transaction->motion.routeCost == 0.0 &&
+      transaction->motion.phases.size() == 1 &&
+      transaction->motion.phases[0].kind ==
+          offline::MotionPhaseKind::QuietTransfer &&
+      transaction->motion.phases[0].from == "a2" &&
+      transaction->motion.phases[0].to == "a1" &&
+      transaction->motion.phases[0].transfer &&
+      transaction->motion.phases[0].transfer->mode ==
+          offline::ExternalRouteMode::Direct &&
+      transaction->motion.phases[0].transfer->routeCost == 0.0 &&
+      transaction->graveyardSlotKey.empty();
+  if (!fixturePlanMatches) {
+    diagnostic.error =
+        "The opponent plan is not the controlled a2a1q direct promotion.";
+    return diagnostic;
+  }
+  diagnostic.selectedMove = transaction->selectedMove;
+
+  offline::OfflinePhaseExecutionAdapter adapter(runtime);
+  auto update = adapter.begin();
+  emitExecutionUpdate(update);
+  std::uint32_t hardwareRequestId = 50;
+  offline::Occupancy expectedPromotionOccupancy{};
+
+  for (std::size_t guard = 0; guard < 3; ++guard) {
+    if ((adapter.state() != offline::OfflinePhaseExecutionState::PhaseReady &&
+         adapter.state() != offline::OfflinePhaseExecutionState::RetryReady) ||
+        !adapter.currentRequest()) {
+      break;
+    }
+    const auto request = *adapter.currentRequest();
+    const auto program =
+        offline::OfflinePromotionMotionCompiler{}.compile(request);
+    emitCaptureProgram(program, "promotion-program");
+    bool overshoot = false;
+    const bool orderValid = validatePromotionPrimitiveOrder(program, overshoot);
+    diagnostic.programCompiled = program.success();
+    diagnostic.primitiveOrderValid = orderValid;
+    diagnostic.finalOvershootEnabled = overshoot;
+    if (!program.success() || !orderValid) {
+      diagnostic.error = program.blockedReason.c_str();
+      return diagnostic;
+    }
+    if (!offline::promotionMotionAttemptAllowed(request.token)) {
+      diagnostic.retryExhausted = true;
+      diagnostic.error = "The promotion motion retry limit was exhausted.";
+      return diagnostic;
+    }
+
+    update = adapter.takeCurrentRequest();
+    emitExecutionUpdate(update);
+    if (update.state != offline::OfflinePhaseExecutionState::AwaitingReport) {
+      diagnostic.error = "The adapter did not accept the promotion hardware request.";
+      return diagnostic;
+    }
+
+    const std::uint32_t requestId = hardwareRequestId++;
+    if (!queueOfflineCaptureProgram(requestId, program)) {
+      diagnostic.error = "Could not queue the promotion hardware program.";
+      return diagnostic;
+    }
+    OfflineCaptureHardwareResult hardware;
+    if (!waitForCaptureHardwareResult(requestId, 120000, hardware)) {
+      abortOfflineCaptureMotionHardware();
+      diagnostic.error = "Promotion hardware execution timed out after 120 seconds.";
+      return diagnostic;
+    }
+    emitCaptureHardwareResult(hardware, "promotion-pawn");
+    diagnostic.motorActivity = diagnostic.motorActivity || hardware.motorActivity;
+    diagnostic.magnetEverHigh = diagnostic.magnetEverHigh || hardware.magnetEverHigh;
+    diagnostic.magnetLow = hardware.magnetLow;
+    diagnostic.actualOccupancy = occupancyHex(hardware.observedOccupancy);
+
+    const offline::OfflinePhaseExecutionReport report{
+        request.token, hardware.success, hardware.observedOccupancy};
+    emitPhaseReport(report, hardware.success ? "real-success" : "real-failure");
+    update = adapter.submitReport(report);
+    emitExecutionUpdate(update);
+
+    if (hardware.success) {
+      diagnostic.verifiedPhaseCount = 1;
+      diagnostic.pawnPlacementVerified =
+          hardware.observedOccupancy == program.expectedAfter;
+      diagnostic.finalOccupancyMatched = diagnostic.pawnPlacementVerified;
+      diagnostic.expectedOccupancy = occupancyHex(program.expectedAfter);
+      expectedPromotionOccupancy = program.expectedAfter;
+      break;
+    }
+    if (hardware.observedOccupancy == program.expectedBefore &&
+        request.token.attempt == 1 &&
+        update.state == offline::OfflinePhaseExecutionState::RetryReady) {
+      diagnostic.retryObserved = true;
+      continue;
+    }
+    if (update.state == offline::OfflinePhaseExecutionState::RecoveryRequired) {
+      diagnostic.recoveryRequired = true;
+      diagnostic.error = hardware.error;
+      return diagnostic;
+    }
+  }
+
+  if (!diagnostic.pawnPlacementVerified ||
+      adapter.state() != offline::OfflinePhaseExecutionState::PromotionPending) {
+    diagnostic.error =
+        "Pawn placement did not reach promotion replacement pending state.";
+    return diagnostic;
+  }
+
+  const long replacementMotorA = motorA.currentPosition();
+  const long replacementMotorB = motorB.currentPosition();
+  offline::OfflinePromotionReplacementGate replacement;
+  auto replacementUpdate = replacement.arm(
+      "a1", 'q', expectedPromotionOccupancy);
+  emitPromotionReplacementUpdate(replacementUpdate, expectedPromotionOccupancy);
+  DynamicJsonDocument prompt(512);
+  prompt["type"] = "promotion-required";
+  prompt["color"] = "black";
+  prompt["piece"] = "queen";
+  prompt["promotion"] = "q";
+  prompt["square"] = "a1";
+  prompt["message"] =
+      "Replace the Black pawn on a1 with a Black queen.";
+  emitDocument(prompt);
+
+  std::uint32_t consumedRevision = 0;
+  const std::uint32_t replacementStartedAt = millis();
+  while (millis() - replacementStartedAt < kPromotionReplacementTimeoutMs) {
+    offline::Occupancy occupancy;
+    std::uint32_t revision = 0;
+    std::uint32_t changedAtMs = 0;
+    if (!copySnapshot(occupancy, revision, changedAtMs) ||
+        revision == consumedRevision) {
+      vTaskDelay(pdMS_TO_TICKS(kLoopDelayMs));
+      continue;
+    }
+    (void)changedAtMs;
+    consumedRevision = revision;
+    replacementUpdate = replacement.processSnapshot(occupancy);
+    emitPromotionReplacementUpdate(replacementUpdate, occupancy);
+
+    if (replacementUpdate.event ==
+            offline::PromotionReplacementEvent::PawnLifted ||
+        replacementUpdate.event ==
+            offline::PromotionReplacementEvent::ReplacementReady ||
+        replacementUpdate.event ==
+            offline::PromotionReplacementEvent::RecoveryRequired ||
+        adapter.state() == offline::OfflinePhaseExecutionState::RecoveryRequired) {
+      update = adapter.processPromotionSnapshot(occupancy);
+      emitExecutionUpdate(update);
+    }
+
+    diagnostic.liftObserved = replacement.liftObserved();
+    diagnostic.recoveryRequired =
+        replacement.state() == offline::PromotionReplacementState::SyncWarning ||
+        adapter.state() == offline::OfflinePhaseExecutionState::RecoveryRequired;
+
+    if (replacement.state() ==
+            offline::PromotionReplacementState::ReadyToConfirm &&
+        adapter.state() == offline::OfflinePhaseExecutionState::PromotionPending) {
+      const auto gateConfirmation = replacement.confirm('q', occupancy);
+      emitPromotionReplacementUpdate(gateConfirmation, occupancy);
+      update = adapter.confirmPromotion('q', occupancy);
+      emitExecutionUpdate(update);
+      diagnostic.replacementObserved = true;
+      diagnostic.identityConfirmed =
+          gateConfirmation.state ==
+              offline::PromotionReplacementState::Complete;
+      diagnostic.recoveryRequired = false;
+      diagnostic.actualOccupancy = occupancyHex(occupancy);
+      diagnostic.finalOccupancyMatched =
+          occupancy == expectedPromotionOccupancy;
+      if (adapter.state() == offline::OfflinePhaseExecutionState::Complete ||
+          adapter.state() == offline::OfflinePhaseExecutionState::GameOver) {
+        diagnostic.committedFen =
+            runtime.coordinator().physical().game().fen();
+        diagnostic.opponentMoveCommitted =
+            diagnostic.committedFen == previewAfterFen;
+        break;
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(kLoopDelayMs));
+  }
+
+  diagnostic.noMotionDuringReplacement =
+      motorA.currentPosition() == replacementMotorA &&
+      motorB.currentPosition() == replacementMotorB;
+  diagnostic.magnetLow = offlineRuntimeMagnetIsLow();
+  if (!diagnostic.opponentMoveCommitted) {
+    diagnostic.replacementTimedOut =
+        millis() - replacementStartedAt >= kPromotionReplacementTimeoutMs;
+    if (diagnostic.error.length() == 0) {
+      diagnostic.error = diagnostic.replacementTimedOut
+          ? "Promotion replacement timed out after 180 seconds."
+          : "Promotion replacement did not commit.";
+    }
+  }
+  return diagnostic;
+}
+
+void emitPromotionSummary(
+    const PromotionMotionDiagnosticResult& diagnostic,
+    std::uint32_t searchSensorScans,
+    std::uint32_t searchHeartbeatAttempts,
+    std::uint32_t searchElapsedMs) {
+  const std::size_t internalFree =
+      heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  const std::size_t largestInternal =
+      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  const std::size_t psramFree = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+  const std::size_t stackHeadroom = uxTaskGetStackHighWaterMark(nullptr);
+
+  emitCheck("bounded-home", diagnostic.homeSucceeded);
+  emitCheck("promotion-program-compiled", diagnostic.programCompiled);
+  emitCheck("ordered-primitives", diagnostic.primitiveOrderValid);
+  emitCheck("final-board-overshoot", diagnostic.finalOvershootEnabled);
+  emitCheck("pawn-placement-verified", diagnostic.pawnPlacementVerified);
+  emitCheck("replacement-lift-observed", diagnostic.liftObserved);
+  emitCheck("replacement-reoccupied", diagnostic.replacementObserved);
+  emitCheck("promotion-identity-confirmed", diagnostic.identityConfirmed);
+  emitCheck("no-motion-during-replacement", diagnostic.noMotionDuringReplacement);
+  emitCheck("real-motor-activity", diagnostic.motorActivity);
+  emitCheck("magnet-activated-for-drag", diagnostic.magnetEverHigh);
+  emitCheck("magnet-low", diagnostic.magnetLow && offlineRuntimeMagnetIsLow());
+  emitCheck("final-occupancy", diagnostic.finalOccupancyMatched);
+  emitCheck("opponent-move-committed", diagnostic.opponentMoveCommitted);
+  emitCheck("retry-limit", !diagnostic.retryExhausted);
+  emitCheck("replacement-timeout", !diagnostic.replacementTimedOut);
+  emitCheck("no-unresolved-recovery", !diagnostic.recoveryRequired);
+  emitCheck("internal-heap-threshold", internalFree >= kMinimumInternalHeapBytes);
+  emitCheck(
+      "largest-internal-block-threshold",
+      largestInternal >= kMinimumLargestInternalBlockBytes);
+  emitCheck("psram-threshold", psramFree >= kMinimumFreePsramBytes);
+  emitCheck("stack-threshold", stackHeadroom >= kMinimumStackHeadroomBytes);
+  emitCheck(
+      "sensor-loop-progress",
+      offlineRuntimeSensorScanCount > 0 &&
+          offlineRuntimeSensorMaxGapMs < kMaximumSensorGapMs);
+  emitCheck("heartbeat-progress", ownershipDiagnosticHeartbeatAttempts > 0);
+  emitCheck(
+      "search-deadline",
+      searchElapsedMs <= 3000U + kSearchOverrunAllowanceMs);
+
+  DynamicJsonDocument document(2560);
+  document["type"] = "summary";
+  document["pass"] = overallPass;
+  document["homeSucceeded"] = diagnostic.homeSucceeded;
+  document["realMotionEnabled"] = true;
+  document["motorActivity"] = diagnostic.motorActivity;
+  document["magnetEverHigh"] = diagnostic.magnetEverHigh;
+  document["magnetLow"] = diagnostic.magnetLow && offlineRuntimeMagnetIsLow();
+  document["commandConsumptionBlocked"] = true;
+  document["programCompiled"] = diagnostic.programCompiled;
+  document["orderedPrimitives"] = diagnostic.primitiveOrderValid;
+  document["finalOvershootEnabled"] = diagnostic.finalOvershootEnabled;
+  document["verifiedPhaseCount"] = diagnostic.verifiedPhaseCount;
+  document["retryObserved"] = diagnostic.retryObserved;
+  document["retryExhausted"] = diagnostic.retryExhausted;
+  document["recoveryRequired"] = diagnostic.recoveryRequired;
+  document["replacementTimedOut"] = diagnostic.replacementTimedOut;
+  document["pawnPlacementVerified"] = diagnostic.pawnPlacementVerified;
+  document["liftObserved"] = diagnostic.liftObserved;
+  document["replacementObserved"] = diagnostic.replacementObserved;
+  document["identityConfirmed"] = diagnostic.identityConfirmed;
+  document["noMotionDuringReplacement"] =
+      diagnostic.noMotionDuringReplacement;
+  document["finalOccupancyMatched"] = diagnostic.finalOccupancyMatched;
+  document["opponentMoveCommitted"] = diagnostic.opponentMoveCommitted;
+  document["selectedMove"] = diagnostic.selectedMove.c_str();
+  document["requestedPromotion"] = "q";
+  document["requestedPiece"] = "queen";
+  document["promotionSquare"] = "a1";
+  document["committedFen"] = diagnostic.committedFen.c_str();
+  document["actualOccupancy"] = diagnostic.actualOccupancy.c_str();
+  document["expectedOccupancy"] = diagnostic.expectedOccupancy.c_str();
+  if (diagnostic.error.length() > 0) document["error"] = diagnostic.error;
+  document["sensorScans"] = offlineRuntimeSensorScanCount;
+  document["sensorMaxGapMs"] = offlineRuntimeSensorMaxGapMs;
+  document["searchSensorScans"] = searchSensorScans;
+  document["heartbeatAttempts"] = ownershipDiagnosticHeartbeatAttempts;
+  document["searchHeartbeatAttempts"] = searchHeartbeatAttempts;
+  document["heartbeatMaxElapsedMs"] = ownershipDiagnosticHeartbeatMaxElapsedMs;
+  document["searchElapsedMs"] = searchElapsedMs;
+  document["internalFree"] = internalFree;
+  document["largestInternal"] = largestInternal;
+  document["psramFree"] = psramFree;
+  document["stackHeadroom"] = stackHeadroom;
+  document["core"] = xPortGetCoreID();
+  document["priority"] = uxTaskPriorityGet(nullptr);
+  emitDocument(document);
+}
+
+#endif
+
 #endif
 
 #if ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
@@ -2187,6 +2577,8 @@ void runtimeTask(void*) {
     start["fixture"] = "en-passant-e2e4-e4-i4-d4e3";
   } else if (kCastlingMotionDiagnostic) {
     start["fixture"] = "castle-a2a3-e8g8";
+  } else if (kPromotionMotionDiagnostic) {
+    start["fixture"] = "promotion-e1f2-a2a1q";
   } else if (kLaneMotionDiagnostic) {
     start["fixture"] = kLaneBoardFixture ? "LaneBoard" : "DirectLane";
   }
@@ -2222,7 +2614,9 @@ void runtimeTask(void*) {
   config.coordinator.searchLimits.maxNodes = 0;
   config.coordinator.searchLimits.maxDepth = 12;
   config.coordinator.externalSlots = offline::defaultExternalSlots();
-#if ENABLE_OFFLINE_CASTLING_MOTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_PROMOTION_MOTION_DIAGNOSTICS
+  config.initialFen = "4k3/8/8/8/8/8/p7/4K3 w - - 0 1";
+#elif ENABLE_OFFLINE_CASTLING_MOTION_DIAGNOSTICS
   config.initialFen =
       "4k2r/8/8/8/8/8/P3P1P1/4RKR1 w k - 0 1";
 #elif ENABLE_OFFLINE_EN_PASSANT_MOTION_DIAGNOSTICS
@@ -2259,6 +2653,18 @@ void runtimeTask(void*) {
   if (!runQuietHomeGate(quietDiagnostic)) {
     quietDiagnostic.magnetLow = offlineRuntimeMagnetIsLow();
     emitQuietSummary(quietDiagnostic, 0, 0, 0);
+    summaryEmitted = true;
+    vTaskDelete(nullptr);
+    return;
+  }
+#elif ENABLE_OFFLINE_PROMOTION_MOTION_DIAGNOSTICS
+  CaptureMotionDiagnosticResult promotionHomeDiagnostic;
+  if (!runCaptureHomeGate(promotionHomeDiagnostic)) {
+    PromotionMotionDiagnosticResult promotionDiagnostic;
+    promotionDiagnostic.homeSucceeded = false;
+    promotionDiagnostic.magnetLow = offlineRuntimeMagnetIsLow();
+    promotionDiagnostic.error = promotionHomeDiagnostic.error;
+    emitPromotionSummary(promotionDiagnostic, 0, 0, 0);
     summaryEmitted = true;
     vTaskDelete(nullptr);
     return;
@@ -2382,6 +2788,23 @@ void runtimeTask(void*) {
         execution.error = "The opponent plan was not frozen before hardware execution.";
       }
       emitQuietSummary(
+          execution,
+          searchSensorScans,
+          searchHeartbeatAttempts,
+          searchElapsedMs);
+#elif ENABLE_OFFLINE_PROMOTION_MOTION_DIAGNOSTICS
+      const auto state = runtime->coordinator().currentState();
+      const auto transaction = runtime->coordinator().pendingMotionTransaction();
+      PromotionMotionDiagnosticResult execution;
+      execution.homeSucceeded = promotionHomeDiagnostic.homeSucceeded;
+      if (planFrozen && state.opponentPlan && transaction) {
+        execution = runRealPromotionMotionExecution(
+            *runtime, state.opponentPlan->afterFen);
+      } else {
+        execution.error =
+            "The controlled promotion plan was not frozen before execution.";
+      }
+      emitPromotionSummary(
           execution,
           searchSensorScans,
           searchHeartbeatAttempts,

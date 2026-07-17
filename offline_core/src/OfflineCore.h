@@ -24,6 +24,7 @@
 #include "../offline_lane_motion.h"
 #include "../offline_motion.h"
 #include "../offline_physical.h"
+#include "../offline_promotion_motion.h"
 #include "../offline_route.h"
 #include "../offline_runtime.h"
 #include "../offline_phase_execution.h"

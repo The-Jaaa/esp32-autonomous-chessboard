@@ -998,3 +998,92 @@ The guarded real castling milestone is accepted. Real promotion replacement is
 the next remaining special-move hardware gate. Gameplay LEDs, continuous
 offline play, persistence, reconnect transfer, offline undo/redo, and
 production automatic switching remain deferred.
+
+## Guarded Real Offline Promotion Replacement Diagnostic
+
+The offline motion stack now has a portable `OfflinePromotionMotionCompiler`.
+It accepts legal White or Black Q/R/B/N quiet and capture promotions while
+retaining the original five-character UCI and promotion metadata. Physical
+movement is delegated to the accepted quiet, capture, and lane compilers, so
+board, `Lane`, and `LaneBoard` routes retain their existing safety rules.
+Only the pawn's final board placement receives the 250-step compensation;
+graveyard drops, external coordinates, and intermediate waypoints never do.
+
+Promotion remains transactional after the robot finishes moving the pawn.
+The coordinator enters `OpponentPromotionPending`, leaving FEN, history, side
+to move, and game result uncommitted. A portable
+`OfflinePromotionReplacementGate` requires the promotion sensor sequence
+occupied -> empty -> occupied before the requested Q/R/B/N identity can be
+confirmed. Unrelated occupancy changes enter recoverable synchronization
+warning, and confirmation before the lift or with the wrong identity is
+rejected. Binary sensors still cannot distinguish piece types, so the physical
+diagnostic trusts that the user places the piece named by the Serial prompt.
+
+The controlled fixture is:
+
+- initial FEN `4k3/8/8/8/8/8/p7/4K3 w - - 0 1`;
+- human move `e1f2` (`Kf2`);
+- deterministic Black reply `a2a1q` (`a1=Q`);
+- one `QuietTransfer` from `a2 -> a1`, route mode/cost `direct / 0`;
+- manual replacement of the Black pawn on `a1` with a Black queen;
+- final FEN `4k3/8/8/8/8/8/5K2/q7 w - - 0 2`.
+
+The guarded diagnostic allows one automatic motion retry only when sensors
+prove the pawn remains at its exact pre-move square. Once pawn placement on
+`a1` verifies, robot motion cannot run again. During the bounded 180-second
+replacement window, motors remain stationary and the magnet remains LOW.
+
+Run the focused host suite or guarded USB verifier with:
+
+```powershell
+Set-Location .\app
+npm run test:offline-promotion-motion
+
+Set-Location ..
+.\tools\verify-offline-promotion-motion.ps1
+.\tools\verify-offline-promotion-motion.ps1 `
+  -UploadPort COM11 `
+  -SerialTimeoutSeconds 420 `
+  -SerialLogPath logs\offline-promotion-motion-acceptance.log
+```
+
+`ENABLE_OFFLINE_PROMOTION_MOTION_DIAGNOSTICS` defaults to `0` and is mutually
+exclusive with every existing firmware diagnostic. The enabled build reuses
+bounded homing, ownership heartbeat, sensors, engine/coordinator planning,
+phase tokens, guarded real motion, resource telemetry, and automatic
+production restoration. Normal HTTP motion, normal homing, gameplay LEDs,
+nudge recovery, and normal command consumption remain blocked.
+
+Automated acceptance on 2026-07-17 passes the focused promotion suite, the
+complete foundation verifier, client build, zero-warning lint, every firmware
+compile gate, and the deterministic 100-game/6,838-ply soak. The soak covered
+1,171 captures, 37 castlings, 8 en-passant moves, 65 promotions, and 99
+terminal games.
+
+Production remains exactly 1,042,543 bytes flash / 47,128 bytes static RAM.
+The promotion diagnostic compiles at 1,346,019 / 52,048 with 1,799,709 bytes
+of application-partition headroom.
+
+Physical COM11 acceptance passed on 2026-07-17. Bounded homing succeeded. An
+initial missing-`a2` setup report identified an off-center pawn; repositioning
+it restored exact occupancy before gameplay. Physical `e1f2` was then
+accepted, and the engine selected `a2a1q` after a 3,000 ms depth-7 / 43,072-node
+search. The robot moved the pawn `a2 -> a1` with final board compensation and
+verified exact occupancy on attempt one.
+
+The diagnostic emitted the Black-queen replacement prompt, observed `a1`
+become empty, observed it become occupied again, confirmed `q`, and only then
+committed FEN `4k3/8/8/8/8/8/5K2/q7 w - - 0 2`. No motor movement occurred
+during replacement, the magnet ended LOW, and there was no unresolved recovery.
+
+Final hardware metrics were a 4 ms maximum sensor gap, 1,500 search-time sensor
+scans, 133,164 bytes free internal heap, a 114,676-byte largest internal block,
+7,430,496 bytes free PSRAM, and 18,404 bytes task-stack headroom. Every motion,
+replacement, occupancy, transaction, timing, resource, and safety assertion
+passed. Production firmware was restored automatically. Serial evidence is
+retained locally at `logs/offline-promotion-motion-acceptance.log`.
+
+The guarded real promotion-replacement milestone is accepted. Human physical
+promotion selection, online promotion support, gameplay LEDs, continuous
+offline play, persistence, reconnect transfer, offline undo/redo, and
+production automatic switching remain deferred.
