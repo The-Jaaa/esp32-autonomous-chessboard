@@ -1191,3 +1191,29 @@ stored in ignored `logs/offline-unified-turn-acceptance.log`,
 Continuous full-game operation, standalone gameplay LEDs and human-promotion
 selection, persistence, reconnect state transfer, offline undo/redo, and
 production automatic ownership switching remain deferred.
+
+## LED Data-Signal Investigation
+
+The intermittent stray-pixel flashes seen during offline ownership/status
+lighting were isolated with `tests_and_misc/esp32_led_flicker_diag` and
+`tools/verify-led-flicker.ps1`. The final comparison illuminates all 64 squares
+and all 256 LEDs in a fixed blue/orange checkerboard, then retransmits the
+identical frame every 100 ms in mirrored order on core 1, core 0, core 0, and
+core 1. Each phase lasts 30 seconds, WiFi remains connected, motors are locked
+off, and the magnet is held LOW.
+
+The guarded COM11 run completed with 300/300 core-1 frames and 298/298 core-0
+frames. Automated timing and safety checks passed, and production firmware was
+restored at exactly 1,042,543 bytes flash / 47,128 bytes static RAM. Visual
+testing still showed intermittent corruption. Gently flexing the LED data wire
+could deliberately produce severe corruption, and a normal online checkmate
+animation also flickered. The issue therefore is not isolated to the offline
+renderer or either ESP32 core; the current evidence points to the physical LED
+data path or its signal integrity.
+
+No production firmware behavior was changed. Hardware remediation is deferred:
+replace or reterminate the data wire, inspect both solder joints, keep data and
+ground short and paired, add a 330-470 ohm resistor near the first LED data
+input, and consider a 74AHCT125 level shifter when driving 5 V LEDs from the
+ESP32's 3.3 V output. The diagnostic remains available for confirming a future
+hardware repair.
