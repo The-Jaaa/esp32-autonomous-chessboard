@@ -1217,3 +1217,38 @@ ground short and paired, add a 330-470 ohm resistor near the first LED data
 input, and consider a 74AHCT125 level shifter when driving 5 V LEDs from the
 ESP32's 3.3 V output. The diagnostic remains available for confirming a future
 hardware repair.
+
+## Temporary LED Index Calibration
+
+The standalone calibration image maps the physical order of all 256 NeoPixels
+without enabling motors, the magnet, sensors, homing, or normal command polling.
+Start the backend, then compile or upload it from the repository root:
+
+```powershell
+.\tools\verify-led-index-calibration.ps1 -Action Compile
+.\tools\verify-led-index-calibration.ps1 -Action Upload -Port COM11
+```
+
+Open `http://localhost:3000` and use **LED Index Calibration** under Gantry
+Diagnostics. The web control uses numbers 1-256. Previous/Next advances exactly
+one pixel, direct entry jumps to a pixel, and Clear LEDs turns the strip off.
+Every selection clears all other pixels first. The firmware polls revisioned
+latest state, so a click cannot be lost between polls and a page reload resumes
+at the backend's current number.
+
+Calibration firmware continuously forces motor outputs and the magnet LOW. It
+is intentionally not normal gameplay firmware. Restore the accepted production
+image after mapping is complete:
+
+```powershell
+.\tools\verify-led-index-calibration.ps1 -Action Restore -Port COM11
+```
+
+The accepted production baseline remains `1,042,543` bytes flash and `47,128`
+bytes static RAM. The temporary calibration image compiles at `1,022,639` bytes
+flash and `46,640` bytes static RAM.
+
+The completed physical map is recorded in `docs/led-layout.md`. Whole-square
+grouping already matches `rawSquareIndex * 4`; future 16x16 rendering must use
+the documented row-specific TL/TR/BL/BR offsets, particularly the distinct C
+and H row orientations.

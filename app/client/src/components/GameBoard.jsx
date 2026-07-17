@@ -162,6 +162,8 @@ export default function GameBoard() {
   const [diagY, setDiagY] = useState('');
   const [diagStatus, setDiagStatus] = useState('');
   const [magnetState, setMagnetState] = useState(0);
+  const [ledCalibrationNumber, setLedCalibrationNumber] = useState(1);
+  const [ledCalibrationSending, setLedCalibrationSending] = useState(false);
   const [optionSquares, setOptionSquares] = useState({});
   const [boardSize, setBoardSize] = useState(0);
   const [physicalState, setPhysicalState] = useState({
@@ -727,6 +729,27 @@ export default function GameBoard() {
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadLedCalibrationState = async () => {
+      try {
+        const response = await fetch('/api/led-calibration/state');
+        const data = await response.json();
+        if (!cancelled && response.ok && data.success && Number.isInteger(data.pixelNumber)) {
+          setLedCalibrationNumber(data.pixelNumber);
+        }
+      } catch (err) {
+        console.error('Failed to load LED calibration state:', err);
+      }
+    };
+
+    loadLedCalibrationState();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // ── Audio playback ──
   const playAudioChunks = async (chunks) => {
     try {
@@ -841,6 +864,47 @@ export default function GameBoard() {
     }
   };
   const handleGoXY = () => { const x = parseInt(diagX), y = parseInt(diagY); if (!isNaN(x) && !isNaN(y)) sendGantryCommand({ type: 'xy', x, y }); else alert('Invalid XY values.'); };
+  const sendLedCalibrationNumber = async (pixelNumber) => {
+    const normalized = Math.max(1, Math.min(256, Number(pixelNumber)));
+    if (!Number.isInteger(normalized)) {
+      setDiagStatus('LED number must be an integer from 1-256.');
+      return;
+    }
+
+    setLedCalibrationSending(true);
+    try {
+      const response = await fetch('/api/led-calibration', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pixelNumber: normalized })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.error || 'LED calibration request failed.');
+      setLedCalibrationNumber(normalized);
+      setDiagStatus(data.message);
+    } catch (err) {
+      setDiagStatus(`LED calibration error: ${err.message}`);
+    } finally {
+      setLedCalibrationSending(false);
+    }
+  };
+  const handleClearLedCalibration = async () => {
+    setLedCalibrationSending(true);
+    try {
+      const response = await fetch('/api/led-calibration', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clear: true })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.error || 'LED calibration clear failed.');
+      setDiagStatus(data.message);
+    } catch (err) {
+      setDiagStatus(`LED calibration error: ${err.message}`);
+    } finally {
+      setLedCalibrationSending(false);
+    }
+  };
   const handleAddGraveyardSlot = () => {
     const x = parseInt(diagX, 10);
     const y = parseInt(diagY, 10);
@@ -1203,6 +1267,61 @@ export default function GameBoard() {
           >
             Add XY as Graveyard Slot
           </button>
+          <div style={{ borderTop: '1px solid var(--panel-border)', marginTop: '12px', paddingTop: '10px' }}>
+            <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', fontWeight: 600, marginBottom: '6px' }}>
+              LED Index Calibration
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '36px minmax(0, 1fr) 36px', gap: '5px', alignItems: 'center' }}>
+              <button
+                onClick={() => sendLedCalibrationNumber(Math.max(1, ledCalibrationNumber - 1))}
+                disabled={ledCalibrationSending || ledCalibrationNumber <= 1}
+                className="btn btn-secondary"
+                title="Previous LED"
+                style={{ padding: '7px 0', margin: 0, width: '36px' }}
+              >
+                &larr;
+              </button>
+              <input
+                type="number"
+                min="1"
+                max="256"
+                value={ledCalibrationNumber}
+                onChange={(event) => setLedCalibrationNumber(Number(event.target.value))}
+                aria-label="LED number"
+                style={{ minWidth: 0, padding: '7px', textAlign: 'center', borderRadius: '4px', border: '1px solid var(--panel-border)', background: '#0f172a', color: 'white' }}
+              />
+              <button
+                onClick={() => sendLedCalibrationNumber(Math.min(256, ledCalibrationNumber + 1))}
+                disabled={ledCalibrationSending || ledCalibrationNumber >= 256}
+                className="btn btn-primary"
+                title="Next LED"
+                style={{ padding: '7px 0', margin: 0, width: '36px' }}
+              >
+                &rarr;
+              </button>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '5px', marginTop: '6px' }}>
+              <button
+                onClick={() => sendLedCalibrationNumber(ledCalibrationNumber)}
+                disabled={ledCalibrationSending}
+                className="btn btn-primary"
+                style={{ padding: '7px', margin: 0, fontSize: '0.8rem' }}
+              >
+                Light LED {Number.isInteger(ledCalibrationNumber) ? ledCalibrationNumber : ''}
+              </button>
+              <button
+                onClick={handleClearLedCalibration}
+                disabled={ledCalibrationSending}
+                className="btn btn-secondary"
+                style={{ padding: '7px', margin: 0, fontSize: '0.8rem' }}
+              >
+                Clear LEDs
+              </button>
+            </div>
+            <p style={{ margin: '6px 0 0', fontSize: '0.68rem', lineHeight: 1.35, color: 'var(--text-secondary)' }}>
+              Calibration firmware only. Numbers are 1-256; each step clears the previous pixel.
+            </p>
+          </div>
           {diagStatus && (
             <p style={{ margin: '6px 0 0', fontSize: '0.7rem', lineHeight: 1.35, color: 'var(--text-secondary)' }}>
               {diagStatus}

@@ -64,6 +64,60 @@ app.post('/api/log', (req, res) => {
 // Commands queue for ESP32
 let pendingCommands = [];
 
+const LED_CALIBRATION_PIXEL_COUNT = 256;
+let ledCalibrationState = {
+  pixelIndex: -1,
+  revision: 0,
+  updatedAt: Date.now()
+};
+
+function serializeLedCalibrationState(changed = true) {
+  return {
+    success: true,
+    changed,
+    pixelIndex: ledCalibrationState.pixelIndex,
+    pixelNumber: ledCalibrationState.pixelIndex >= 0
+      ? ledCalibrationState.pixelIndex + 1
+      : null,
+    revision: ledCalibrationState.revision,
+    updatedAt: ledCalibrationState.updatedAt
+  };
+}
+
+app.get('/api/led-calibration/state', (req, res) => {
+  res.json(serializeLedCalibrationState());
+});
+
+app.get('/api/led-calibration/poll', (req, res) => {
+  const knownRevision = Number(req.query.revision);
+  res.json(serializeLedCalibrationState(
+    !Number.isInteger(knownRevision) || knownRevision !== ledCalibrationState.revision
+  ));
+});
+
+app.post('/api/led-calibration', (req, res) => {
+  const clear = req.body?.clear === true;
+  const pixelNumber = Number(req.body?.pixelNumber);
+  if (!clear && (!Number.isInteger(pixelNumber) || pixelNumber < 1 || pixelNumber > LED_CALIBRATION_PIXEL_COUNT)) {
+    return res.status(400).json({
+      success: false,
+      error: `LED number must be an integer from 1-${LED_CALIBRATION_PIXEL_COUNT}.`
+    });
+  }
+
+  ledCalibrationState = {
+    pixelIndex: clear ? -1 : pixelNumber - 1,
+    revision: ledCalibrationState.revision + 1,
+    updatedAt: Date.now()
+  };
+  return res.json({
+    ...serializeLedCalibrationState(),
+    message: clear
+      ? 'LED calibration output cleared.'
+      : `LED ${pixelNumber} selected; all other LEDs will be cleared.`
+  });
+});
+
 // Endpoint to queue a command from the frontend
 app.post('/api/command', (req, res) => {
   const { type, x, y, index, val } = req.body;
