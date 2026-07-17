@@ -66,6 +66,8 @@ constexpr bool kStagedCaptureMotionDiagnostic =
     ENABLE_OFFLINE_STAGED_CAPTURE_MOTION_DIAGNOSTICS != 0;
 constexpr bool kCaptureLaneMotionDiagnostic =
     ENABLE_OFFLINE_CAPTURE_LANE_MOTION_DIAGNOSTICS != 0;
+constexpr bool kEnPassantMotionDiagnostic =
+    ENABLE_OFFLINE_EN_PASSANT_MOTION_DIAGNOSTICS != 0;
 constexpr bool kLaneMotionDiagnostic =
     ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS != 0;
 constexpr bool kLaneBoardFixture = OFFLINE_LANE_MOTION_FIXTURE == 1;
@@ -76,6 +78,9 @@ const char* diagnosticPrefix() {
   }
   if (kCaptureLaneMotionDiagnostic) {
     return "OFFLINE_CAPTURE_LANE_MOTION_DIAG";
+  }
+  if (kEnPassantMotionDiagnostic) {
+    return "OFFLINE_EN_PASSANT_MOTION_DIAG";
   }
   if (kCaptureMotionDiagnostic) return "OFFLINE_CAPTURE_MOTION_DIAG";
   if (kLaneMotionDiagnostic) return "OFFLINE_LANE_MOTION_DIAG";
@@ -1119,18 +1124,45 @@ CaptureMotionDiagnosticResult runRealCaptureMotionExecution(
       transaction->motion.phases[1].transfer->mode ==
           offline::ExternalRouteMode::Lane &&
       transaction->motion.phases[1].transfer->routeCost == 1300.0;
+  const bool enPassantPlanMatches = transaction &&
+      transaction->selectedMove == "d4e3" &&
+      transaction->motion.move.enPassant &&
+      transaction->motion.move.capturedSquare == "e4" &&
+      transaction->motion.strategy ==
+          offline::MotionStrategy::CaptureDirectAfterRemoval &&
+      transaction->motion.routeCost == 568.5 &&
+      transaction->motion.phases.size() == 2 &&
+      transaction->motion.phases[0].kind ==
+          offline::MotionPhaseKind::CapturedRemoval &&
+      transaction->motion.phases[0].from == "e4" &&
+      transaction->motion.phases[0].graveyard &&
+      transaction->motion.phases[0].graveyard->mode ==
+          offline::ExternalRouteMode::GraveyardBoardPath &&
+      transaction->motion.phases[0].graveyard->routeCost == 554.5 &&
+      transaction->motion.phases[1].kind ==
+          offline::MotionPhaseKind::AttackerFinal &&
+      transaction->motion.phases[1].from == "d4" &&
+      transaction->motion.phases[1].to == "e3" &&
+      transaction->motion.phases[1].transfer &&
+      transaction->motion.phases[1].transfer->mode ==
+          offline::ExternalRouteMode::BoardDirect &&
+      transaction->motion.phases[1].transfer->routeCost == 14.0;
   const char* expectedSlot = kCaptureLaneMotionDiagnostic ? "Z2" : "I4";
   const bool fixturePlanMatches = kStagedCaptureMotionDiagnostic
       ? stagedPlanMatches
-      : (kCaptureLaneMotionDiagnostic ? captureLanePlanMatches
-                                      : directPlanMatches);
+      : (kCaptureLaneMotionDiagnostic
+             ? captureLanePlanMatches
+             : (kEnPassantMotionDiagnostic ? enPassantPlanMatches
+                                            : directPlanMatches));
   if (!transaction || transaction->graveyardSlotKey != expectedSlot ||
       !fixturePlanMatches) {
     diagnostic.error = kStagedCaptureMotionDiagnostic
         ? "The opponent plan is not the controlled staged e2d1/I4 capture."
         : (kCaptureLaneMotionDiagnostic
                ? "The opponent plan is not the controlled d5e3/Z2 lane capture."
-               : "The opponent plan is not the controlled d5e4/I4 capture.");
+               : (kEnPassantMotionDiagnostic
+                      ? "The opponent plan is not the controlled d4e3/I4 en passant capture."
+                      : "The opponent plan is not the controlled d5e4/I4 capture."));
     return diagnostic;
   }
   diagnostic.selectedMove = transaction->selectedMove;
@@ -1325,7 +1357,8 @@ void emitCaptureSummary(
       searchSensorScans > 0 && offlineRuntimeSensorMaxGapMs < kMaximumSensorGapMs);
   emitCheck(
       "heartbeat-progress",
-      kCaptureLaneMotionDiagnostic || searchHeartbeatAttempts >= 2);
+      kCaptureLaneMotionDiagnostic || kEnPassantMotionDiagnostic ||
+          searchHeartbeatAttempts >= 2);
   emitCheck(
       "search-deadline",
       searchElapsedMs <= 3000U + kSearchOverrunAllowanceMs);
@@ -1848,6 +1881,8 @@ void runtimeTask(void*) {
     start["fixture"] = "staged-e2d1-i4";
   } else if (kCaptureLaneMotionDiagnostic) {
     start["fixture"] = "capture-e3-z2-d5-z5-z3-e3";
+  } else if (kEnPassantMotionDiagnostic) {
+    start["fixture"] = "en-passant-e2e4-e4-i4-d4e3";
   } else if (kLaneMotionDiagnostic) {
     start["fixture"] = kLaneBoardFixture ? "LaneBoard" : "DirectLane";
   }
@@ -1883,7 +1918,10 @@ void runtimeTask(void*) {
   config.coordinator.searchLimits.maxNodes = 0;
   config.coordinator.searchLimits.maxDepth = 12;
   config.coordinator.externalSlots = offline::defaultExternalSlots();
-#if ENABLE_OFFLINE_CAPTURE_LANE_MOTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_EN_PASSANT_MOTION_DIAGNOSTICS
+  config.initialFen =
+      "k7/3N4/1K6/8/3p4/3P4/4P3/8 w - - 0 1";
+#elif ENABLE_OFFLINE_CAPTURE_LANE_MOTION_DIAGNOSTICS
   config.initialFen =
       "k7/8/8/3n4/pppppppp/4P3/4NN1R/4BKR1 w - - 0 1";
 #elif ENABLE_OFFLINE_STAGED_CAPTURE_MOTION_DIAGNOSTICS

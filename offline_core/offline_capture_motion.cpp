@@ -3,8 +3,10 @@
 #include "offline_lane_motion.h"
 #include "offline_quiet_motion.h"
 
+#include <cctype>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <utility>
 
 namespace offline {
@@ -190,11 +192,22 @@ CaptureMotionPrimitive convertLanePrimitive(
       lane.finalBoardDrop);
 }
 
-bool ordinaryCapture(const OfflinePhaseExecutionRequest& request) {
-  return request.move.capture && !request.move.castling &&
-         !request.move.enPassant && request.move.promotion.empty() &&
-         request.move.uci == request.move.from + request.move.to &&
-         request.move.capturedSquare == request.move.to;
+bool supportedCapture(const MoveInfo& move) {
+  if (!move.capture || move.castling || !move.promotion.empty() ||
+      move.uci != move.from + move.to || !validSquare(move.from) ||
+      !validSquare(move.to) || !validSquare(move.capturedSquare)) {
+    return false;
+  }
+  if (!move.enPassant) return move.capturedSquare == move.to;
+  if (move.piece.empty() ||
+      std::tolower(static_cast<unsigned char>(move.piece.front())) != 'p') {
+    return false;
+  }
+  return move.capturedSquare != move.to &&
+         move.capturedSquare.front() == move.to.front() &&
+         move.capturedSquare.back() == move.from.back() &&
+         std::abs(move.to.front() - move.from.front()) == 1 &&
+         std::abs(move.to.back() - move.from.back()) == 1;
 }
 
 CaptureMotionCompileStatus mapLaneStatus(LaneMotionCompileStatus status) {
@@ -322,13 +335,14 @@ CaptureMotionProgram compileAttackerTransfer(
 
 CaptureMotionProgram compileAttackerStage(
     const OfflinePhaseExecutionRequest& request) {
-  if (!ordinaryCapture(request) || request.phase.from != request.move.from ||
+  if (!supportedCapture(request.move) ||
+      request.phase.from != request.move.from ||
       request.phase.to == request.move.to ||
       request.phase.to == request.move.capturedSquare) {
     return reject(
         request,
         CaptureMotionCompileStatus::UnsupportedMove,
-        "AttackerStage must move an ordinary capture attacker to a distinct staging square.");
+        "AttackerStage must move a supported capture attacker to a distinct staging square.");
   }
   if (request.graveyardSlotKey.empty() ||
       request.graveyardState != GraveyardSlotState::Pending) {
@@ -342,12 +356,13 @@ CaptureMotionProgram compileAttackerStage(
 
 CaptureMotionProgram compileAttackerFinal(
     const OfflinePhaseExecutionRequest& request) {
-  if (!ordinaryCapture(request) || request.move.to != request.phase.to ||
+  if (!supportedCapture(request.move) ||
+      request.move.to != request.phase.to ||
       request.phase.from == request.phase.to) {
     return reject(
         request,
         CaptureMotionCompileStatus::UnsupportedMove,
-        "AttackerFinal must describe one ordinary non-promotion capture.");
+        "AttackerFinal must describe one supported non-promotion capture.");
   }
   if (request.graveyardSlotKey.empty() ||
       request.graveyardState != GraveyardSlotState::Occupied) {
@@ -361,13 +376,12 @@ CaptureMotionProgram compileAttackerFinal(
 
 CaptureMotionProgram compileCapturedRemoval(
     const OfflinePhaseExecutionRequest& request) {
-  if (!request.move.capture || request.move.castling || request.move.enPassant ||
-      !request.move.promotion.empty() ||
+  if (!supportedCapture(request.move) ||
       request.move.capturedSquare != request.phase.from) {
     return reject(
         request,
         CaptureMotionCompileStatus::UnsupportedMove,
-        "CapturedRemoval must remove the victim of one ordinary capture.");
+        "CapturedRemoval must remove the victim from the move's captured square.");
   }
   if (request.phase.transfer || !request.phase.graveyard ||
       request.graveyardSlotKey.empty() ||

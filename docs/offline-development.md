@@ -811,3 +811,99 @@ The capture-with-lane milestone is accepted. En passant is the next isolated
 real-motion milestone. Castling, promotion replacement, gameplay LEDs,
 continuous offline play, persistence, reconnect transfer, offline undo/redo,
 and production automatic switching remain deferred.
+
+## Guarded Real Offline En Passant Diagnostic
+
+The accepted capture compilers now support legal, non-promotion en passant
+transactions. `MoveInfo::capturedSquare` identifies the victim's actual square,
+which differs from the attacker's destination. The captured pawn is removed
+first through the existing graveyard choreography, then the attacking pawn is
+moved to the empty en-passant destination. Ordinary capture output remains
+unchanged.
+
+En passant attacker phases can use board, `Lane`, or `LaneBoard` routes.
+Compiler validation requires pawn geometry, consistent UCI metadata, exact
+before/after occupancy, and a captured square on the destination file and
+source rank. Castling, promotion, malformed en-passant metadata, incorrect
+graveyard state, and invalid occupancy transitions remain rejected. Only the
+attacking pawn's final board drop receives the 250-step compensation;
+graveyard drops and intermediate route points never overshoot.
+
+The controlled fixture is:
+
+- initial FEN `k7/3N4/1K6/8/3p4/3P4/4P3/8 w - - 0 1`;
+- human move `e2e4` (`e4`);
+- post-human FEN `k7/3N4/1K6/8/3pP3/3P4/8/8 b - e3 0 1`;
+- only legal Black reply `d4e3` (`dxe3 e.p.`);
+- captured pawn route `e4 -> h4 -> I4`, with I4 at `(17600, -350)`,
+  route mode/cost `graveyard-board-path / 554.5`;
+- attacker route `d4 -> e3`, mode/cost `board-direct / 14`;
+- total cost `568.5`;
+- final FEN `k7/3N4/1K6/8/8/3Pp3/8/8 w - - 0 2`.
+
+I4 changes from `Pending` to `Occupied` only after captured removal verifies.
+Chess state stays at the post-human FEN until both physical phases have exact
+sensor verification. Each phase permits one unchanged-state retry; partial
+victim removal, a stranded attacker, stale tokens, and ambiguous occupancy
+enter recovery without committing the move.
+
+Run the focused host suite or guarded USB verifier with:
+
+```powershell
+Set-Location .\app
+npm run test:offline-en-passant-motion
+
+Set-Location ..
+.\tools\verify-offline-en-passant-motion.ps1
+.\tools\verify-offline-en-passant-motion.ps1 `
+  -UploadPort COM11 `
+  -SerialTimeoutSeconds 360 `
+  -SerialLogPath tmp/offline-en-passant-motion-hardware-2026-07-16.log
+```
+
+`ENABLE_OFFLINE_EN_PASSANT_MOTION_DIAGNOSTICS` defaults to `0` and is mutually
+exclusive with every existing diagnostic. The enabled build reuses bounded
+homing, ownership heartbeat, sensor snapshots, engine/coordinator planning,
+phase tokens, guarded capture execution, resource telemetry, and automatic
+production restoration. Normal HTTP motion, normal homing, gameplay LEDs,
+nudge recovery, and normal command consumption remain blocked.
+
+Automated acceptance on 2026-07-16 passes the focused en-passant suite, legacy
+capture and lane suites, the complete foundation verifier, the deterministic
+100-game/6,758-ply soak, client build, zero-warning lint, and every firmware
+compile gate. The soak covered 1,160 captures, 34 castlings, 8 en-passant
+moves, 66 promotions, and all injected recoveries.
+
+Production remains exactly 1,042,543 bytes flash / 47,128 bytes static RAM.
+The en-passant diagnostic compiles at 1,328,979 / 52,048 with 1,816,749 bytes
+of application-partition headroom.
+
+Physical COM11 acceptance passed on 2026-07-17. Bounded homing succeeded, the
+exact six-piece fixture stabilized, and physical `e2e4` was accepted. The
+engine searched for 3,001 ms to depth 9 across 37,056 nodes and selected the
+only legal move, `d4e3` en passant.
+
+The robot moved the captured White pawn through `e4 -> h4 -> I4` without
+graveyard overshoot, verified I4 as transactionally occupied, then moved the
+Black pawn `d4 -> e3` with final board compensation. Both phase tokens verified
+on attempt one. Exact occupancy matched, FEN
+`k7/3N4/1K6/8/8/3Pp3/8/8 w - - 0 2` committed, and the magnet ended LOW.
+
+The final report recorded a 4 ms maximum sensor gap, 1,501 search-time sensor
+scans, three search-time heartbeat attempts, 143,916 bytes free internal heap,
+a 75,764-byte largest internal block, 7,432,264 bytes free PSRAM, and 19,576
+bytes task-stack headroom. Every route, primitive, graveyard, overshoot,
+occupancy, timing, resource, and safety assertion passed. Production firmware
+was restored automatically. Serial evidence is retained locally at
+`tmp/offline-en-passant-motion-hardware-2026-07-17-rerun.log`.
+
+Two preliminary runs exercised safe failure paths without moving a chess
+piece: one timed out in setup while the previous fixture remained on the board,
+and one bounded X-home attempt timed out while gantry power was off. Both forced
+the magnet LOW and restored production firmware through the verifier's
+`finally` path.
+
+The guarded real en-passant milestone is accepted. Castling is the next
+isolated milestone. Promotion replacement, gameplay LEDs, continuous offline
+play, persistence, reconnect transfer, offline undo/redo, and production
+automatic switching remain deferred.

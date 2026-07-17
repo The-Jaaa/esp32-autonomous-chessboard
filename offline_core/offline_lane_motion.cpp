@@ -1,5 +1,6 @@
 #include "offline_lane_motion.h"
 
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
@@ -47,24 +48,36 @@ bool exactTransfer(
   return expected == after;
 }
 
-bool ordinaryCapture(const MoveInfo& move) {
-  return move.capture && !move.castling && !move.enPassant &&
-         move.promotion.empty() && move.uci == move.from + move.to &&
-         move.capturedSquare == move.to;
+bool supportedCapture(const MoveInfo& move) {
+  if (!move.capture || move.castling || !move.promotion.empty() ||
+      move.uci != move.from + move.to || !validSquare(move.from) ||
+      !validSquare(move.to) || !validSquare(move.capturedSquare)) {
+    return false;
+  }
+  if (!move.enPassant) return move.capturedSquare == move.to;
+  if (move.piece.empty() ||
+      std::tolower(static_cast<unsigned char>(move.piece.front())) != 'p') {
+    return false;
+  }
+  return move.capturedSquare != move.to &&
+         move.capturedSquare.front() == move.to.front() &&
+         move.capturedSquare.back() == move.from.back() &&
+         std::abs(move.to.front() - move.from.front()) == 1 &&
+         std::abs(move.to.back() - move.from.back()) == 1;
 }
 
 LaneMotionCompileStatus validatePhaseMove(
     const OfflinePhaseExecutionRequest& request,
     std::string& reason) {
-  if (request.move.castling || request.move.enPassant ||
-      !request.move.promotion.empty()) {
-    reason = "Castling, en-passant, and promotion lane motion are deferred.";
+  if (request.move.castling || !request.move.promotion.empty()) {
+    reason = "Castling and promotion lane motion are deferred.";
     return LaneMotionCompileStatus::UnsupportedMove;
   }
 
   switch (request.phase.kind) {
     case MotionPhaseKind::QuietTransfer:
-      if (request.move.capture || request.move.uci != request.phase.from + request.phase.to ||
+      if (request.move.capture || request.move.enPassant ||
+          request.move.uci != request.phase.from + request.phase.to ||
           request.move.from != request.phase.from || request.move.to != request.phase.to) {
         reason = "Quiet lane motion must describe one ordinary quiet chess move.";
         return LaneMotionCompileStatus::UnsupportedMove;
@@ -76,9 +89,10 @@ LaneMotionCompileStatus validatePhaseMove(
       }
       return LaneMotionCompileStatus::Success;
     case MotionPhaseKind::AttackerStage:
-      if (!ordinaryCapture(request.move) || request.phase.from != request.move.from ||
+      if (!supportedCapture(request.move) ||
+          request.phase.from != request.move.from ||
           request.phase.to == request.move.to || request.phase.to == request.move.capturedSquare) {
-        reason = "AttackerStage must move an ordinary attacker to a distinct staging square.";
+        reason = "AttackerStage must move a supported attacker to a distinct staging square.";
         return LaneMotionCompileStatus::UnsupportedMove;
       }
       if (request.graveyardSlotKey.empty() ||
@@ -88,9 +102,10 @@ LaneMotionCompileStatus validatePhaseMove(
       }
       return LaneMotionCompileStatus::Success;
     case MotionPhaseKind::AttackerFinal:
-      if (!ordinaryCapture(request.move) || request.phase.to != request.move.to ||
+      if (!supportedCapture(request.move) ||
+          request.phase.to != request.move.to ||
           request.phase.from == request.phase.to) {
-        reason = "AttackerFinal must finish one ordinary capture.";
+        reason = "AttackerFinal must finish one supported capture.";
         return LaneMotionCompileStatus::UnsupportedMove;
       }
       if (request.graveyardSlotKey.empty() ||
@@ -102,7 +117,7 @@ LaneMotionCompileStatus validatePhaseMove(
     case MotionPhaseKind::CapturedRemoval:
     case MotionPhaseKind::CastleKing:
     case MotionPhaseKind::CastleRook:
-      reason = "Only quiet and ordinary attacker transfer phases support lane motion.";
+      reason = "Only quiet and supported attacker transfer phases support lane motion.";
       return LaneMotionCompileStatus::InvalidPhase;
   }
   reason = "The lane phase kind is invalid.";
