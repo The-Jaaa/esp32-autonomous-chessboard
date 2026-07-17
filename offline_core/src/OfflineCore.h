@@ -16,6 +16,7 @@
     ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS || \
     ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
 #include "../offline_capture_motion.h"
+#include "../offline_castling_motion.h"
 #include "../offline_coordinator.h"
 #include "../offline_engine.h"
 #include "../offline_external_route.h"

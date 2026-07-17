@@ -907,3 +907,94 @@ The guarded real en-passant milestone is accepted. Castling is the next
 isolated milestone. Promotion replacement, gameplay LEDs, continuous offline
 play, persistence, reconnect transfer, offline undo/redo, and production
 automatic switching remain deferred.
+
+## Guarded Real Offline Castling Diagnostic
+
+The offline motion stack now has a portable `OfflineCastlingMotionCompiler`
+for `CastleKing` and `CastleRook` phases. It accepts board, `Lane`, and
+`LaneBoard` routes through the existing guarded primitive vocabulary and
+validates move metadata, rook geometry, phase order, tokens, exact occupancy,
+and final board placement. Both the king and rook receive the existing
+250-step compensation only on their final board drops. External coordinates
+and intermediate waypoints never overshoot.
+
+Castling remains transactional. The king phase must verify before the rook
+phase can begin, and chess FEN/history remain unchanged until both phases have
+verified. Each phase permits one unchanged-state retry. A rook failure after a
+verified king move retries only the rook; it never restarts the full castle.
+Stale reports, out-of-order tokens, and ambiguous occupancy cannot commit the
+move.
+
+Planning now ignores the king's original square in the rook phase's sensed
+occupancy. This is required because the latest stable sensor snapshot may still
+describe the pre-castle board while the pure planner is evaluating the rook's
+post-king route. Expected occupancy remains authoritative, so the correction
+does not ignore unrelated sensor obstructions. The online JavaScript parity
+reference received the same narrow correction.
+
+The controlled fixture is:
+
+- initial FEN `4k2r/8/8/8/8/8/P3P1P1/4RKR1 w k - 0 1`;
+- human move `a2a3` (`a3`);
+- deterministic Black reply `e8g8` (`O-O#`);
+- strategy/cost `castle-board / 68`;
+- king route `e8 -> f8 -> g8`, compressed to `e8 -> g8`, cost `20`;
+- rook route `h8 -> g7 -> f8`, cost `48`, routing around the king on `g8`;
+- final FEN `5rk1/8/8/8/8/P7/4P1P1/4RKR1 w - - 1 2`.
+
+Host regressions cover White and Black kingside and queenside castling,
+board/Lane/LaneBoard route compilation, exact phase occupancy, independent
+retry limits, stale/duplicate/out-of-order reports, ambiguous recovery,
+malformed rook metadata, and FEN immutability before final verification.
+
+Run the focused host suite or guarded USB verifier with:
+
+```powershell
+Set-Location .\app
+npm run test:offline-castling-motion
+
+Set-Location ..
+.\tools\verify-offline-castling-motion.ps1
+.\tools\verify-offline-castling-motion.ps1 `
+  -UploadPort COM11 `
+  -SerialTimeoutSeconds 360 `
+  -SerialLogPath tmp\offline-castling-motion\hardware-acceptance.log
+```
+
+`ENABLE_OFFLINE_CASTLING_MOTION_DIAGNOSTICS` defaults to `0` and is mutually
+exclusive with the existing firmware diagnostics. The enabled build reuses
+bounded homing, ownership heartbeat, sensors, engine/coordinator planning,
+phase tokens, guarded real motion, resource telemetry, and automatic
+production restoration. Normal HTTP motion, normal homing, gameplay LEDs,
+nudge recovery, and normal command consumption remain blocked.
+
+Automated acceptance on 2026-07-17 passes the focused castling suite, online
+planner parity, the complete foundation verifier, client build, zero-warning
+lint, every firmware compile gate, and the deterministic 100-game/6,838-ply
+soak. The soak covered 1,171 captures, 37 castlings, 8 en-passant moves, 65
+promotions, and 99 terminal games.
+
+Production remains exactly 1,042,543 bytes flash / 47,128 bytes static RAM.
+The castling diagnostic compiles at 1,326,527 / 52,048 with 1,819,201 bytes of
+application-partition headroom.
+
+Physical COM11 acceptance passed on 2026-07-17. Bounded homing succeeded, the
+exact seven-piece fixture stabilized, and physical `a2a3` was accepted. The
+engine selected mate-in-one `e8g8` after 9 ms at depth 1 across 17 nodes. The
+robot moved the king `e8 -> g8`, verified its intermediate occupancy, then
+moved the rook `h8 -> g7 -> f8` without crossing the king. Both phase tokens
+verified on attempt one. Exact final occupancy matched, checkmate FEN
+`5rk1/8/8/8/8/P7/4P1P1/4RKR1 w - - 1 2` committed, and the magnet ended LOW.
+
+Final hardware metrics were a 5 ms maximum sensor gap, 130,704 bytes free
+internal heap, a 106,484-byte largest internal block, 7,432,264 bytes free
+PSRAM, 15,520 bytes task-stack headroom, and 80 heartbeat attempts. Every
+route, primitive, overshoot, occupancy, transaction, timing, resource, and
+safety assertion passed. Production firmware was restored automatically.
+Serial evidence is retained locally at
+`tmp/offline-castling-motion/hardware-acceptance.log`.
+
+The guarded real castling milestone is accepted. Real promotion replacement is
+the next remaining special-move hardware gate. Gameplay LEDs, continuous
+offline play, persistence, reconnect transfer, offline undo/redo, and
+production automatic switching remain deferred.

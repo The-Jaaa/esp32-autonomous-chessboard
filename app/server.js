@@ -2969,11 +2969,18 @@ function buildCastleMotionPlan(game, move) {
     return buildBoardTransferPlan(game, move, move.from, move.to);
   }
 
-  const planPart = (planningGame, from, to, moveForPart, phase) => {
+  const planPart = (planningGame, from, to, moveForPart, phase, ignoredSquares = []) => {
     try {
-      return buildBoardTransferPlan(planningGame, moveForPart, from, to, { phase });
+      return buildBoardTransferPlan(planningGame, moveForPart, from, to, {
+        phase,
+        ignoredSquares
+      });
     } catch (err) {
-      return buildBoardTransferPlan(planningGame, moveForPart, from, to, { forceLane: true, phase });
+      return buildBoardTransferPlan(planningGame, moveForPart, from, to, {
+        forceLane: true,
+        phase,
+        ignoredSquares
+      });
     }
   };
   const kingPlan = planPart(game, move.from, move.to, move, 'castle-king');
@@ -2989,7 +2996,7 @@ function buildCastleMotionPlan(game, move) {
     to: rookMove.to,
     captured: null,
     flags: ''
-  }, 'castle-rook');
+  }, 'castle-rook', [move.from]);
   const metadata = combineRouteMetadata([kingPlan, rookPlan], kingPlan.routeMode === 'lane' || rookPlan.routeMode === 'lane'
     ? 'castle-lane'
     : rookPlan.routeMode === 'lane-board'

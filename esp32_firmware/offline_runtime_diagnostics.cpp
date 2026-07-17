@@ -68,6 +68,8 @@ constexpr bool kCaptureLaneMotionDiagnostic =
     ENABLE_OFFLINE_CAPTURE_LANE_MOTION_DIAGNOSTICS != 0;
 constexpr bool kEnPassantMotionDiagnostic =
     ENABLE_OFFLINE_EN_PASSANT_MOTION_DIAGNOSTICS != 0;
+constexpr bool kCastlingMotionDiagnostic =
+    ENABLE_OFFLINE_CASTLING_MOTION_DIAGNOSTICS != 0;
 constexpr bool kLaneMotionDiagnostic =
     ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS != 0;
 constexpr bool kLaneBoardFixture = OFFLINE_LANE_MOTION_FIXTURE == 1;
@@ -81,6 +83,9 @@ const char* diagnosticPrefix() {
   }
   if (kEnPassantMotionDiagnostic) {
     return "OFFLINE_EN_PASSANT_MOTION_DIAG";
+  }
+  if (kCastlingMotionDiagnostic) {
+    return "OFFLINE_CASTLING_MOTION_DIAG";
   }
   if (kCaptureMotionDiagnostic) return "OFFLINE_CAPTURE_MOTION_DIAG";
   if (kLaneMotionDiagnostic) return "OFFLINE_LANE_MOTION_DIAG";
@@ -908,9 +913,11 @@ void emitCaptureHardwareResult(
   emitDocument(document);
 }
 
-void emitCaptureProgram(const offline::CaptureMotionProgram& program) {
+void emitCaptureProgram(
+    const offline::CaptureMotionProgram& program,
+    const char* type = "capture-program") {
   DynamicJsonDocument document(5120);
-  document["type"] = "capture-program";
+  document["type"] = type;
   document["status"] = offline::captureMotionCompileStatusName(program.status);
   document["message"] = program.blockedReason.c_str();
   document["move"] = program.moveUci.c_str();
@@ -1409,6 +1416,301 @@ void emitCaptureSummary(
   emitDocument(document);
 }
 
+#if ENABLE_OFFLINE_CASTLING_MOTION_DIAGNOSTICS
+
+struct CastlingMotionDiagnosticResult {
+  bool homeSucceeded = false;
+  bool programsCompiled = false;
+  bool primitiveOrderValid = false;
+  bool kingOvershootEnabled = false;
+  bool rookOvershootEnabled = false;
+  bool retryObserved = false;
+  bool retryExhausted = false;
+  bool recoveryRequired = false;
+  bool opponentMoveCommitted = false;
+  bool finalOccupancyMatched = false;
+  bool motorActivity = false;
+  bool magnetEverHigh = false;
+  bool magnetLow = true;
+  std::size_t verifiedPhaseCount = 0;
+  std::string selectedMove;
+  std::string committedFen;
+  std::string actualOccupancy;
+  std::string expectedOccupancy;
+  String error;
+};
+
+bool validateCastlingPrimitiveOrder(
+    const offline::CaptureMotionProgram& program,
+    bool& finalOvershootEnabled) {
+  if (!program.success() || program.primitives.size() < 5 ||
+      program.primitives.front().kind !=
+          offline::CaptureMotionPrimitiveKind::TravelBoard ||
+      program.primitives[1].kind !=
+          offline::CaptureMotionPrimitiveKind::Pickup ||
+      program.primitives[program.primitives.size() - 2].kind !=
+          offline::CaptureMotionPrimitiveKind::Drop ||
+      program.primitives.back().kind !=
+          offline::CaptureMotionPrimitiveKind::Verify) {
+    return false;
+  }
+
+  std::size_t boardOvershoots = 0;
+  std::size_t lastDragIndex = 0;
+  for (std::size_t index = 2; index + 2 < program.primitives.size(); ++index) {
+    const auto& primitive = program.primitives[index];
+    if (primitive.kind != offline::CaptureMotionPrimitiveKind::DragBoard &&
+        primitive.kind != offline::CaptureMotionPrimitiveKind::DragCoordinate) {
+      return false;
+    }
+    if (primitive.finalBoardDrop) boardOvershoots++;
+    lastDragIndex = index;
+  }
+  finalOvershootEnabled = boardOvershoots == 1 &&
+      program.primitives[lastDragIndex].kind ==
+          offline::CaptureMotionPrimitiveKind::DragBoard &&
+      program.primitives[lastDragIndex].finalBoardDrop &&
+      program.primitives[lastDragIndex].targetRawIndex == program.targetRawIndex;
+  return finalOvershootEnabled && program.graveyardSlotKey.empty() &&
+      (program.phaseKind == offline::MotionPhaseKind::CastleKing ||
+       program.phaseKind == offline::MotionPhaseKind::CastleRook);
+}
+
+CastlingMotionDiagnosticResult runRealCastlingMotionExecution(
+    offline::OfflineReadOnlyRuntime& runtime,
+    const std::string& previewAfterFen) {
+  CastlingMotionDiagnosticResult diagnostic;
+  diagnostic.homeSucceeded = true;
+  const auto transaction = runtime.coordinator().pendingMotionTransaction();
+  const bool fixturePlanMatches = transaction &&
+      transaction->selectedMove == "e8g8" &&
+      transaction->motion.strategy == offline::MotionStrategy::CastleBoard &&
+      transaction->motion.routeCost == 68.0 &&
+      transaction->motion.phases.size() == 2 &&
+      transaction->motion.phases[0].kind ==
+          offline::MotionPhaseKind::CastleKing &&
+      transaction->motion.phases[0].from == "e8" &&
+      transaction->motion.phases[0].to == "g8" &&
+      transaction->motion.phases[0].transfer &&
+      transaction->motion.phases[0].transfer->mode ==
+          offline::ExternalRouteMode::BoardLine &&
+      transaction->motion.phases[0].transfer->routeCost == 20.0 &&
+      transaction->motion.phases[1].kind ==
+          offline::MotionPhaseKind::CastleRook &&
+      transaction->motion.phases[1].from == "h8" &&
+      transaction->motion.phases[1].to == "f8" &&
+      transaction->motion.phases[1].transfer &&
+      transaction->motion.phases[1].transfer->mode ==
+          offline::ExternalRouteMode::BoardBuffered &&
+      transaction->motion.phases[1].transfer->routeCost == 48.0 &&
+      transaction->graveyardSlotKey.empty();
+  if (!fixturePlanMatches) {
+    diagnostic.error =
+        "The opponent plan is not the controlled e8g8 castle-board transaction.";
+    return diagnostic;
+  }
+  diagnostic.selectedMove = transaction->selectedMove;
+
+  offline::OfflinePhaseExecutionAdapter adapter(runtime);
+  auto update = adapter.begin();
+  emitExecutionUpdate(update);
+  if (update.state != offline::OfflinePhaseExecutionState::PhaseReady ||
+      !update.request ||
+      update.request->phase.kind != offline::MotionPhaseKind::CastleKing) {
+    diagnostic.error = "The phase adapter did not issue CastleKing first.";
+    return diagnostic;
+  }
+
+  std::uint32_t hardwareRequestId = 40;
+  bool kingCompiled = false;
+  bool rookCompiled = false;
+  for (std::size_t guard = 0; guard < 6; ++guard) {
+    if ((adapter.state() != offline::OfflinePhaseExecutionState::PhaseReady &&
+         adapter.state() != offline::OfflinePhaseExecutionState::RetryReady) ||
+        !adapter.currentRequest()) {
+      break;
+    }
+
+    const auto request = *adapter.currentRequest();
+    const offline::CaptureMotionProgram program =
+        offline::OfflineCastlingMotionCompiler{}.compile(request);
+    emitCaptureProgram(program, "castling-program");
+    bool phaseOvershootEnabled = false;
+    const bool orderValid =
+        validateCastlingPrimitiveOrder(program, phaseOvershootEnabled);
+    if (request.phase.kind == offline::MotionPhaseKind::CastleKing &&
+        program.success()) {
+      kingCompiled = true;
+      diagnostic.kingOvershootEnabled = phaseOvershootEnabled;
+    } else if (request.phase.kind == offline::MotionPhaseKind::CastleRook &&
+               program.success()) {
+      rookCompiled = true;
+      diagnostic.rookOvershootEnabled = phaseOvershootEnabled;
+    }
+    diagnostic.programsCompiled = kingCompiled && rookCompiled;
+    diagnostic.primitiveOrderValid =
+        diagnostic.primitiveOrderValid || orderValid;
+    if (!program.success() || !orderValid) {
+      diagnostic.error = program.blockedReason.c_str();
+      return diagnostic;
+    }
+    if (!offline::castlingMotionAttemptAllowed(request.token)) {
+      diagnostic.retryExhausted = true;
+      diagnostic.error = "The castling phase retry limit was exhausted.";
+      return diagnostic;
+    }
+
+    update = adapter.takeCurrentRequest();
+    emitExecutionUpdate(update);
+    if (update.state != offline::OfflinePhaseExecutionState::AwaitingReport) {
+      diagnostic.error = "The adapter did not accept the castling hardware request.";
+      return diagnostic;
+    }
+
+    const std::uint32_t requestId = hardwareRequestId++;
+    if (!queueOfflineCaptureProgram(requestId, program)) {
+      diagnostic.error = "Could not queue the castling hardware program.";
+      return diagnostic;
+    }
+    OfflineCaptureHardwareResult hardware;
+    if (!waitForCaptureHardwareResult(requestId, 120000, hardware)) {
+      abortOfflineCaptureMotionHardware();
+      diagnostic.error = "Castling hardware execution timed out after 120 seconds.";
+      return diagnostic;
+    }
+    emitCaptureHardwareResult(
+        hardware,
+        request.phase.kind == offline::MotionPhaseKind::CastleKing
+            ? "castle-king"
+            : "castle-rook");
+    diagnostic.motorActivity = diagnostic.motorActivity || hardware.motorActivity;
+    diagnostic.magnetEverHigh = diagnostic.magnetEverHigh || hardware.magnetEverHigh;
+    diagnostic.magnetLow = hardware.magnetLow;
+    diagnostic.actualOccupancy = occupancyHex(hardware.observedOccupancy);
+
+    const offline::OfflinePhaseExecutionReport report{
+        request.token, hardware.success, hardware.observedOccupancy};
+    emitPhaseReport(report, hardware.success ? "real-success" : "real-failure");
+    update = adapter.submitReport(report);
+    emitExecutionUpdate(update);
+
+    if (hardware.success) {
+      diagnostic.verifiedPhaseCount++;
+      if (request.phase.kind == offline::MotionPhaseKind::CastleRook) {
+        diagnostic.expectedOccupancy = occupancyHex(program.expectedAfter);
+        diagnostic.finalOccupancyMatched =
+            hardware.observedOccupancy == program.expectedAfter;
+      }
+    } else if (hardware.observedOccupancy == program.expectedBefore &&
+               request.token.attempt == 1 &&
+               update.state == offline::OfflinePhaseExecutionState::RetryReady) {
+      diagnostic.retryObserved = true;
+      continue;
+    } else if (update.state ==
+               offline::OfflinePhaseExecutionState::RecoveryRequired) {
+      diagnostic.recoveryRequired = true;
+      diagnostic.error = hardware.error;
+      return diagnostic;
+    }
+
+    if (adapter.state() == offline::OfflinePhaseExecutionState::Complete ||
+        adapter.state() == offline::OfflinePhaseExecutionState::GameOver) {
+      diagnostic.committedFen = runtime.coordinator().physical().game().fen();
+      diagnostic.opponentMoveCommitted =
+          diagnostic.committedFen == previewAfterFen;
+      diagnostic.programsCompiled = kingCompiled && rookCompiled;
+      return diagnostic;
+    }
+  }
+
+  if (diagnostic.error.length() == 0) {
+    diagnostic.error = "Castling execution stopped before the move committed.";
+  }
+  return diagnostic;
+}
+
+void emitCastlingSummary(
+    const CastlingMotionDiagnosticResult& diagnostic,
+    std::uint32_t searchSensorScans,
+    std::uint32_t searchHeartbeatAttempts,
+    std::uint32_t searchElapsedMs) {
+  const std::size_t internalFree =
+      heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  const std::size_t largestInternal =
+      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  const std::size_t psramFree = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+  const std::size_t stackHeadroom = uxTaskGetStackHighWaterMark(nullptr);
+
+  emitCheck("bounded-home", diagnostic.homeSucceeded);
+  emitCheck("castling-programs-compiled", diagnostic.programsCompiled);
+  emitCheck("ordered-primitives", diagnostic.primitiveOrderValid);
+  emitCheck("king-final-overshoot", diagnostic.kingOvershootEnabled);
+  emitCheck("rook-final-overshoot", diagnostic.rookOvershootEnabled);
+  emitCheck("two-phases-verified", diagnostic.verifiedPhaseCount == 2U);
+  emitCheck("real-motor-activity", diagnostic.motorActivity);
+  emitCheck("magnet-activated-for-drag", diagnostic.magnetEverHigh);
+  emitCheck("magnet-low", diagnostic.magnetLow && offlineRuntimeMagnetIsLow());
+  emitCheck("final-occupancy", diagnostic.finalOccupancyMatched);
+  emitCheck("opponent-move-committed", diagnostic.opponentMoveCommitted);
+  emitCheck("retry-limit", !diagnostic.retryExhausted);
+  emitCheck("no-unresolved-recovery", !diagnostic.recoveryRequired);
+  emitCheck("internal-heap-threshold", internalFree >= kMinimumInternalHeapBytes);
+  emitCheck(
+      "largest-internal-block-threshold",
+      largestInternal >= kMinimumLargestInternalBlockBytes);
+  emitCheck("psram-threshold", psramFree >= kMinimumFreePsramBytes);
+  emitCheck("stack-threshold", stackHeadroom >= kMinimumStackHeadroomBytes);
+  emitCheck(
+      "sensor-loop-progress",
+      offlineRuntimeSensorScanCount > 0 &&
+          offlineRuntimeSensorMaxGapMs < kMaximumSensorGapMs);
+  emitCheck("heartbeat-progress", ownershipDiagnosticHeartbeatAttempts > 0);
+  emitCheck(
+      "search-deadline",
+      searchElapsedMs <= 3000U + kSearchOverrunAllowanceMs);
+
+  DynamicJsonDocument document(2560);
+  document["type"] = "summary";
+  document["pass"] = overallPass;
+  document["homeSucceeded"] = diagnostic.homeSucceeded;
+  document["realMotionEnabled"] = true;
+  document["motorActivity"] = diagnostic.motorActivity;
+  document["magnetEverHigh"] = diagnostic.magnetEverHigh;
+  document["magnetLow"] = diagnostic.magnetLow && offlineRuntimeMagnetIsLow();
+  document["commandConsumptionBlocked"] = true;
+  document["programsCompiled"] = diagnostic.programsCompiled;
+  document["orderedPrimitives"] = diagnostic.primitiveOrderValid;
+  document["kingOvershootEnabled"] = diagnostic.kingOvershootEnabled;
+  document["rookOvershootEnabled"] = diagnostic.rookOvershootEnabled;
+  document["verifiedPhaseCount"] = diagnostic.verifiedPhaseCount;
+  document["retryObserved"] = diagnostic.retryObserved;
+  document["retryExhausted"] = diagnostic.retryExhausted;
+  document["recoveryRequired"] = diagnostic.recoveryRequired;
+  document["finalOccupancyMatched"] = diagnostic.finalOccupancyMatched;
+  document["opponentMoveCommitted"] = diagnostic.opponentMoveCommitted;
+  document["selectedMove"] = diagnostic.selectedMove.c_str();
+  document["committedFen"] = diagnostic.committedFen.c_str();
+  document["actualOccupancy"] = diagnostic.actualOccupancy.c_str();
+  document["expectedOccupancy"] = diagnostic.expectedOccupancy.c_str();
+  if (diagnostic.error.length() > 0) document["error"] = diagnostic.error;
+  document["sensorScans"] = offlineRuntimeSensorScanCount;
+  document["sensorMaxGapMs"] = offlineRuntimeSensorMaxGapMs;
+  document["searchSensorScans"] = searchSensorScans;
+  document["heartbeatAttempts"] = ownershipDiagnosticHeartbeatAttempts;
+  document["searchHeartbeatAttempts"] = searchHeartbeatAttempts;
+  document["heartbeatMaxElapsedMs"] = ownershipDiagnosticHeartbeatMaxElapsedMs;
+  document["searchElapsedMs"] = searchElapsedMs;
+  document["internalFree"] = internalFree;
+  document["largestInternal"] = largestInternal;
+  document["psramFree"] = psramFree;
+  document["stackHeadroom"] = stackHeadroom;
+  document["core"] = xPortGetCoreID();
+  document["priority"] = uxTaskPriorityGet(nullptr);
+  emitDocument(document);
+}
+
+#endif
+
 #endif
 
 #if ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
@@ -1883,6 +2185,8 @@ void runtimeTask(void*) {
     start["fixture"] = "capture-e3-z2-d5-z5-z3-e3";
   } else if (kEnPassantMotionDiagnostic) {
     start["fixture"] = "en-passant-e2e4-e4-i4-d4e3";
+  } else if (kCastlingMotionDiagnostic) {
+    start["fixture"] = "castle-a2a3-e8g8";
   } else if (kLaneMotionDiagnostic) {
     start["fixture"] = kLaneBoardFixture ? "LaneBoard" : "DirectLane";
   }
@@ -1918,7 +2222,10 @@ void runtimeTask(void*) {
   config.coordinator.searchLimits.maxNodes = 0;
   config.coordinator.searchLimits.maxDepth = 12;
   config.coordinator.externalSlots = offline::defaultExternalSlots();
-#if ENABLE_OFFLINE_EN_PASSANT_MOTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_CASTLING_MOTION_DIAGNOSTICS
+  config.initialFen =
+      "4k2r/8/8/8/8/8/P3P1P1/4RKR1 w k - 0 1";
+#elif ENABLE_OFFLINE_EN_PASSANT_MOTION_DIAGNOSTICS
   config.initialFen =
       "k7/3N4/1K6/8/3p4/3P4/4P3/8 w - - 0 1";
 #elif ENABLE_OFFLINE_CAPTURE_LANE_MOTION_DIAGNOSTICS
@@ -1952,6 +2259,18 @@ void runtimeTask(void*) {
   if (!runQuietHomeGate(quietDiagnostic)) {
     quietDiagnostic.magnetLow = offlineRuntimeMagnetIsLow();
     emitQuietSummary(quietDiagnostic, 0, 0, 0);
+    summaryEmitted = true;
+    vTaskDelete(nullptr);
+    return;
+  }
+#elif ENABLE_OFFLINE_CASTLING_MOTION_DIAGNOSTICS
+  CaptureMotionDiagnosticResult castlingHomeDiagnostic;
+  if (!runCaptureHomeGate(castlingHomeDiagnostic)) {
+    CastlingMotionDiagnosticResult castlingDiagnostic;
+    castlingDiagnostic.homeSucceeded = false;
+    castlingDiagnostic.magnetLow = offlineRuntimeMagnetIsLow();
+    castlingDiagnostic.error = castlingHomeDiagnostic.error;
+    emitCastlingSummary(castlingDiagnostic, 0, 0, 0);
     summaryEmitted = true;
     vTaskDelete(nullptr);
     return;
@@ -2063,6 +2382,23 @@ void runtimeTask(void*) {
         execution.error = "The opponent plan was not frozen before hardware execution.";
       }
       emitQuietSummary(
+          execution,
+          searchSensorScans,
+          searchHeartbeatAttempts,
+          searchElapsedMs);
+#elif ENABLE_OFFLINE_CASTLING_MOTION_DIAGNOSTICS
+      const auto state = runtime->coordinator().currentState();
+      const auto transaction = runtime->coordinator().pendingMotionTransaction();
+      CastlingMotionDiagnosticResult execution;
+      execution.homeSucceeded = castlingHomeDiagnostic.homeSucceeded;
+      if (planFrozen && state.opponentPlan && transaction) {
+        execution = runRealCastlingMotionExecution(
+            *runtime, state.opponentPlan->afterFen);
+      } else {
+        execution.error =
+            "The controlled castling plan was not frozen before execution.";
+      }
+      emitCastlingSummary(
           execution,
           searchSensorScans,
           searchHeartbeatAttempts,

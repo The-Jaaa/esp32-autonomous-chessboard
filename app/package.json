@@ -28,7 +28,8 @@
     "test:offline-lane-motion": "node scripts/offline-lane-motion-regression.js",
     "test:offline-capture-lane-motion": "node scripts/offline-capture-lane-motion-regression.js",
     "test:offline-en-passant-motion": "node scripts/offline-en-passant-motion-regression.js",
-    "test:foundation": "npm run test:physical && npm run test:offline-rules && npm run test:offline-physical && npm run test:offline-engine && npm run test:offline-coordinator && npm run test:offline-integration && npm run test:offline-route && npm run test:offline-external-route && npm run test:offline-motion && npm run test:offline-motion-execution && npm run test:offline-ownership && npm run test:offline-runtime && npm run test:offline-phase-execution && npm run test:offline-quiet-motion && npm run test:offline-staged-capture-motion && npm run test:offline-lane-motion && npm run test:offline-capture-lane-motion && npm run test:offline-en-passant-motion"
+    "test:offline-castling-motion": "node scripts/offline-castling-motion-regression.js",
+    "test:foundation": "npm run test:physical && npm run test:offline-rules && npm run test:offline-physical && npm run test:offline-engine && npm run test:offline-coordinator && npm run test:offline-integration && npm run test:offline-route && npm run test:offline-external-route && npm run test:offline-motion && npm run test:offline-motion-execution && npm run test:offline-ownership && npm run test:offline-runtime && npm run test:offline-phase-execution && npm run test:offline-quiet-motion && npm run test:offline-staged-capture-motion && npm run test:offline-lane-motion && npm run test:offline-capture-lane-motion && npm run test:offline-en-passant-motion && npm run test:offline-castling-motion"
   },
   "dependencies": {
     "@google/genai": "*",

@@ -405,11 +405,13 @@ ExternalTransferResult planCastlePart(
     const Occupancy& expected,
     const MoveInfo& move,
     const std::string& from,
-    const std::string& to) {
+    const std::string& to,
+    std::vector<std::string> ignored = {}) {
   ExternalTransferResult route = planTransfer(
-      planner, context, expected, move, from, to);
+      planner, context, expected, move, from, to, ignored);
   if (!route.success()) {
-    route = planTransfer(planner, context, expected, move, from, to, {}, true);
+    route = planTransfer(
+        planner, context, expected, move, from, to, std::move(ignored), true);
   }
   return route;
 }
@@ -437,7 +439,13 @@ MotionPlan planCastle(
   setOccupied(afterKing, move.from, false);
   setOccupied(afterKing, move.to, true);
   const ExternalTransferResult rook = planCastlePart(
-      planner, context, afterKing, move, move.rookFrom, move.rookTo);
+      planner,
+      context,
+      afterKing,
+      move,
+      move.rookFrom,
+      move.rookTo,
+      {move.from});
   if (!rook.success()) {
     plan.status = MotionPlanStatus::NoSafeRoute;
     plan.blockedReason = routeFailureReason(rook, move.rookFrom, move.rookTo);
