@@ -9,6 +9,7 @@
     "test:physical-planner": "node scripts/physical-planner-regression.js",
     "test:physical-state": "node scripts/physical-state-regression.js",
     "test:physical": "npm run test:physical-planner && npm run test:physical-state",
+    "test:mentor-foundation": "node scripts/mentor-foundation-regression.js",
     "test:offline-rules": "node scripts/offline-chess-rules-regression.js",
     "test:offline-physical": "node scripts/offline-physical-regression.js",
     "test:offline-engine": "node scripts/offline-engine-regression.js",
@@ -43,5 +44,8 @@
     "socket.io": "^4.8.1",
     "stockfish": "^18.0.8",
     "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.3"
   }
 }

@@ -25,6 +25,9 @@ app/client/dist/
 # Runtime logs
 logs/
 app/logs/
+app/data/*.sqlite
+app/data/*.sqlite-shm
+app/data/*.sqlite-wal
 *.log
 *.jsonl
 

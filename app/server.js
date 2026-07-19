@@ -8,6 +8,7 @@ require('dotenv').config();
 const path = require('path');
 const fs = require('fs');
 const { randomUUID } = require('crypto');
+const { createMentorFeature } = require('./mentor');
 
 const app = express();
 const server = http.createServer(app);
@@ -30,6 +31,13 @@ app.use(express.json());
 
 // Serve React production build static assets
 app.use(express.static(path.join(__dirname, 'client/dist')));
+
+const mentorFeature = createMentorFeature({
+  app,
+  io,
+  ai,
+  model: GEMINI_TEXT_MODEL
+});
 
 // Endpoint: Handle accidental GET requests for easier debugging
 app.get('/api/esp-move', (req, res) => {
@@ -5533,6 +5541,7 @@ module.exports = {
   app,
   server,
   audioServer,
+  mentorFeature,
   startServers,
   physicalPlanner: {
     PHYSICAL_START_FEN,
