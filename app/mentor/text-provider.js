@@ -19,7 +19,7 @@ class GeminiMentorTextProvider {
     this.systemInstruction = systemInstruction;
   }
 
-  async *stream({ messages, signal }) {
+  async *stream({ messages, chessContext, signal }) {
     if (!process.env.GEMINI_API_KEY) {
       throw new Error('GEMINI_API_KEY is not configured.');
     }
@@ -32,7 +32,9 @@ class GeminiMentorTextProvider {
       model: this.model,
       contents,
       config: {
-        systemInstruction: this.systemInstruction,
+        systemInstruction: chessContext
+          ? `${this.systemInstruction}\n\n${chessContext}`
+          : this.systemInstruction,
         responseModalities: ['TEXT']
       }
     });

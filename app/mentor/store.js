@@ -4,6 +4,7 @@ const { randomUUID } = require('crypto');
 const { DatabaseSync } = require('node:sqlite');
 
 const DEFAULT_TITLE = 'New chat';
+const STANDARD_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 
 function mapConversation(row) {
   if (!row) return null;
@@ -30,6 +31,35 @@ function mapMessage(row) {
     status: row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at
+  };
+}
+
+function mapChessSession(row) {
+  if (!row) return null;
+  return {
+    conversationId: row.conversation_id,
+    initialFen: row.initial_fen,
+    currentFen: row.current_fen,
+    pgn: row.pgn,
+    orientation: row.orientation,
+    revision: Number(row.revision),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapBoardEvent(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    conversationId: row.conversation_id,
+    sequence: Number(row.sequence),
+    type: row.event_type,
+    actionId: row.action_id,
+    payload: JSON.parse(row.payload_json),
+    beforeFen: row.before_fen,
+    afterFen: row.after_fen,
+    createdAt: row.created_at
   };
 }
 
@@ -102,6 +132,44 @@ class MentorStore {
         CREATE INDEX mentor_conversations_updated
           ON mentor_conversations(updated_at DESC);
       `
+    }, {
+      version: 2,
+      sql: `
+        CREATE TABLE mentor_chess_sessions (
+          conversation_id TEXT PRIMARY KEY REFERENCES mentor_conversations(id) ON DELETE CASCADE,
+          initial_fen TEXT NOT NULL,
+          current_fen TEXT NOT NULL,
+          pgn TEXT NOT NULL DEFAULT '',
+          orientation TEXT NOT NULL DEFAULT 'white' CHECK(orientation IN ('white', 'black')),
+          revision INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE mentor_board_events (
+          id TEXT PRIMARY KEY,
+          conversation_id TEXT NOT NULL REFERENCES mentor_conversations(id) ON DELETE CASCADE,
+          sequence INTEGER NOT NULL,
+          event_type TEXT NOT NULL CHECK(event_type IN ('move', 'set_position', 'reset', 'orientation')),
+          action_id TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          before_fen TEXT NOT NULL,
+          after_fen TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          UNIQUE(conversation_id, sequence),
+          UNIQUE(conversation_id, action_id)
+        );
+
+        CREATE INDEX mentor_board_events_conversation_sequence
+          ON mentor_board_events(conversation_id, sequence);
+
+        INSERT INTO mentor_chess_sessions(
+          conversation_id, initial_fen, current_fen, pgn, orientation,
+          revision, created_at, updated_at
+        )
+        SELECT id, '${STANDARD_FEN}', '${STANDARD_FEN}', '', 'white', 0, created_at, updated_at
+        FROM mentor_conversations;
+      `
     }];
 
     const applied = new Set(
@@ -143,10 +211,23 @@ class MentorStore {
       lastMessagePreview: '',
       messageCount: 0
     };
-    this.db.prepare(`
-      INSERT INTO mentor_conversations(id, title, created_at, updated_at)
-      VALUES (?, ?, ?, ?)
-    `).run(conversation.id, conversation.title, timestamp, timestamp);
+    this.db.exec('BEGIN IMMEDIATE;');
+    try {
+      this.db.prepare(`
+        INSERT INTO mentor_conversations(id, title, created_at, updated_at)
+        VALUES (?, ?, ?, ?)
+      `).run(conversation.id, conversation.title, timestamp, timestamp);
+      this.db.prepare(`
+        INSERT INTO mentor_chess_sessions(
+          conversation_id, initial_fen, current_fen, pgn, orientation,
+          revision, created_at, updated_at
+        ) VALUES (?, ?, ?, '', 'white', 0, ?, ?)
+      `).run(conversation.id, STANDARD_FEN, STANDARD_FEN, timestamp, timestamp);
+      this.db.exec('COMMIT;');
+    } catch (error) {
+      this.db.exec('ROLLBACK;');
+      throw error;
+    }
     return conversation;
   }
 
@@ -338,6 +419,112 @@ class MentorStore {
     return selected.reverse();
   }
 
+  getChessSession(conversationId) {
+    return mapChessSession(this.db.prepare(`
+      SELECT * FROM mentor_chess_sessions WHERE conversation_id = ?
+    `).get(conversationId));
+  }
+
+  listBoardEvents(conversationId) {
+    return this.db.prepare(`
+      SELECT * FROM mentor_board_events
+      WHERE conversation_id = ?
+      ORDER BY sequence ASC
+    `).all(conversationId).map(mapBoardEvent);
+  }
+
+  getBoardEventByAction(conversationId, actionId) {
+    return mapBoardEvent(this.db.prepare(`
+      SELECT * FROM mentor_board_events
+      WHERE conversation_id = ? AND action_id = ?
+    `).get(conversationId, actionId));
+  }
+
+  commitBoardMutation({
+    conversationId,
+    expectedRevision,
+    eventType,
+    actionId,
+    payload,
+    beforeFen,
+    afterFen,
+    pgn,
+    orientation,
+    initialFen
+  }) {
+    const duplicateEvent = this.getBoardEventByAction(conversationId, actionId);
+    if (duplicateEvent) {
+      return {
+        status: 'duplicate',
+        event: duplicateEvent,
+        session: this.getChessSession(conversationId)
+      };
+    }
+
+    this.db.exec('BEGIN IMMEDIATE;');
+    try {
+      const current = this.getChessSession(conversationId);
+      if (!current) {
+        this.db.exec('ROLLBACK;');
+        return { status: 'not_found' };
+      }
+      if (current.revision !== expectedRevision) {
+        this.db.exec('ROLLBACK;');
+        return { status: 'stale', session: current };
+      }
+
+      const timestamp = this.now();
+      const nextSequence = Number(this.db.prepare(`
+        SELECT COALESCE(max(sequence), 0) + 1 AS next_sequence
+        FROM mentor_board_events WHERE conversation_id = ?
+      `).get(conversationId).next_sequence);
+      const eventId = this.createId();
+      this.db.prepare(`
+        INSERT INTO mentor_board_events(
+          id, conversation_id, sequence, event_type, action_id,
+          payload_json, before_fen, after_fen, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        eventId,
+        conversationId,
+        nextSequence,
+        eventType,
+        actionId,
+        JSON.stringify(payload || {}),
+        beforeFen,
+        afterFen,
+        timestamp
+      );
+      this.db.prepare(`
+        UPDATE mentor_chess_sessions
+        SET initial_fen = ?, current_fen = ?, pgn = ?, orientation = ?,
+            revision = revision + 1, updated_at = ?
+        WHERE conversation_id = ?
+      `).run(
+        initialFen || current.initialFen,
+        afterFen,
+        pgn,
+        orientation || current.orientation,
+        timestamp,
+        conversationId
+      );
+      this.db.prepare(`
+        UPDATE mentor_conversations SET updated_at = ? WHERE id = ?
+      `).run(timestamp, conversationId);
+      this.db.exec('COMMIT;');
+      return {
+        status: 'committed',
+        event: mapBoardEvent(this.db.prepare(
+          'SELECT * FROM mentor_board_events WHERE id = ?'
+        ).get(eventId)),
+        session: this.getChessSession(conversationId)
+      };
+    } catch (error) {
+      this.db.exec('ROLLBACK;');
+      throw error;
+    }
+  }
+
   close() {
     this.db.close();
   }
@@ -346,5 +533,6 @@ class MentorStore {
 module.exports = {
   DEFAULT_TITLE,
   MentorStore,
+  STANDARD_FEN,
   titleFromMessage
 };

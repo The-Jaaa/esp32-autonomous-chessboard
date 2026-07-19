@@ -10,9 +10,10 @@ function validateMessageText(text) {
 }
 
 class MentorService {
-  constructor({ store, provider, emit = () => {} }) {
+  constructor({ store, provider, contextProvider = null, emit = () => {} }) {
     this.store = store;
     this.provider = provider;
+    this.contextProvider = contextProvider;
     this.emit = emit;
     this.active = new Map();
   }
@@ -71,7 +72,12 @@ class MentorService {
     try {
       const messages = this.store.contextMessages(conversationId, 24000)
         .filter((message) => message.content);
-      for await (const delta of this.provider.stream({ messages, signal: controller.signal })) {
+      const chessContext = this.contextProvider ? this.contextProvider(conversationId) : null;
+      for await (const delta of this.provider.stream({
+        messages,
+        chessContext,
+        signal: controller.signal
+      })) {
         if (controller.signal.aborted) break;
         this.store.appendMessageContent(assistantMessage.id, delta);
         this.emit(conversationId, 'mentor-message-delta', {
