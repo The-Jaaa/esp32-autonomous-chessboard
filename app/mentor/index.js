@@ -2,6 +2,7 @@ const { MentorStore } = require('./store');
 const { MentorService } = require('./service');
 const { createMentorRouter } = require('./router');
 const { MentorChessService } = require('./chess-service');
+const { MentorToolService } = require('./tool-service');
 const {
   DeterministicMentorTextProvider,
   GeminiMentorTextProvider
@@ -24,14 +25,9 @@ function createMentorFeature({
     ? new DeterministicMentorTextProvider()
     : new GeminiMentorTextProvider({ ai, model }));
   const chessService = new MentorChessService({ store });
-  const service = new MentorService({
-    store,
-    provider: textProvider,
-    contextProvider: (conversationId) => chessService.promptContext(conversationId),
-    emit: (conversationId, event, payload) => {
-      io.to(roomName(conversationId)).emit(event, payload);
-    }
-  });
+  const emit = (conversationId, event, payload) => {
+    io.to(roomName(conversationId)).emit(event, payload);
+  };
 
   const emitBoardUpdate = (conversationId, result) => {
     io.to(roomName(conversationId)).emit('mentor-board-updated', {
@@ -41,6 +37,19 @@ function createMentorFeature({
       state: result.state
     });
   };
+  const toolService = new MentorToolService({
+    store,
+    chessService,
+    emit,
+    emitBoardUpdate
+  });
+  const service = new MentorService({
+    store,
+    provider: textProvider,
+    toolService,
+    contextProvider: (conversationId) => chessService.promptContext(conversationId),
+    emit
+  });
 
   app.use('/api/mentor', createMentorRouter({
     store,
@@ -71,7 +80,7 @@ function createMentorFeature({
     });
   });
 
-  return { store, service, chessService, provider: textProvider };
+  return { store, service, chessService, toolService, provider: textProvider };
 }
 
 module.exports = {

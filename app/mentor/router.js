@@ -6,6 +6,16 @@ function asyncRoute(handler) {
 
 function createMentorRouter({ store, service, chessService, emitBoardUpdate = () => {} }) {
   const router = express.Router();
+  const withToolCalls = (conversation) => {
+    const toolCalls = store.listToolCalls(conversation.id);
+    return {
+      ...conversation,
+      messages: (conversation.messages || []).map((message) => ({
+        ...message,
+        toolCalls: toolCalls.filter((toolCall) => toolCall.assistantMessageId === message.id)
+      }))
+    };
+  };
 
   router.get('/conversations', (req, res) => {
     res.json({
@@ -32,7 +42,7 @@ function createMentorRouter({ store, service, chessService, emitBoardUpdate = ()
     if (!conversation) return res.status(404).json({ error: 'Conversation not found.' });
     return res.json({
       conversation: {
-        ...conversation,
+        ...withToolCalls(conversation),
         chess: chessService.getState(conversation.id)
       }
     });

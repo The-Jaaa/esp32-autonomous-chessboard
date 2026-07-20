@@ -9,10 +9,13 @@ function validateMessageText(text) {
   return typeof text === 'string' && text.trim().length > 0 && text.length <= 8000;
 }
 
+const MAX_TOOL_CALLS = 12;
+
 class MentorService {
-  constructor({ store, provider, contextProvider = null, emit = () => {} }) {
+  constructor({ store, provider, toolService = null, contextProvider = null, emit = () => {} }) {
     this.store = store;
     this.provider = provider;
+    this.toolService = toolService;
     this.contextProvider = contextProvider;
     this.emit = emit;
     this.active = new Map();
@@ -73,10 +76,26 @@ class MentorService {
       const messages = this.store.contextMessages(conversationId, 24000)
         .filter((message) => message.content);
       const chessContext = this.contextProvider ? this.contextProvider(conversationId) : null;
+      let toolOrdinal = 0;
       for await (const delta of this.provider.stream({
         messages,
         chessContext,
-        signal: controller.signal
+        signal: controller.signal,
+        toolDeclarations: this.toolService?.declarations() || [],
+        executeTool: async (call) => {
+          toolOrdinal += 1;
+          if (toolOrdinal > MAX_TOOL_CALLS) {
+            throw new Error(`Mentor exceeded the ${MAX_TOOL_CALLS}-tool-call limit.`);
+          }
+          return this.toolService.execute({
+            conversationId,
+            requestId,
+            assistantMessageId: assistantMessage.id,
+            ordinal: toolOrdinal,
+            call,
+            signal: controller.signal
+          });
+        }
       })) {
         if (controller.signal.aborted) break;
         this.store.appendMessageContent(assistantMessage.id, delta);
@@ -149,6 +168,7 @@ class MentorService {
 }
 
 module.exports = {
+  MAX_TOOL_CALLS,
   MentorService,
   validateMessageText,
   validateRequestId

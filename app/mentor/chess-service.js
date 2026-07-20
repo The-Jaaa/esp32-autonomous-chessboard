@@ -1,6 +1,9 @@
 const { randomUUID } = require('crypto');
 const { Chess } = require('chess.js');
 
+const ANNOTATION_ROLES = new Set(['idea', 'good', 'warning', 'danger', 'special']);
+const SQUARE_PATTERN = /^[a-h][1-8]$/;
+
 class MentorChessError extends Error {
   constructor(message, statusCode = 400, details = {}) {
     super(message);
@@ -37,6 +40,32 @@ function normalizeFen(fen) {
 
 function moveToUci(move) {
   return `${move.from}${move.to}${move.promotion || ''}`;
+}
+
+function normalizeAnnotations({ highlights = [], arrows = [] } = {}) {
+  if (!Array.isArray(highlights) || highlights.length > 16) {
+    throw new MentorChessError('Highlights must be an array containing at most 16 squares.');
+  }
+  if (!Array.isArray(arrows) || arrows.length > 12) {
+    throw new MentorChessError('Arrows must be an array containing at most 12 arrows.');
+  }
+  const normalizedHighlights = highlights.map((highlight) => {
+    if (!highlight || !SQUARE_PATTERN.test(highlight.square) || !ANNOTATION_ROLES.has(highlight.role)) {
+      throw new MentorChessError('Each highlight needs a valid square and semantic role.');
+    }
+    return { square: highlight.square, role: highlight.role };
+  });
+  const normalizedArrows = arrows.map((arrow) => {
+    if (!arrow || !SQUARE_PATTERN.test(arrow.from) || !SQUARE_PATTERN.test(arrow.to)
+      || arrow.from === arrow.to || !ANNOTATION_ROLES.has(arrow.role)) {
+      throw new MentorChessError('Each arrow needs distinct valid squares and a semantic role.');
+    }
+    return { from: arrow.from, to: arrow.to, role: arrow.role };
+  });
+  return {
+    highlights: [...new Map(normalizedHighlights.map((item) => [`${item.square}:${item.role}`, item])).values()],
+    arrows: [...new Map(normalizedArrows.map((item) => [`${item.from}:${item.to}:${item.role}`, item])).values()]
+  };
 }
 
 function serializeMove(move, index) {
@@ -142,6 +171,7 @@ class MentorChessService {
       turnName: game.turn() === 'w' ? 'White' : 'Black',
       history,
       legalMoves,
+      annotations: this.store.getBoardAnnotations(conversationId, session.revision),
       gameStatus: gameStatus(game),
       events,
       cacheConsistent: session.currentFen === game.fen() && session.pgn === game.pgn()
@@ -288,6 +318,27 @@ class MentorChessService {
     });
   }
 
+  setAnnotations(conversationId, { highlights, arrows, expectedRevision }) {
+    const revision = requireRevision(expectedRevision);
+    const annotations = normalizeAnnotations({ highlights, arrows });
+    const result = this.store.setBoardAnnotations(conversationId, {
+      expectedRevision: revision,
+      ...annotations
+    });
+    if (result.status === 'not_found') throw new MentorChessError('Conversation not found.', 404);
+    if (result.status === 'stale') {
+      throw new MentorChessError('The chess position changed before annotations were applied.', 409, {
+        code: 'stale_revision',
+        state: this.getState(conversationId)
+      });
+    }
+    return {
+      actionId: null,
+      duplicate: false,
+      state: this.getState(conversationId)
+    };
+  }
+
   promptContext(conversationId) {
     const state = this.getState(conversationId);
     const recentMoves = state.history.slice(-12).map((move) => move.san).join(' ');
@@ -298,7 +349,8 @@ class MentorChessService {
       `Turn: ${state.turnName}`,
       `Game status: ${state.gameStatus.resultText}`,
       `Recent moves: ${recentMoves || '(none)'}`,
-      'Discuss this position when relevant, but do not claim to move pieces.'
+      `Legal UCI moves: ${state.legalMoves.join(', ') || '(none)'}`,
+      'You may use the supplied board tools whenever a visual example would improve the lesson.'
     ].join('\n');
   }
 }
@@ -308,5 +360,6 @@ module.exports = {
   MentorChessService,
   gameStatus,
   moveToUci,
+  normalizeAnnotations,
   normalizeFen
 };

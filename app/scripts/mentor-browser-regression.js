@@ -89,6 +89,46 @@ async function runViewport(browser, viewport) {
   await expectText(page.locator('.mentor-move-list'), 'e4');
 
   await page.locator('.mentor-new-chat').click();
+  await page.getByPlaceholder('Ask your chess mentor').fill('Run the browser tool demo.');
+  const demoStarted = Date.now();
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expectText(page.locator('.mentor-tool-card[data-tool-name="play_line"]'), '1 of 4 moves');
+  assert.strictEqual(await page.getByRole('button', { name: 'Reset board' }).isDisabled(), true);
+  await expectText(page.locator('.mentor-message.is-model'), 'The line and teaching marks are now on the board.');
+  assert.ok(Date.now() - demoStarted >= 2500, 'The move demonstration advanced too quickly.');
+  await expectText(page.locator('.mentor-move-list'), 'Nc6');
+  await expectText(page.locator('.mentor-tool-card[data-tool-name="annotate_board"]'), 'Annotate board');
+  const toolDetail = await page.evaluate(async () => {
+    const id = location.pathname.split('/').at(-1);
+    return fetch(`/api/mentor/conversations/${id}`).then((response) => response.json());
+  });
+  assert.strictEqual(toolDetail.conversation.chess.history.length, 4);
+  assert.strictEqual(toolDetail.conversation.chess.annotations.highlights[0].square, 'f7');
+  assert.strictEqual(toolDetail.conversation.messages.at(-1).toolCalls.length, 2);
+  assert.notStrictEqual(await page.locator('[data-square="f7"] > div').first().evaluate((element) => getComputedStyle(element).boxShadow), 'none');
+  await page.reload();
+  await expectText(page.locator('.mentor-tool-card[data-tool-name="play_line"]'), 'Demonstrate 4 moves');
+  assert.notStrictEqual(await page.locator('[data-square="f7"] > div').first().evaluate((element) => getComputedStyle(element).boxShadow), 'none');
+  await page.screenshot({
+    path: path.join(__dirname, '..', 'tmp', `mentor-v2-tools-${viewport.width}x${viewport.height}.png`),
+    fullPage: true
+  });
+
+  await page.locator('.mentor-new-chat').click();
+  await page.getByPlaceholder('Ask your chess mentor').fill('Run the cancellable browser demo.');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expectText(page.locator('.mentor-tool-card[data-tool-name="play_line"]'), '1 of 6 moves');
+  await page.getByRole('button', { name: 'Stop response' }).click();
+  await expectText(page.locator('.mentor-message.is-model'), 'Response stopped');
+  const cancelledDetail = await page.evaluate(async () => {
+    const id = location.pathname.split('/').at(-1);
+    return fetch(`/api/mentor/conversations/${id}`).then((response) => response.json());
+  });
+  assert.ok(cancelledDetail.conversation.chess.history.length >= 1);
+  assert.ok(cancelledDetail.conversation.chess.history.length < 6);
+  assert.strictEqual(cancelledDetail.conversation.messages.at(-1).toolCalls[0].status, 'cancelled');
+
+  await page.locator('.mentor-new-chat').click();
   await page.getByPlaceholder('Ask your chess mentor').fill('Help me understand isolated pawns.');
   await page.getByRole('button', { name: 'Send message' }).click();
   await expectText(page.locator('.mentor-message.is-model'), 'Let us examine the position together.');

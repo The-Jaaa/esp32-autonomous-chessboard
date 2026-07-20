@@ -9,6 +9,7 @@ import {
   ChevronLeft,
   Ellipsis,
   Mic,
+  LoaderCircle,
   Pencil,
   Plus,
   RefreshCcw,
@@ -29,6 +30,13 @@ const SUGGESTIONS = [
   { title: 'Practice a position', prompt: 'Set up a useful practice position and coach me through the ideas.' }
 ];
 const STANDARD_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+const ANNOTATION_COLORS = {
+  idea: '#4f8fe8',
+  good: '#65b96e',
+  warning: '#e1ae4b',
+  danger: '#df665b',
+  special: '#9b72d4'
+};
 
 function upsertMessage(messages, nextMessage) {
   if (!nextMessage) return messages;
@@ -37,6 +45,19 @@ function upsertMessage(messages, nextMessage) {
   const copy = [...messages];
   copy[index] = { ...copy[index], ...nextMessage };
   return copy;
+}
+
+function upsertToolCall(messages, toolCall) {
+  if (!toolCall) return messages;
+  return messages.map((message) => {
+    if (message.id !== toolCall.assistantMessageId) return message;
+    const existing = message.toolCalls || [];
+    const index = existing.findIndex((item) => item.id === toolCall.id);
+    const next = index < 0
+      ? [...existing, toolCall]
+      : existing.map((item, itemIndex) => itemIndex === index ? { ...item, ...toolCall } : item);
+    return { ...message, toolCalls: next.sort((a, b) => a.ordinal - b.ordinal) };
+  });
 }
 
 function groupConversations(conversations) {
@@ -113,12 +134,51 @@ function ConversationItem({ conversation, active, onOpen, onRename, onDelete }) 
   );
 }
 
+function toolLabel(toolCall) {
+  const args = toolCall.arguments || {};
+  const labels = {
+    get_board_state: 'Read board state',
+    play_move: `Move ${args.uci || ''}`.trim(),
+    play_line: `Demonstrate ${(args.moves || []).length} moves`,
+    load_position: 'Load teaching position',
+    reset_board: 'Reset board',
+    set_orientation: `Show ${args.orientation || ''} perspective`.trim(),
+    annotate_board: 'Annotate board'
+  };
+  return labels[toolCall.name] || toolCall.name.replaceAll('_', ' ');
+}
+
+function ToolCallCard({ toolCall }) {
+  const active = ['pending', 'running'].includes(toolCall.status);
+  const failed = toolCall.status === 'failed';
+  const cancelled = toolCall.status === 'cancelled';
+  return (
+    <div className={`mentor-tool-card is-${toolCall.status}`} data-tool-name={toolCall.name}>
+      <span className="mentor-tool-icon">
+        {active ? <LoaderCircle size={14} /> : failed || cancelled ? <X size={14} /> : <Check size={14} />}
+      </span>
+      <span className="mentor-tool-copy">
+        <strong>{toolLabel(toolCall)}</strong>
+        {toolCall.progressTotal > 1 && (
+          <small>{toolCall.progressCurrent} of {toolCall.progressTotal} moves</small>
+        )}
+        {(failed || cancelled) && toolCall.error && <small>{toolCall.error}</small>}
+      </span>
+    </div>
+  );
+}
+
 function Message({ message }) {
   const isUser = message.role === 'user';
   return (
     <article className={`mentor-message ${isUser ? 'is-user' : 'is-model'}`}>
       {!isUser && <div className="mentor-message-avatar"><Bot size={18} /></div>}
       <div className="mentor-message-content">
+        {!!message.toolCalls?.length && (
+          <div className="mentor-tool-list">
+            {message.toolCalls.map((toolCall) => <ToolCallCard key={toolCall.id} toolCall={toolCall} />)}
+          </div>
+        )}
         {message.content || (message.status === 'streaming' || message.status === 'pending' ? (
           <span className="mentor-thinking-dots" aria-label="Mentor is thinking"><i /><i /><i /></span>
         ) : '')}
@@ -246,6 +306,10 @@ export default function MentorWorkspace() {
       setPreviewFen(null);
       setPendingBoardAction((current) => current?.actionId === payload.actionId ? null : current);
     };
+    const onToolUpdated = (payload) => {
+      if (!matches(payload)) return;
+      setMessages((current) => upsertToolCall(current, payload.toolCall));
+    };
 
     socket.on('mentor-message-start', onStart);
     socket.on('mentor-message-delta', onDelta);
@@ -253,6 +317,11 @@ export default function MentorWorkspace() {
     socket.on('mentor-message-cancelled', onTerminal);
     socket.on('mentor-message-failed', onTerminal);
     socket.on('mentor-board-updated', onBoardUpdated);
+    socket.on('mentor-tool-started', onToolUpdated);
+    socket.on('mentor-tool-progress', onToolUpdated);
+    socket.on('mentor-tool-completed', onToolUpdated);
+    socket.on('mentor-tool-failed', onToolUpdated);
+    socket.on('mentor-tool-cancelled', onToolUpdated);
     return () => {
       if (streamPollRef.current) clearTimeout(streamPollRef.current);
       socket.emit('mentor-unsubscribe', { conversationId });
@@ -264,6 +333,11 @@ export default function MentorWorkspace() {
       socket.off('mentor-message-cancelled', onTerminal);
       socket.off('mentor-message-failed', onTerminal);
       socket.off('mentor-board-updated', onBoardUpdated);
+      socket.off('mentor-tool-started', onToolUpdated);
+      socket.off('mentor-tool-progress', onToolUpdated);
+      socket.off('mentor-tool-completed', onToolUpdated);
+      socket.off('mentor-tool-failed', onToolUpdated);
+      socket.off('mentor-tool-cancelled', onToolUpdated);
     };
   }, [conversationId, refreshList, socket]);
 
@@ -368,7 +442,7 @@ export default function MentorWorkspace() {
   }, []);
 
   const onBoardMove = useCallback((args) => {
-    if (!boardState || pendingBoardAction || boardState.gameStatus.isGameOver) return false;
+    if (!boardState || activeRequestId || pendingBoardAction || boardState.gameStatus.isGameOver) return false;
     const { sourceSquare, targetSquare } = args;
     const preview = new Chess(boardState.fen);
     let move;
@@ -389,10 +463,10 @@ export default function MentorWorkspace() {
       actionId
     ));
     return true;
-  }, [boardState, commitBoardAction, conversationId, pendingBoardAction]);
+  }, [activeRequestId, boardState, commitBoardAction, conversationId, pendingBoardAction]);
 
   const flipBoard = () => {
-    if (!boardState || pendingBoardAction) return;
+    if (!boardState || activeRequestId || pendingBoardAction) return;
     const actionId = crypto.randomUUID();
     const orientation = boardState.orientation === 'white' ? 'black' : 'white';
     commitBoardAction(actionId, () => mentorApi.setOrientation(
@@ -404,7 +478,7 @@ export default function MentorWorkspace() {
   };
 
   const resetBoard = () => {
-    if (!boardState || pendingBoardAction) return;
+    if (!boardState || activeRequestId || pendingBoardAction) return;
     const actionId = crypto.randomUUID();
     commitBoardAction(actionId, () => mentorApi.resetBoard(
       conversationId,
@@ -415,7 +489,7 @@ export default function MentorWorkspace() {
 
   const loadFen = async (event) => {
     event.preventDefault();
-    if (!boardState || pendingBoardAction) return;
+    if (!boardState || activeRequestId || pendingBoardAction) return;
     const actionId = crypto.randomUUID();
     const success = await commitBoardAction(actionId, () => mentorApi.loadPosition(
       conversationId,
@@ -427,6 +501,17 @@ export default function MentorWorkspace() {
   };
 
   const grouped = useMemo(() => groupConversations(conversations), [conversations]);
+  const annotationSquareStyles = useMemo(() => Object.fromEntries(
+    (boardState?.annotations?.highlights || []).map(({ square, role }) => [
+      square,
+      { boxShadow: `inset 0 0 0 5px ${ANNOTATION_COLORS[role] || ANNOTATION_COLORS.idea}` }
+    ])
+  ), [boardState?.annotations?.highlights]);
+  const annotationArrows = useMemo(() => (boardState?.annotations?.arrows || []).map((arrow) => ({
+    startSquare: arrow.from,
+    endSquare: arrow.to,
+    color: ANNOTATION_COLORS[arrow.role] || ANNOTATION_COLORS.idea
+  })), [boardState?.annotations?.arrows]);
 
   return (
     <main className="mentor-shell">
@@ -513,17 +598,21 @@ export default function MentorWorkspace() {
         <header>
           <div><span>WORKSPACE</span><h2>Position board</h2></div>
           <div className="mentor-board-tools">
-            <button onClick={flipBoard} disabled={!boardState || !!pendingBoardAction} title="Flip board" aria-label="Flip board"><Repeat2 size={17} /></button>
-            <button onClick={() => { setFenDraft(boardState?.fen || ''); setFenDialogOpen(true); }} disabled={!boardState || !!pendingBoardAction} title="Load FEN" aria-label="Load FEN"><Pencil size={16} /></button>
-            <button onClick={resetBoard} disabled={!boardState || !!pendingBoardAction} title="Reset board" aria-label="Reset board"><RefreshCcw size={16} /></button>
+            <button onClick={flipBoard} disabled={!boardState || !!activeRequestId || !!pendingBoardAction} title="Flip board" aria-label="Flip board"><Repeat2 size={17} /></button>
+            <button onClick={() => { setFenDraft(boardState?.fen || ''); setFenDialogOpen(true); }} disabled={!boardState || !!activeRequestId || !!pendingBoardAction} title="Load FEN" aria-label="Load FEN"><Pencil size={16} /></button>
+            <button onClick={resetBoard} disabled={!boardState || !!activeRequestId || !!pendingBoardAction} title="Reset board" aria-label="Reset board"><RefreshCcw size={16} /></button>
           </div>
         </header>
         <div className="mentor-board-frame">
           <Chessboard options={{
             position: previewFen || boardState?.fen || STANDARD_FEN,
             boardOrientation: boardState?.orientation || 'white',
+            animationDurationInMs: 350,
+            arrows: annotationArrows,
+            squareStyles: annotationSquareStyles,
+            allowDrawingArrows: false,
             onPieceDrop: onBoardMove,
-            allowDragging: !!boardState && !pendingBoardAction && !boardState.gameStatus.isGameOver,
+            allowDragging: !!boardState && !activeRequestId && !pendingBoardAction && !boardState.gameStatus.isGameOver,
             darkSquareStyle: { backgroundColor: '#63714f' },
             lightSquareStyle: { backgroundColor: '#e5e1d5' }
           }} />

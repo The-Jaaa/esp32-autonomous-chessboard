@@ -63,6 +63,37 @@ function mapBoardEvent(row) {
   };
 }
 
+function mapToolCall(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    conversationId: row.conversation_id,
+    requestId: row.request_id,
+    assistantMessageId: row.assistant_message_id,
+    providerCallId: row.provider_call_id,
+    ordinal: Number(row.ordinal),
+    name: row.tool_name,
+    arguments: JSON.parse(row.arguments_json || '{}'),
+    status: row.status,
+    result: row.result_json ? JSON.parse(row.result_json) : null,
+    error: row.error_text || null,
+    progressCurrent: Number(row.progress_current || 0),
+    progressTotal: Number(row.progress_total || 0),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapAnnotations(row, revision = 0) {
+  if (!row || Number(row.position_revision) !== Number(revision)) {
+    return { highlights: [], arrows: [] };
+  }
+  return {
+    highlights: JSON.parse(row.highlights_json || '[]'),
+    arrows: JSON.parse(row.arrows_json || '[]')
+  };
+}
+
 function titleFromMessage(text) {
   const normalized = String(text || '').replace(/\s+/g, ' ').trim();
   if (!normalized) return DEFAULT_TITLE;
@@ -92,6 +123,7 @@ class MentorStore {
     }
     this.migrate();
     this.recoverInterruptedMessages();
+    this.recoverInterruptedToolCalls();
   }
 
   migrate() {
@@ -170,6 +202,40 @@ class MentorStore {
         SELECT id, '${STANDARD_FEN}', '${STANDARD_FEN}', '', 'white', 0, created_at, updated_at
         FROM mentor_conversations;
       `
+    }, {
+      version: 3,
+      sql: `
+        CREATE TABLE mentor_tool_calls (
+          id TEXT PRIMARY KEY,
+          conversation_id TEXT NOT NULL REFERENCES mentor_conversations(id) ON DELETE CASCADE,
+          request_id TEXT NOT NULL,
+          assistant_message_id TEXT NOT NULL REFERENCES mentor_messages(id) ON DELETE CASCADE,
+          provider_call_id TEXT NOT NULL,
+          ordinal INTEGER NOT NULL,
+          tool_name TEXT NOT NULL,
+          arguments_json TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('pending', 'running', 'complete', 'failed', 'cancelled')),
+          result_json TEXT,
+          error_text TEXT,
+          progress_current INTEGER NOT NULL DEFAULT 0,
+          progress_total INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          UNIQUE(conversation_id, request_id, provider_call_id),
+          UNIQUE(assistant_message_id, ordinal)
+        );
+
+        CREATE INDEX mentor_tool_calls_conversation_message
+          ON mentor_tool_calls(conversation_id, assistant_message_id, ordinal);
+
+        CREATE TABLE mentor_board_annotations (
+          conversation_id TEXT PRIMARY KEY REFERENCES mentor_conversations(id) ON DELETE CASCADE,
+          position_revision INTEGER NOT NULL,
+          highlights_json TEXT NOT NULL DEFAULT '[]',
+          arrows_json TEXT NOT NULL DEFAULT '[]',
+          updated_at INTEGER NOT NULL
+        );
+      `
     }];
 
     const applied = new Set(
@@ -198,6 +264,17 @@ class MentorStore {
       UPDATE mentor_messages
       SET status = 'failed', updated_at = ?
       WHERE role = 'model' AND status IN ('pending', 'streaming')
+    `).run(timestamp).changes;
+  }
+
+  recoverInterruptedToolCalls() {
+    const timestamp = this.now();
+    return this.db.prepare(`
+      UPDATE mentor_tool_calls
+      SET status = 'failed',
+          error_text = 'Tool execution was interrupted by a backend restart.',
+          updated_at = ?
+      WHERE status IN ('pending', 'running')
     `).run(timestamp).changes;
   }
 
@@ -389,6 +466,121 @@ class MentorStore {
     return this.getMessage(id);
   }
 
+  createToolCall({
+    conversationId,
+    requestId,
+    assistantMessageId,
+    providerCallId,
+    ordinal,
+    name,
+    arguments: args = {},
+    progressTotal = 0
+  }) {
+    const existing = this.getToolCallByProvider(conversationId, requestId, providerCallId);
+    if (existing) return { duplicate: true, toolCall: existing };
+    const id = this.createId();
+    const timestamp = this.now();
+    this.db.prepare(`
+      INSERT INTO mentor_tool_calls(
+        id, conversation_id, request_id, assistant_message_id, provider_call_id,
+        ordinal, tool_name, arguments_json, status, progress_total, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+    `).run(
+      id,
+      conversationId,
+      requestId,
+      assistantMessageId,
+      providerCallId,
+      ordinal,
+      name,
+      JSON.stringify(args || {}),
+      progressTotal,
+      timestamp,
+      timestamp
+    );
+    return { duplicate: false, toolCall: this.getToolCall(id) };
+  }
+
+  getToolCall(id) {
+    return mapToolCall(this.db.prepare('SELECT * FROM mentor_tool_calls WHERE id = ?').get(id));
+  }
+
+  getToolCallByProvider(conversationId, requestId, providerCallId) {
+    return mapToolCall(this.db.prepare(`
+      SELECT * FROM mentor_tool_calls
+      WHERE conversation_id = ? AND request_id = ? AND provider_call_id = ?
+    `).get(conversationId, requestId, providerCallId));
+  }
+
+  listToolCalls(conversationId) {
+    return this.db.prepare(`
+      SELECT * FROM mentor_tool_calls
+      WHERE conversation_id = ?
+      ORDER BY created_at ASC, ordinal ASC
+    `).all(conversationId).map(mapToolCall);
+  }
+
+  updateToolCall(id, patch = {}) {
+    const current = this.getToolCall(id);
+    if (!current) return null;
+    const allowed = new Set(['pending', 'running', 'complete', 'failed', 'cancelled']);
+    const status = patch.status || current.status;
+    if (!allowed.has(status)) throw new Error(`Unsupported tool status: ${status}`);
+    const result = Object.prototype.hasOwnProperty.call(patch, 'result') ? patch.result : current.result;
+    const error = Object.prototype.hasOwnProperty.call(patch, 'error') ? patch.error : current.error;
+    const progressCurrent = Number.isInteger(patch.progressCurrent)
+      ? patch.progressCurrent
+      : current.progressCurrent;
+    const progressTotal = Number.isInteger(patch.progressTotal)
+      ? patch.progressTotal
+      : current.progressTotal;
+    this.db.prepare(`
+      UPDATE mentor_tool_calls
+      SET status = ?, result_json = ?, error_text = ?, progress_current = ?,
+          progress_total = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      status,
+      result === null ? null : JSON.stringify(result),
+      error || null,
+      progressCurrent,
+      progressTotal,
+      this.now(),
+      id
+    );
+    return this.getToolCall(id);
+  }
+
+  getBoardAnnotations(conversationId, revision) {
+    const row = this.db.prepare(`
+      SELECT * FROM mentor_board_annotations WHERE conversation_id = ?
+    `).get(conversationId);
+    return mapAnnotations(row, revision);
+  }
+
+  setBoardAnnotations(conversationId, { expectedRevision, highlights, arrows }) {
+    const current = this.getChessSession(conversationId);
+    if (!current) return { status: 'not_found' };
+    if (current.revision !== expectedRevision) return { status: 'stale', session: current };
+    this.db.prepare(`
+      INSERT INTO mentor_board_annotations(
+        conversation_id, position_revision, highlights_json, arrows_json, updated_at
+      ) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(conversation_id) DO UPDATE SET
+        position_revision = excluded.position_revision,
+        highlights_json = excluded.highlights_json,
+        arrows_json = excluded.arrows_json,
+        updated_at = excluded.updated_at
+    `).run(
+      conversationId,
+      expectedRevision,
+      JSON.stringify(highlights),
+      JSON.stringify(arrows),
+      this.now()
+    );
+    return { status: 'committed' };
+  }
+
   touchConversation(conversationId) {
     this.db.prepare(`
       UPDATE mentor_conversations SET updated_at = ? WHERE id = ?
@@ -508,6 +700,17 @@ class MentorStore {
         timestamp,
         conversationId
       );
+      if (eventType === 'orientation') {
+        this.db.prepare(`
+          UPDATE mentor_board_annotations
+          SET position_revision = ?, updated_at = ?
+          WHERE conversation_id = ? AND position_revision = ?
+        `).run(expectedRevision + 1, timestamp, conversationId, expectedRevision);
+      } else {
+        this.db.prepare(`
+          DELETE FROM mentor_board_annotations WHERE conversation_id = ?
+        `).run(conversationId);
+      }
       this.db.prepare(`
         UPDATE mentor_conversations SET updated_at = ? WHERE id = ?
       `).run(timestamp, conversationId);

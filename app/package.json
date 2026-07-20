@@ -11,8 +11,9 @@
     "test:physical": "npm run test:physical-planner && npm run test:physical-state",
     "test:mentor-foundation": "node scripts/mentor-foundation-regression.js",
     "test:mentor-chess": "node scripts/mentor-chess-regression.js",
+    "test:mentor-tools": "node scripts/mentor-tools-regression.js",
     "test:mentor-browser": "node scripts/mentor-browser-regression.js",
-    "test:mentor": "npm run test:mentor-foundation && npm run test:mentor-chess && npm run test:mentor-browser",
+    "test:mentor": "npm run test:mentor-foundation && npm run test:mentor-chess && npm run test:mentor-tools && npm run test:mentor-browser",
     "test:offline-rules": "node scripts/offline-chess-rules-regression.js",
     "test:offline-physical": "node scripts/offline-physical-regression.js",
     "test:offline-engine": "node scripts/offline-engine-regression.js",
@@ -38,7 +39,7 @@
     "test:foundation": "npm run test:physical && npm run test:offline-rules && npm run test:offline-physical && npm run test:offline-engine && npm run test:offline-coordinator && npm run test:offline-integration && npm run test:offline-route && npm run test:offline-external-route && npm run test:offline-motion && npm run test:offline-motion-execution && npm run test:offline-ownership && npm run test:offline-runtime && npm run test:offline-phase-execution && npm run test:offline-quiet-motion && npm run test:offline-staged-capture-motion && npm run test:offline-lane-motion && npm run test:offline-capture-lane-motion && npm run test:offline-en-passant-motion && npm run test:offline-castling-motion && npm run test:offline-promotion-motion && npm run test:offline-unified-turn"
   },
   "dependencies": {
-    "@google/genai": "*",
+    "@google/genai": "1.44.0",
     "chess.js": "^1.4.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",

@@ -330,6 +330,61 @@
   font-size: 11px;
 }
 
+.mentor-tool-list {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 10px;
+}
+
+.mentor-tool-card {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: min(390px, 100%);
+  min-height: 42px;
+  padding: 7px 10px;
+  border: 1px solid #3c4339;
+  border-radius: 6px;
+  color: #dfe3da;
+  background: #20241e;
+}
+
+.mentor-tool-card.is-failed { border-color: #72483f; background: #2b201d; }
+.mentor-tool-card.is-cancelled { border-color: #625b44; background: #27251d; }
+.mentor-tool-card.is-running,
+.mentor-tool-card.is-pending { border-color: #506044; }
+
+.mentor-tool-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 25px;
+  width: 25px;
+  height: 25px;
+  border-radius: 4px;
+  color: #172014;
+  background: var(--mentor-accent);
+}
+
+.mentor-tool-card.is-failed .mentor-tool-icon,
+.mentor-tool-card.is-cancelled .mentor-tool-icon { color: white; background: #8b5149; }
+.mentor-tool-card.is-running .mentor-tool-icon svg,
+.mentor-tool-card.is-pending .mentor-tool-icon svg { animation: mentor-spin .9s linear infinite; }
+
+.mentor-tool-copy { min-width: 0; }
+.mentor-tool-copy strong { display: block; font-size: 12px; font-weight: 650; }
+.mentor-tool-copy small {
+  display: block;
+  margin-top: 2px;
+  overflow: hidden;
+  color: #92998d;
+  font-size: 10px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes mentor-spin { to { transform: rotate(360deg); } }
+
 .mentor-thinking-dots { display: inline-flex; gap: 4px; padding-top: 8px; }
 .mentor-thinking-dots i {
   width: 5px;
