@@ -26,6 +26,11 @@ class MentorService {
     return `${conversationId}:${requestId}`;
   }
 
+  hasActiveConversation(conversationId) {
+    const prefix = `${conversationId}:`;
+    return [...this.active.keys()].some((key) => key.startsWith(prefix));
+  }
+
   submitMessage(conversationId, { requestId, text }) {
     if (!validateRequestId(requestId)) {
       const error = new Error('requestId must contain 1-128 letters, numbers, dots, colons, dashes, or underscores.');

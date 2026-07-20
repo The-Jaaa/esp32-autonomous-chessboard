@@ -384,6 +384,22 @@
   font-size: 11px;
 }
 
+.mentor-message-kind {
+  display: flex;
+  align-items: center;
+  width: max-content;
+  gap: 4px;
+  margin-bottom: 4px;
+  color: var(--mentor-muted);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.mentor-message.is-user .mentor-message-kind { color: #bfdbfe; }
+.mentor-message.is-voice .mentor-message-content { min-width: 90px; }
+
 .mentor-tool-list {
   display: grid;
   gap: 6px;
@@ -582,6 +598,40 @@
   box-shadow: 0 8px 30px rgba(0,0,0,.18);
 }
 
+.mentor-live-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 760px;
+  min-height: 28px;
+  margin: 0 auto 7px;
+  padding: 0 9px;
+  border: 1px solid var(--mentor-border);
+  border-radius: 5px;
+  color: var(--mentor-muted);
+  background: rgba(30, 41, 59, .8);
+  font-size: 10px;
+}
+
+.mentor-live-status strong {
+  color: var(--mentor-text);
+  font-size: 11px;
+  text-transform: capitalize;
+}
+
+.mentor-live-status > span:last-child { margin-left: auto; }
+.mentor-live-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--mentor-accent);
+}
+.mentor-live-status.is-listening .mentor-live-status-dot,
+.mentor-live-status.is-speaking .mentor-live-status-dot { animation: mentor-live-pulse 1s ease-in-out infinite; }
+.mentor-live-status.is-muted .mentor-live-status-dot { background: var(--warning-color); }
+.mentor-live-status.is-failed .mentor-live-status-dot { background: var(--danger-color); }
+@keyframes mentor-live-pulse { 50% { opacity: .25; } }
+
 .mentor-composer:focus-within { border-color: var(--mentor-accent); }
 .mentor-composer textarea {
   flex: 1;
@@ -593,6 +643,33 @@
   line-height: 34px;
   background: transparent;
 }
+
+.mentor-composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+}
+
+.mentor-live-button,
+.mentor-live-stop {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--mentor-border);
+  border-radius: 5px;
+  color: var(--mentor-muted);
+  background: var(--surface-panel);
+  cursor: pointer;
+}
+
+.mentor-live-button:hover:not(:disabled),
+.mentor-live-stop:hover { color: white; border-color: var(--mentor-accent); }
+.mentor-live-button.is-active { color: white; border-color: var(--mentor-accent); background: rgba(59, 130, 246, .22); }
+.mentor-live-button.is-muted { color: #fcd34d; border-color: var(--warning-color); }
+.mentor-live-button:disabled { opacity: .4; cursor: default; }
+.mentor-live-stop { color: #fca5a5; }
 
 .mentor-send-button {
   display: grid;

@@ -4,7 +4,7 @@ function asyncRoute(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
 }
 
-function createMentorRouter({ store, service, chessService, emitBoardUpdate = () => {} }) {
+function createMentorRouter({ store, service, chessService, liveService, emitBoardUpdate = () => {} }) {
   const router = express.Router();
   const withToolCalls = (conversation) => {
     const toolCalls = store.listToolCalls(conversation.id);
@@ -57,15 +57,22 @@ function createMentorRouter({ store, service, chessService, emitBoardUpdate = ()
     return res.json({ conversation });
   });
 
-  router.delete('/conversations/:id', (req, res) => {
+  router.delete('/conversations/:id', asyncRoute(async (req, res) => {
     service.cancelConversation(req.params.id);
+    await liveService?.stopConversation(req.params.id, 'conversation_deleted');
     if (!store.deleteConversation(req.params.id)) {
       return res.status(404).json({ error: 'Conversation not found.' });
     }
     return res.status(204).end();
-  });
+  }));
 
   router.post('/conversations/:id/messages', asyncRoute(async (req, res) => {
+    if (liveService?.isConversationActive(req.params.id)) {
+      const error = new Error('Send typed messages through the active Live mentor session.');
+      error.statusCode = 409;
+      error.code = 'mentor_live_active';
+      throw error;
+    }
     const result = service.submitMessage(req.params.id, req.body || {});
     return res.status(result.duplicate ? 200 : 202).json({
       duplicate: result.duplicate,

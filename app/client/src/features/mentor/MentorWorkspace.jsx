@@ -11,6 +11,7 @@ import {
   Ellipsis,
   Gauge,
   Mic,
+  MicOff,
   LoaderCircle,
   Pencil,
   Plus,
@@ -23,6 +24,7 @@ import {
 } from 'lucide-react';
 import { useSocket } from '../../context/useSocket';
 import { mentorApi } from './mentor-api';
+import { useMentorLive } from './useMentorLive';
 import './mentor.css';
 
 const SUGGESTIONS = [
@@ -236,9 +238,10 @@ function ToolCallCard({ toolCall }) {
 function Message({ message }) {
   const isUser = message.role === 'user';
   return (
-    <article className={`mentor-message ${isUser ? 'is-user' : 'is-model'}`}>
+    <article className={`mentor-message ${isUser ? 'is-user' : 'is-model'} ${message.kind === 'voice' ? 'is-voice' : ''}`}>
       {!isUser && <div className="mentor-message-avatar"><Bot size={18} /></div>}
       <div className="mentor-message-content">
+        {message.kind === 'voice' && <span className="mentor-message-kind"><Mic size={11} /> Voice</span>}
         {!!message.toolCalls?.length && (
           <div className="mentor-tool-list">
             {message.toolCalls.map((toolCall) => <ToolCallCard key={toolCall.id} toolCall={toolCall} />)}
@@ -298,6 +301,21 @@ export default function MentorWorkspace() {
     setConversations(result.conversations);
     return result.conversations;
   }, []);
+
+  const onLiveMessage = useCallback((message) => {
+    setMessages((current) => upsertMessage(current, message));
+  }, []);
+  const onLiveError = useCallback((message) => setError(message), []);
+  const onLiveConversationChanged = useCallback(() => {
+    refreshList('').catch((refreshError) => setError(refreshError.message));
+  }, [refreshList]);
+  const live = useMentorLive({
+    socket,
+    conversationId,
+    onMessage: onLiveMessage,
+    onError: onLiveError,
+    onConversationChanged: onLiveConversationChanged
+  });
 
   const createConversation = useCallback(async () => {
     const result = await mentorApi.createConversation();
@@ -449,7 +467,9 @@ export default function MentorWorkspace() {
 
   useEffect(() => {
     if (!stickToBottomRef.current) return undefined;
-    const frame = requestAnimationFrame(() => scrollToLatest('auto'));
+    const frame = requestAnimationFrame(() => {
+      if (stickToBottomRef.current) scrollToLatest('auto');
+    });
     return () => cancelAnimationFrame(frame);
   }, [messages, scrollToLatest]);
 
@@ -468,8 +488,18 @@ export default function MentorWorkspace() {
     setShowJumpToLatest(false);
     setDraft('');
     setError('');
-    setActiveRequestId(requestId);
     try {
+      if (live.isActive) {
+        const result = await live.sendText(requestId, trimmed);
+        setMessages((current) => {
+          let next = upsertMessage(current, result.userMessage);
+          next = upsertMessage(next, result.assistantMessage);
+          return next;
+        });
+        await refreshList('');
+        return;
+      }
+      setActiveRequestId(requestId);
       const result = await mentorApi.sendMessage(conversationId, requestId, trimmed);
       setMessages((current) => {
         let next = upsertMessage(current, result.userMessage);
@@ -642,14 +672,13 @@ export default function MentorWorkspace() {
         </nav>
         <div className="mentor-sidebar-footer">
           <Link to="/"><ChevronLeft size={17} /> Companion board</Link>
-          <Link to="/mentor-live"><Mic size={17} /> Live voice mentor</Link>
         </div>
       </aside>
 
       <section className="mentor-conversation">
         <header className="mentor-conversation-header">
           <div><span>MENTOR</span><h1>{conversation?.title || 'New chat'}</h1></div>
-          <span className="mentor-model-label">Gemini 3.5 Flash</span>
+          <span className="mentor-model-label">{live.isActive ? 'Gemini 3.1 Flash Live' : 'Gemini 3.5 Flash'}</span>
         </header>
         <div className="mentor-message-scroll-wrap">
           <div className="mentor-message-scroll" ref={messageScrollRef} onScroll={onMessageScroll}>
@@ -668,6 +697,24 @@ export default function MentorWorkspace() {
                 </div>
               </div>
             ) : messages.map((message) => <Message key={message.id} message={message} />)}
+            {live.partialUser && (
+              <Message message={{
+                id: `partial-user-${live.partialUser.id}`,
+                role: 'user',
+                kind: 'voice',
+                content: live.partialUser.text,
+                status: 'streaming'
+              }} />
+            )}
+            {live.partialAssistant && (
+              <Message message={{
+                id: `partial-model-${live.partialAssistant.id}`,
+                role: 'model',
+                kind: 'voice',
+                content: live.partialAssistant.text,
+                status: 'streaming'
+              }} />
+            )}
           </div>
           {showJumpToLatest && (
             <button
@@ -683,10 +730,17 @@ export default function MentorWorkspace() {
         </div>
         <div className="mentor-composer-wrap">
           {error && <div className="mentor-error"><span>{error}</span><button onClick={() => setError('')} title="Dismiss error"><X size={15} /></button></div>}
+          {(live.isActive || live.status === 'failed') && (
+            <div className={`mentor-live-status is-${live.status}`}>
+              <span className="mentor-live-status-dot" />
+              <strong>{live.status === 'failed' ? 'Live voice failed' : `Live voice ${live.status}`}</strong>
+              {live.isActive && <span>Speak naturally or type below</span>}
+            </div>
+          )}
           <div className="mentor-composer">
             <textarea
               value={draft}
-              placeholder={socketReady ? 'Ask your chess mentor' : 'Connecting to mentor...'}
+              placeholder={socketReady ? (live.isActive ? 'Speak or type to your chess mentor' : 'Ask your chess mentor') : 'Connecting to mentor...'}
               disabled={!socketReady}
               rows={1}
               onChange={(event) => setDraft(event.target.value)}
@@ -697,11 +751,32 @@ export default function MentorWorkspace() {
                 }
               }}
             />
-            {activeRequestId ? (
-              <button className="mentor-send-button" onClick={stopStreaming} title="Stop response" aria-label="Stop response"><Square size={15} fill="currentColor" /></button>
-            ) : (
-              <button className="mentor-send-button" onClick={() => sendMessage()} disabled={!draft.trim() || !socketReady} title="Send message" aria-label="Send message"><ArrowUp size={19} /></button>
-            )}
+            <div className="mentor-composer-actions">
+              {!live.isActive ? (
+                <button
+                  className="mentor-live-button"
+                  onClick={live.start}
+                  disabled={!socketReady || !!activeRequestId || live.status === 'connecting'}
+                  title="Start Live voice"
+                  aria-label="Start Live voice"
+                ><Mic size={17} /></button>
+              ) : (
+                <>
+                  <button
+                    className={`mentor-live-button ${live.muted ? 'is-muted' : 'is-active'}`}
+                    onClick={live.toggleMute}
+                    title={live.muted ? 'Unmute microphone' : 'Mute microphone'}
+                    aria-label={live.muted ? 'Unmute microphone' : 'Mute microphone'}
+                  >{live.muted ? <MicOff size={17} /> : <Mic size={17} />}</button>
+                  <button className="mentor-live-stop" onClick={() => live.stop()} title="Stop Live voice" aria-label="Stop Live voice"><Square size={13} fill="currentColor" /></button>
+                </>
+              )}
+              {activeRequestId ? (
+                <button className="mentor-send-button" onClick={stopStreaming} title="Stop response" aria-label="Stop response"><Square size={15} fill="currentColor" /></button>
+              ) : (
+                <button className="mentor-send-button" onClick={() => sendMessage()} disabled={!draft.trim() || !socketReady || live.status === 'connecting'} title="Send message" aria-label="Send message"><ArrowUp size={19} /></button>
+              )}
+            </div>
           </div>
           <p>Mentor responses can be inaccurate. Verify critical analysis on the board.</p>
         </div>

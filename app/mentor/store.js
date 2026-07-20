@@ -391,7 +391,13 @@ class MentorStore {
     `).get(conversationId, requestId, role));
   }
 
-  createMessagePair(conversationId, { requestId, text }) {
+  createMessagePair(conversationId, {
+    requestId,
+    text,
+    kind = 'text',
+    assistantContent = '',
+    assistantStatus = 'pending'
+  }) {
     const existing = this.getRequestMessages(conversationId, requestId);
     if (existing.length) {
       return {
@@ -403,6 +409,12 @@ class MentorStore {
 
     const conversation = this.getConversation(conversationId);
     if (!conversation) return null;
+    if (!['text', 'voice'].includes(kind)) {
+      throw new Error(`Unsupported mentor message kind: ${kind}`);
+    }
+    if (!['pending', 'streaming', 'complete', 'failed', 'cancelled'].includes(assistantStatus)) {
+      throw new Error(`Unsupported assistant message status: ${assistantStatus}`);
+    }
 
     const timestamp = this.now();
     const userId = this.createId();
@@ -418,15 +430,15 @@ class MentorStore {
         INSERT INTO mentor_messages(
           id, conversation_id, sequence, request_id, role, kind,
           content, status, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, 'text', ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       insert.run(
         userId, conversationId, nextSequence, requestId,
-        'user', text, 'complete', timestamp, timestamp
+        'user', kind, text, 'complete', timestamp, timestamp
       );
       insert.run(
         assistantId, conversationId, nextSequence + 1, requestId,
-        'model', '', 'pending', timestamp, timestamp
+        'model', kind, assistantContent, assistantStatus, timestamp, timestamp
       );
       const nextTitle = conversation.messageCount === 0 && conversation.title === DEFAULT_TITLE
         ? titleFromMessage(text)
@@ -454,6 +466,16 @@ class MentorStore {
       SET content = content || ?, status = 'streaming', updated_at = ?
       WHERE id = ? AND status IN ('pending', 'streaming')
     `).run(delta, timestamp, id);
+    return this.getMessage(id);
+  }
+
+  replaceMessageContent(id, content) {
+    const timestamp = this.now();
+    this.db.prepare(`
+      UPDATE mentor_messages
+      SET content = ?, updated_at = ?
+      WHERE id = ?
+    `).run(String(content || ''), timestamp, id);
     return this.getMessage(id);
   }
 

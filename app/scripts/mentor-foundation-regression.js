@@ -65,11 +65,18 @@ async function storeRegressions() {
   });
   assert.strictEqual(duplicate.duplicate, true);
   assert.strictEqual(store.listMessages(first.id).length, 2);
+  const interruptedVoice = store.createMessagePair(first.id, {
+    requestId: 'voice-restart-1',
+    text: 'This voice turn is interrupted by restart.',
+    kind: 'voice'
+  });
   store.close();
 
   store = new MentorStore({ dbPath: temp.file, now: () => ++now });
   assert.strictEqual(store.getMessage(pair.assistantMessage.id).status, 'failed');
-  assert.strictEqual(store.getConversation(first.id).messages.length, 2);
+  assert.strictEqual(store.getMessage(interruptedVoice.assistantMessage.id).status, 'failed');
+  assert.strictEqual(store.getMessage(interruptedVoice.assistantMessage.id).kind, 'voice');
+  assert.strictEqual(store.getConversation(first.id).messages.length, 4);
   assert.strictEqual(store.deleteConversation(first.id), true);
   assert.deepStrictEqual(store.listMessages(first.id), []);
   assert.strictEqual(store.getConversation(second.id).title, 'French Defense');

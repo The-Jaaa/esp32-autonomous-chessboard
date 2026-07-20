@@ -145,6 +145,10 @@ async function runViewport(browser, viewport) {
   }));
   assert.strictEqual(overflowing.overflowY, 'auto');
   assert.ok(overflowing.scrollHeight > overflowing.clientHeight, 'The long mentor chat did not create a scrollable area.');
+  await page.waitForFunction(() => {
+    const element = document.querySelector('.mentor-message-scroll');
+    return element && element.scrollHeight - element.clientHeight > 100;
+  });
   await scrollArea.evaluate((element) => {
     element.scrollTop = 0;
     element.dispatchEvent(new Event('scroll'));
@@ -315,10 +319,35 @@ async function runViewport(browser, viewport) {
   await expectText(page.locator('.logo-container'), 'Companion Board');
   await page.getByRole('link', { name: 'Open Mentor Page' }).click();
   await page.locator('.mentor-shell').waitFor({ state: 'visible' });
-  await page.getByRole('link', { name: 'Live voice mentor' }).click();
-  await page.waitForURL('http://127.0.0.1:3010/mentor-live');
-  await expectText(page.locator('body'), 'Live Multimodal Mentor');
-  await page.getByRole('button', { name: 'Start Mentor' }).waitFor({ state: 'visible' });
+  await page.getByRole('button', { name: 'Start Live voice' }).click();
+  await expectText(page.locator('.mentor-live-status'), 'Live voice listening');
+  await expectText(page.locator('.mentor-model-label'), 'Gemini 3.1 Flash Live');
+  const boardTopBeforeVoice = (await page.locator('.mentor-board-frame').boundingBox()).y;
+  await page.getByPlaceholder('Speak or type to your chess mentor').fill('Explain the center by voice.');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expectText(page.locator('.mentor-message.is-user.is-voice'), 'Explain the center by voice.');
+  await expectText(page.locator('.mentor-message.is-model.is-voice'), 'I heard your typed question');
+  assert.ok(Math.abs((await page.locator('.mentor-board-frame').boundingBox()).y - boardTopBeforeVoice) < 1);
+
+  await page.getByRole('button', { name: 'Mute microphone' }).click();
+  await expectText(page.locator('.mentor-live-status'), 'Live voice muted');
+  await expectText(page.locator('.mentor-message.is-user.is-voice'), 'Can you explain this position?');
+  await expectText(page.locator('.mentor-message.is-model.is-voice'), 'Let us examine the position together.');
+  await page.screenshot({
+    path: path.join(__dirname, '..', 'tmp', `mentor-live-${viewport.width}x${viewport.height}.png`),
+    fullPage: true
+  });
+  await page.getByRole('button', { name: 'Unmute microphone' }).click();
+  await page.getByRole('button', { name: 'Stop Live voice' }).click();
+  await page.getByRole('button', { name: 'Start Live voice' }).waitFor({ state: 'visible' });
+  await page.reload();
+  await expectText(page.locator('.mentor-message.is-user.is-voice'), 'Explain the center by voice.');
+  await expectText(page.locator('.mentor-message.is-model.is-voice'), 'I heard your typed question');
+
+  await page.goto('http://127.0.0.1:3010/mentor-live');
+  await page.waitForURL(/\/mentor(?:\/[^/]+)?$/);
+  await page.locator('.mentor-shell').waitFor({ state: 'visible' });
+  assert.strictEqual(await page.getByText('Live Multimodal Mentor').count(), 0);
   await context.close();
 }
 
@@ -336,7 +365,8 @@ async function main() {
     await waitForServer('http://127.0.0.1:3010/api/mentor/conversations', serverProcess);
     browser = await chromium.launch({
       executablePath: 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-      headless: true
+      headless: true,
+      args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream']
     });
     await runViewport(browser, { width: 1440, height: 900 });
     await runViewport(browser, { width: 1920, height: 1080 });

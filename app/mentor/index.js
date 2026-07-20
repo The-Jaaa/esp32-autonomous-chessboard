@@ -6,6 +6,13 @@ const { MentorToolService } = require('./tool-service');
 const { MentorEngineService } = require('./engine-service');
 const { MentorAnalysisService } = require('./analysis-service');
 const {
+  DEFAULT_LIVE_MODEL,
+  DEFAULT_LIVE_VOICE,
+  DeterministicMentorLiveConnector,
+  GeminiMentorLiveConnector,
+  MentorLiveService
+} = require('./live-service');
+const {
   DeterministicMentorTextProvider,
   GeminiMentorTextProvider
 } = require('./text-provider');
@@ -22,7 +29,10 @@ function createMentorFeature({
   provider,
   engineService,
   analysisService,
-  model = 'gemini-3.5-flash'
+  liveConnector,
+  model = 'gemini-3.5-flash',
+  liveModel = DEFAULT_LIVE_MODEL,
+  liveVoice = DEFAULT_LIVE_VOICE
 }) {
   const store = new MentorStore(dbPath ? { dbPath } : {});
   const textProvider = provider || (process.env.MENTOR_FAKE_TEXT === '1'
@@ -38,6 +48,7 @@ function createMentorFeature({
     io.to(roomName(conversationId)).emit(event, payload);
   };
 
+  let liveService;
   const emitBoardUpdate = (conversationId, result) => {
     io.to(roomName(conversationId)).emit('mentor-board-updated', {
       conversationId,
@@ -45,6 +56,7 @@ function createMentorFeature({
       duplicate: result.duplicate,
       state: result.state
     });
+    liveService?.notifyBoardUpdated(conversationId, result.state);
   };
   const toolService = new MentorToolService({
     store,
@@ -60,11 +72,24 @@ function createMentorFeature({
     contextProvider: (conversationId) => chessService.promptContext(conversationId),
     emit
   });
+  const connector = liveConnector || (process.env.MENTOR_FAKE_LIVE === '1'
+    ? new DeterministicMentorLiveConnector()
+    : new GeminiMentorLiveConnector({ ai }));
+  liveService = new MentorLiveService({
+    store,
+    chessService,
+    textService: service,
+    connector,
+    emit,
+    model: liveModel,
+    voiceName: liveVoice
+  });
 
   app.use('/api/mentor', createMentorRouter({
     store,
     service,
     chessService,
+    liveService,
     emitBoardUpdate
   }));
 
@@ -88,6 +113,8 @@ function createMentorFeature({
     socket.on('mentor-message-cancel', ({ conversationId, requestId } = {}, acknowledge = () => {}) => {
       acknowledge({ success: service.cancel(conversationId, requestId) });
     });
+
+    liveService.registerSocket(socket);
   });
 
   return {
@@ -97,8 +124,11 @@ function createMentorFeature({
     toolService,
     analysisService: mentorAnalysis,
     engineService: mentorEngine,
+    liveService,
+    liveConnector: connector,
     provider: textProvider,
-    close() {
+    async close() {
+      await liveService.closeAll();
       mentorEngine.close?.();
       store.close();
     }
