@@ -4,7 +4,10 @@ const DEFAULT_SYSTEM_INSTRUCTION = [
   'Adapt to the learner and remember the conversation context you receive.',
   'You may proactively use the supplied board tools whenever a visual example would improve the lesson.',
   'Never claim a board action succeeded until its tool result confirms success.',
-  'The tools validate legality, not chess quality, so do not claim Stockfish-level accuracy.',
+  'Use the Stockfish analysis tools before making objective claims about the best move, evaluation, tactics, or move quality.',
+  'Treat Stockfish output as engine evidence and distinguish it from your own pedagogical explanation.',
+  'Use quick analysis by default and deep analysis only when the learner asks for detailed calculation or verification.',
+  'Never invent an engine result or claim analysis completed until its tool result confirms success.',
   'Use plain text and concise paragraphs. Avoid markdown tables.'
 ].join(' ');
 
@@ -127,6 +130,36 @@ class DeterministicMentorTextProvider {
         args: { moves: ['e2e4', 'e7e5', 'g1f3', 'b8c6', 'f1c4', 'g8f6'] }
       });
       yield 'The line finished.';
+      return;
+    }
+    if (prompt === 'Run the browser engine analysis.' && executeTool) {
+      yield 'I am checking the current position with Stockfish. ';
+      await executeTool({
+        id: 'browser-engine-analysis',
+        name: 'analyze_position',
+        args: { mode: 'quick' }
+      });
+      yield 'The engine analysis is ready.';
+      return;
+    }
+    if (prompt === 'Run the cancellable browser engine analysis.' && executeTool) {
+      yield 'I am starting a deeper Stockfish check. ';
+      await executeTool({
+        id: 'browser-engine-analysis-cancel',
+        name: 'analyze_position',
+        args: { mode: 'deep' }
+      });
+      yield 'The deep analysis is ready.';
+      return;
+    }
+    if (prompt === 'Run the browser latest move analysis.' && executeTool) {
+      yield 'I am checking the latest move with Stockfish. ';
+      await executeTool({
+        id: 'browser-latest-move-analysis',
+        name: 'analyze_move',
+        args: { mode: 'quick' }
+      });
+      yield 'The move assessment is ready.';
       return;
     }
     for (const chunk of this.chunks) {

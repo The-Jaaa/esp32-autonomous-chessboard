@@ -3,6 +3,8 @@ const { MentorService } = require('./service');
 const { createMentorRouter } = require('./router');
 const { MentorChessService } = require('./chess-service');
 const { MentorToolService } = require('./tool-service');
+const { MentorEngineService } = require('./engine-service');
+const { MentorAnalysisService } = require('./analysis-service');
 const {
   DeterministicMentorTextProvider,
   GeminiMentorTextProvider
@@ -18,6 +20,8 @@ function createMentorFeature({
   ai,
   dbPath = process.env.MENTOR_DB_PATH,
   provider,
+  engineService,
+  analysisService,
   model = 'gemini-3.5-flash'
 }) {
   const store = new MentorStore(dbPath ? { dbPath } : {});
@@ -25,6 +29,11 @@ function createMentorFeature({
     ? new DeterministicMentorTextProvider()
     : new GeminiMentorTextProvider({ ai, model }));
   const chessService = new MentorChessService({ store });
+  const mentorEngine = engineService || new MentorEngineService();
+  const mentorAnalysis = analysisService || new MentorAnalysisService({
+    chessService,
+    engineService: mentorEngine
+  });
   const emit = (conversationId, event, payload) => {
     io.to(roomName(conversationId)).emit(event, payload);
   };
@@ -40,6 +49,7 @@ function createMentorFeature({
   const toolService = new MentorToolService({
     store,
     chessService,
+    analysisService: mentorAnalysis,
     emit,
     emitBoardUpdate
   });
@@ -80,7 +90,19 @@ function createMentorFeature({
     });
   });
 
-  return { store, service, chessService, toolService, provider: textProvider };
+  return {
+    store,
+    service,
+    chessService,
+    toolService,
+    analysisService: mentorAnalysis,
+    engineService: mentorEngine,
+    provider: textProvider,
+    close() {
+      mentorEngine.close?.();
+      store.close();
+    }
+  };
 }
 
 module.exports = {

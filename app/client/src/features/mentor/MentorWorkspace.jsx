@@ -8,6 +8,7 @@ import {
   Check,
   ChevronLeft,
   Ellipsis,
+  Gauge,
   Mic,
   LoaderCircle,
   Pencil,
@@ -138,6 +139,8 @@ function toolLabel(toolCall) {
   const args = toolCall.arguments || {};
   const labels = {
     get_board_state: 'Read board state',
+    analyze_position: `Analyze position (${args.mode || 'quick'})`,
+    analyze_move: args.uci ? `Analyze ${args.uci}` : 'Analyze latest move',
     play_move: `Move ${args.uci || ''}`.trim(),
     play_line: `Demonstrate ${(args.moves || []).length} moves`,
     load_position: 'Load teaching position',
@@ -148,21 +151,82 @@ function toolLabel(toolCall) {
   return labels[toolCall.name] || toolCall.name.replaceAll('_', ' ');
 }
 
+function formatEngineScore(score) {
+  if (!score) return '--';
+  if (score.type === 'mate') return `${score.value < 0 ? '-' : ''}M${Math.abs(score.value)}`;
+  const pawns = score.value / 100;
+  return `${pawns > 0 ? '+' : ''}${pawns.toFixed(2)}`;
+}
+
+function formatClassification(value) {
+  if (!value) return '';
+  return value.replaceAll('_', ' ').replace(/^./, (character) => character.toUpperCase());
+}
+
+function AnalysisResult({ result }) {
+  if (!result || !['position_analysis', 'move_analysis'].includes(result.kind)) return null;
+  if (result.kind === 'move_analysis') {
+    const best = result.bestAlternative;
+    return (
+      <div className="mentor-analysis-result">
+        <div className="mentor-analysis-headline">
+          <span className={`mentor-quality is-${result.classification}`}>{formatClassification(result.classification)}</span>
+          <strong>{result.move?.san || result.move?.uci}</strong>
+          <span>{formatEngineScore(result.before?.score)} to {formatEngineScore(result.after?.score)}</span>
+        </div>
+        <div className="mentor-analysis-meta">
+          {result.centipawnLoss !== null && result.centipawnLoss !== undefined && <span>{result.centipawnLoss} cp loss</span>}
+          {result.mateImpact && <span>{formatClassification(result.mateImpact)}</span>}
+          {best?.moveSan && <span>Best: {best.moveSan}</span>}
+          <span>{result.mode} · {result.telemetry?.elapsedMs || 0} ms</span>
+        </div>
+        {best?.pvSan?.length > 0 && <p>{best.pvSan.join(' ')}</p>}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mentor-analysis-result">
+      <div className="mentor-analysis-headline">
+        <strong>{formatEngineScore(result.score)}</strong>
+        {result.bestMove?.san && <span>Best: {result.bestMove.san}</span>}
+        {result.wdl && <span>W {result.wdl.whitePercent}% · D {result.wdl.drawPercent}% · B {result.wdl.blackPercent}%</span>}
+      </div>
+      <ol className="mentor-engine-lines">
+        {(result.lines || []).slice(0, 3).map((line) => (
+          <li key={`${line.rank}:${line.move}`}>
+            <span>{line.rank}.</span>
+            <strong>{line.moveSan || line.move}</strong>
+            <span>{formatEngineScore(line.score)}</span>
+            <small>{line.pvSan?.join(' ')}</small>
+          </li>
+        ))}
+      </ol>
+      <div className="mentor-analysis-meta">
+        <span>Depth {result.telemetry?.depth || 0}</span>
+        <span>{result.telemetry?.nodes?.toLocaleString?.() || 0} nodes</span>
+        <span>{result.mode} · {result.telemetry?.elapsedMs || 0} ms</span>
+      </div>
+    </div>
+  );
+}
+
 function ToolCallCard({ toolCall }) {
   const active = ['pending', 'running'].includes(toolCall.status);
   const failed = toolCall.status === 'failed';
   const cancelled = toolCall.status === 'cancelled';
   return (
-    <div className={`mentor-tool-card is-${toolCall.status}`} data-tool-name={toolCall.name}>
+    <div className={`mentor-tool-card is-${toolCall.status} ${toolCall.name.startsWith('analyze_') ? 'is-analysis' : ''}`} data-tool-name={toolCall.name}>
       <span className="mentor-tool-icon">
-        {active ? <LoaderCircle size={14} /> : failed || cancelled ? <X size={14} /> : <Check size={14} />}
+        {active ? <LoaderCircle size={14} /> : failed || cancelled ? <X size={14} /> : toolCall.name.startsWith('analyze_') ? <Gauge size={14} /> : <Check size={14} />}
       </span>
       <span className="mentor-tool-copy">
         <strong>{toolLabel(toolCall)}</strong>
         {toolCall.progressTotal > 1 && (
-          <small>{toolCall.progressCurrent} of {toolCall.progressTotal} moves</small>
+          <small>{toolCall.progressCurrent} of {toolCall.progressTotal} {toolCall.name === 'analyze_move' ? 'analysis passes' : 'moves'}</small>
         )}
         {(failed || cancelled) && toolCall.error && <small>{toolCall.error}</small>}
+        {toolCall.status === 'complete' && <AnalysisResult result={toolCall.result} />}
       </span>
     </div>
   );
@@ -512,6 +576,18 @@ export default function MentorWorkspace() {
     endSquare: arrow.to,
     color: ANNOTATION_COLORS[arrow.role] || ANNOTATION_COLORS.idea
   })), [boardState?.annotations?.arrows]);
+  const currentAnalysis = useMemo(() => messages
+    .flatMap((message) => message.toolCalls || [])
+    .filter((toolCall) => toolCall.status === 'complete'
+      && toolCall.result?.analyzedFen === boardState?.fen
+      && ['position_analysis', 'move_analysis'].includes(toolCall.result?.kind))
+    .at(-1)?.result || null, [boardState?.fen, messages]);
+  const evaluationPercent = useMemo(() => {
+    const score = currentAnalysis?.score;
+    if (!score) return 50;
+    if (score.type === 'mate') return score.value > 0 ? 100 : 0;
+    return Math.max(0, Math.min(100, 50 + (score.value / 20)));
+  }, [currentAnalysis]);
 
   return (
     <main className="mentor-shell">
@@ -603,19 +679,29 @@ export default function MentorWorkspace() {
             <button onClick={resetBoard} disabled={!boardState || !!activeRequestId || !!pendingBoardAction} title="Reset board" aria-label="Reset board"><RefreshCcw size={16} /></button>
           </div>
         </header>
-        <div className="mentor-board-frame">
-          <Chessboard options={{
-            position: previewFen || boardState?.fen || STANDARD_FEN,
-            boardOrientation: boardState?.orientation || 'white',
-            animationDurationInMs: 350,
-            arrows: annotationArrows,
-            squareStyles: annotationSquareStyles,
-            allowDrawingArrows: false,
-            onPieceDrop: onBoardMove,
-            allowDragging: !!boardState && !activeRequestId && !pendingBoardAction && !boardState.gameStatus.isGameOver,
-            darkSquareStyle: { backgroundColor: '#1e293b' },
-            lightSquareStyle: { backgroundColor: '#e2e8f0' }
-          }} />
+        <div className="mentor-board-stage">
+          <div
+            className={`mentor-eval-bar is-${boardState?.orientation || 'white'} ${currentAnalysis ? 'has-analysis' : ''}`}
+            title={currentAnalysis ? `Stockfish evaluation ${formatEngineScore(currentAnalysis.score)}` : 'Position not analyzed'}
+            aria-label={currentAnalysis ? `Stockfish evaluation ${formatEngineScore(currentAnalysis.score)}` : 'Position not analyzed'}
+          >
+            <span className="mentor-eval-white" style={{ height: `${evaluationPercent}%` }} />
+            <strong>{formatEngineScore(currentAnalysis?.score)}</strong>
+          </div>
+          <div className="mentor-board-frame">
+            <Chessboard options={{
+              position: previewFen || boardState?.fen || STANDARD_FEN,
+              boardOrientation: boardState?.orientation || 'white',
+              animationDurationInMs: 350,
+              arrows: annotationArrows,
+              squareStyles: annotationSquareStyles,
+              allowDrawingArrows: false,
+              onPieceDrop: onBoardMove,
+              allowDragging: !!boardState && !activeRequestId && !pendingBoardAction && !boardState.gameStatus.isGameOver,
+              darkSquareStyle: { backgroundColor: '#1e293b' },
+              lightSquareStyle: { backgroundColor: '#e2e8f0' }
+            }} />
+          </div>
         </div>
         <div className="mentor-board-summary">
           <div><span>Turn</span><strong>{boardState?.turnName || 'White'}</strong></div>

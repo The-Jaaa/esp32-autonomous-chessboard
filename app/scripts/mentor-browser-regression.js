@@ -164,6 +164,44 @@ async function runViewport(browser, viewport) {
   });
 
   await createNewConversation(page);
+  assert.strictEqual(await page.locator('.mentor-eval-bar').evaluate((element) => element.classList.contains('has-analysis')), false);
+  await page.getByPlaceholder('Ask your chess mentor').fill('Run the browser engine analysis.');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  const analysisCard = page.locator('.mentor-tool-card[data-tool-name="analyze_position"]');
+  await expectText(analysisCard, 'Analyze position (quick)');
+  await expectText(analysisCard, 'Best:');
+  await page.locator('.mentor-eval-bar.has-analysis').waitFor({ state: 'visible', timeout: 5000 });
+  assert.match(await page.locator('.mentor-eval-bar').getAttribute('title'), /Stockfish evaluation/);
+  await page.screenshot({
+    path: path.join(__dirname, '..', 'tmp', `mentor-analysis-${viewport.width}x${viewport.height}.png`),
+    fullPage: true
+  });
+  await page.getByRole('button', { name: 'Flip board' }).click();
+  await page.locator('.mentor-eval-bar.is-black.has-analysis').waitFor({ state: 'visible' });
+  await dragSquare(page, 'e2', 'e4');
+  await expectText(page.locator('.mentor-move-list'), 'e4');
+  await page.waitForFunction(() => !document.querySelector('.mentor-eval-bar')?.classList.contains('has-analysis'));
+  await page.reload();
+  await expectText(page.locator('.mentor-tool-card[data-tool-name="analyze_position"]'), 'Best:');
+  assert.strictEqual(await page.locator('.mentor-eval-bar').evaluate((element) => element.classList.contains('has-analysis')), false);
+  await page.getByPlaceholder('Ask your chess mentor').fill('Run the browser latest move analysis.');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  const moveAnalysisCard = page.locator('.mentor-tool-card[data-tool-name="analyze_move"]');
+  await expectText(moveAnalysisCard, 'Analyze latest move');
+  await expectText(moveAnalysisCard, 'Best');
+  await page.locator('.mentor-eval-bar.has-analysis').waitFor({ state: 'visible', timeout: 5000 });
+
+  await createNewConversation(page);
+  await page.getByPlaceholder('Ask your chess mentor').fill('Run the cancellable browser engine analysis.');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  const cancellableAnalysis = page.locator('.mentor-tool-card[data-tool-name="analyze_position"]');
+  await expectText(cancellableAnalysis, 'Analyze position (deep)');
+  await page.getByRole('button', { name: 'Stop response' }).click();
+  await expectText(page.locator('.mentor-message.is-model'), 'Response stopped');
+  await expectText(cancellableAnalysis, 'Stockfish analysis was cancelled');
+  assert.strictEqual(await page.locator('.mentor-eval-bar').evaluate((element) => element.classList.contains('has-analysis')), false);
+
+  await createNewConversation(page);
   await page.getByPlaceholder('Ask your chess mentor').fill('Run the cancellable browser demo.');
   await page.getByRole('button', { name: 'Send message' }).click();
   await expectText(page.locator('.mentor-tool-card[data-tool-name="play_line"]'), '1 of 6 moves');

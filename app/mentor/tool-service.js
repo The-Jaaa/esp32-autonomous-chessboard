@@ -8,6 +8,27 @@ const TOOL_DECLARATIONS = [{
   description: 'Read the authoritative board state, legal moves, orientation, and teaching annotations.',
   parametersJsonSchema: { type: 'object', properties: {}, additionalProperties: false }
 }, {
+  name: 'analyze_position',
+  description: 'Ask Stockfish to evaluate the authoritative current position and return up to three verified candidate lines. Use deep mode only when the user requests detailed calculation.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      mode: { type: 'string', enum: ['quick', 'deep'], description: 'Quick takes about one second; deep takes about three seconds.' }
+    },
+    additionalProperties: false
+  }
+}, {
+  name: 'analyze_move',
+  description: 'Ask Stockfish to assess the latest committed move, or a supplied legal candidate move without playing it.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      uci: { type: 'string', description: 'Optional legal candidate UCI move. Omit it to assess the latest committed move.' },
+      mode: { type: 'string', enum: ['quick', 'deep'], description: 'Quick takes about one second total; deep takes about three seconds total.' }
+    },
+    additionalProperties: false
+  }
+}, {
   name: 'play_move',
   description: 'Play one legal move on the mentor board using UCI notation such as e2e4 or a7a8q.',
   parametersJsonSchema: {
@@ -129,13 +150,16 @@ function compactBoardState(state) {
 }
 
 function progressTotalFor(name, args) {
-  return name === 'play_line' && Array.isArray(args?.moves) ? args.moves.length : 1;
+  if (name === 'play_line' && Array.isArray(args?.moves)) return args.moves.length;
+  if (name === 'analyze_move') return 2;
+  return 1;
 }
 
 class MentorToolService {
-  constructor({ store, chessService, emit = () => {}, emitBoardUpdate = () => {}, delay = waitWithSignal }) {
+  constructor({ store, chessService, analysisService = null, emit = () => {}, emitBoardUpdate = () => {}, delay = waitWithSignal }) {
     this.store = store;
     this.chessService = chessService;
+    this.analysisService = analysisService;
     this.emit = emit;
     this.emitBoardUpdate = emitBoardUpdate;
     this.delay = delay;
@@ -238,6 +262,26 @@ class MentorToolService {
     if (name === 'get_board_state') {
       onProgress(1, 1);
       return compactBoardState(this.chessService.getState(conversationId));
+    }
+
+    if (name === 'analyze_position') {
+      if (!this.analysisService) throw new Error('Stockfish mentor analysis is unavailable.');
+      const result = await this.analysisService.analyzePosition(conversationId, {
+        mode: args.mode || 'quick',
+        signal
+      });
+      onProgress(1, 1);
+      return result;
+    }
+
+    if (name === 'analyze_move') {
+      if (!this.analysisService) throw new Error('Stockfish mentor analysis is unavailable.');
+      return this.analysisService.analyzeMove(conversationId, {
+        uci: args.uci,
+        mode: args.mode || 'quick',
+        signal,
+        onProgress
+      });
     }
 
     if (name === 'play_move') {
