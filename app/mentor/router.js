@@ -33,7 +33,8 @@ function createMentorRouter({ store, service, chessService, activityService, liv
         ...conversation,
         messages: [],
         chess: chessService.getState(conversation.id),
-        activity: activityService?.get(conversation.id) || null
+        activity: activityService?.get(conversation.id) || null,
+        progress: activityService?.getProgressSummary() || null
       }
     });
   });
@@ -45,7 +46,8 @@ function createMentorRouter({ store, service, chessService, activityService, liv
       conversation: {
         ...withToolCalls(conversation),
         chess: chessService.getState(conversation.id),
-        activity: activityService?.get(conversation.id) || null
+        activity: activityService?.get(conversation.id) || null,
+        progress: activityService?.getProgressSummary() || null
       }
     });
   });
@@ -122,17 +124,31 @@ function createMentorRouter({ store, service, chessService, activityService, liv
   router.patch('/conversations/:id/board', commitBoardAction((req) =>
     chessService.setOrientation(req.params.id, req.body || {})));
 
-  router.post('/conversations/:id/activities', (req, res, next) => {
+  router.get('/catalog', (req, res) => {
+    res.json({ catalog: activityService.catalog(req.query.type || null) });
+  });
+
+  router.get('/profile', (req, res) => {
+    res.json(activityService.getProgressSummary());
+  });
+
+  router.patch('/profile', (req, res, next) => {
     try {
-      if (req.body?.type !== 'practice_game') {
-        return res.status(400).json({ error: 'This activity requires a catalog item or validated proposal.' });
-      }
-      const activity = activityService.startPractice(req.params.id, req.body || {});
-      return res.status(201).json({ activity, state: chessService.getState(req.params.id) });
+      return res.json(activityService.updateProfile(req.body || {}));
     } catch (error) {
       return next(error);
     }
   });
+
+  router.get('/recommendations', (req, res) => {
+    const summary = activityService.getProgressSummary();
+    res.json({ recommendations: summary.recommendations, profile: summary.profile, topics: summary.topics });
+  });
+
+  router.post('/conversations/:id/activities', asyncRoute(async (req, res) => {
+      const activity = await activityService.startActivity(req.params.id, req.body || {});
+      return res.status(201).json({ activity, state: chessService.getState(req.params.id) });
+  }));
 
   router.post('/conversations/:id/activities/:activityId/pause', (req, res, next) => {
     try {
@@ -159,6 +175,16 @@ function createMentorRouter({ store, service, chessService, activityService, liv
       const activity = activityService.get(req.params.id);
       if (!activity || activity.id !== req.params.activityId) return res.status(404).json({ error: 'Activity not found.' });
       return res.json({ activity: activityService.end(req.params.id) });
+    } catch (error) {
+      return next(error);
+    }
+  });
+
+  router.post('/conversations/:id/activities/:activityId/hint', (req, res, next) => {
+    try {
+      const activity = activityService.get(req.params.id);
+      if (!activity || activity.id !== req.params.activityId) return res.status(404).json({ error: 'Activity not found.' });
+      return res.json(activityService.requestHint(req.params.id));
     } catch (error) {
       return next(error);
     }

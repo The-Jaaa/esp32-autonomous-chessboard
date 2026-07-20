@@ -139,6 +139,26 @@ function mapActivityEvent(row) {
   };
 }
 
+function mapLearnerProfile(row) {
+  if (!row) return null;
+  return {
+    skillBand: row.skill_band,
+    goals: parseJson(row.goals_json, []),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapTopicProgress(row) {
+  if (!row) return null;
+  return {
+    topic: row.topic,
+    mastery: Number(row.mastery),
+    completions: Number(row.completions),
+    updatedAt: row.updated_at
+  };
+}
+
 function mapAnnotations(row, revision = 0) {
   if (!row || Number(row.position_revision) !== Number(revision)) {
     return { highlights: [], arrows: [] };
@@ -352,6 +372,34 @@ class MentorStore {
 
         CREATE INDEX mentor_activities_lease
           ON mentor_activities(status, phase, lease_expires_at);
+      `
+    }, {
+      version: 6,
+      sql: `
+        CREATE TABLE mentor_learner_profile (
+          id INTEGER PRIMARY KEY CHECK(id = 1),
+          skill_band TEXT NOT NULL CHECK(skill_band IN ('Beginner', 'Intermediate', 'Advanced')),
+          goals_json TEXT NOT NULL DEFAULT '[]',
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE mentor_topic_progress (
+          topic TEXT PRIMARY KEY,
+          mastery INTEGER NOT NULL DEFAULT 0 CHECK(mastery BETWEEN 0 AND 100),
+          completions INTEGER NOT NULL DEFAULT 0,
+          updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE mentor_progress_awards (
+          activity_id TEXT PRIMARY KEY REFERENCES mentor_activities(id) ON DELETE CASCADE,
+          points INTEGER NOT NULL,
+          topics_json TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+
+        INSERT INTO mentor_learner_profile(id, skill_band, goals_json, created_at, updated_at)
+        VALUES (1, 'Beginner', '[]', ${this.now()}, ${this.now()});
       `
     }];
 
@@ -902,6 +950,71 @@ class MentorStore {
     return this.db.prepare(`
       SELECT * FROM mentor_activity_events WHERE activity_id = ? ORDER BY sequence ASC
     `).all(activityId).map(mapActivityEvent);
+  }
+
+  getLearnerProfile() {
+    return mapLearnerProfile(this.db.prepare(
+      'SELECT * FROM mentor_learner_profile WHERE id = 1'
+    ).get());
+  }
+
+  updateLearnerProfile({ skillBand, goals }) {
+    const current = this.getLearnerProfile();
+    const nextBand = skillBand || current.skillBand;
+    if (!['Beginner', 'Intermediate', 'Advanced'].includes(nextBand)) {
+      throw new Error('Skill band must be Beginner, Intermediate, or Advanced.');
+    }
+    const nextGoals = goals === undefined ? current.goals : goals;
+    if (!Array.isArray(nextGoals) || nextGoals.length > 8
+      || nextGoals.some((goal) => typeof goal !== 'string' || !goal.trim() || goal.length > 120)) {
+      throw new Error('Goals must be an array of up to eight short strings.');
+    }
+    this.db.prepare(`
+      UPDATE mentor_learner_profile
+      SET skill_band = ?, goals_json = ?, updated_at = ? WHERE id = 1
+    `).run(nextBand, JSON.stringify(nextGoals.map((goal) => goal.trim())), this.now());
+    return this.getLearnerProfile();
+  }
+
+  listTopicProgress() {
+    return this.db.prepare(`
+      SELECT * FROM mentor_topic_progress ORDER BY mastery ASC, topic ASC
+    `).all().map(mapTopicProgress);
+  }
+
+  awardActivityProgress(activityId, topics, points) {
+    const normalizedTopics = [...new Set((topics || []).filter(Boolean))];
+    if (!normalizedTopics.length) return { awarded: false, progress: this.listTopicProgress() };
+    const normalizedPoints = Math.max(0, Math.min(100, Number(points) || 0));
+    this.db.exec('BEGIN IMMEDIATE;');
+    try {
+      const duplicate = this.db.prepare(
+        'SELECT activity_id FROM mentor_progress_awards WHERE activity_id = ?'
+      ).get(activityId);
+      if (duplicate) {
+        this.db.exec('COMMIT;');
+        return { awarded: false, progress: this.listTopicProgress() };
+      }
+      const timestamp = this.now();
+      this.db.prepare(`
+        INSERT INTO mentor_progress_awards(activity_id, points, topics_json, created_at)
+        VALUES (?, ?, ?, ?)
+      `).run(activityId, normalizedPoints, JSON.stringify(normalizedTopics), timestamp);
+      const update = this.db.prepare(`
+        INSERT INTO mentor_topic_progress(topic, mastery, completions, updated_at)
+        VALUES (?, ?, 1, ?)
+        ON CONFLICT(topic) DO UPDATE SET
+          mastery = min(100, mentor_topic_progress.mastery + excluded.mastery),
+          completions = mentor_topic_progress.completions + 1,
+          updated_at = excluded.updated_at
+      `);
+      normalizedTopics.forEach((topic) => update.run(topic, normalizedPoints, timestamp));
+      this.db.exec('COMMIT;');
+      return { awarded: true, points: normalizedPoints, progress: this.listTopicProgress() };
+    } catch (error) {
+      this.db.exec('ROLLBACK;');
+      throw error;
+    }
   }
 
   touchConversation(conversationId) {

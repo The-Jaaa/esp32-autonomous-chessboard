@@ -125,9 +125,28 @@ const TOOL_DECLARATIONS = [{
       type: { type: 'string', enum: ['practice_game', 'opening_drill', 'puzzle', 'guided_lesson'] },
       learnerColor: { type: 'string', enum: ['white', 'black'] },
       startFrom: { type: 'string', enum: ['standard', 'current'] },
-      sourceId: { type: 'string' }
+      sourceId: { type: 'string' },
+      proposal: { type: 'object' }
     },
     required: ['type'],
+    additionalProperties: false
+  }
+}, {
+  name: 'propose_activity',
+  description: 'Validate a custom opening drill, puzzle, or guided lesson without starting it. Ask the learner before starting the returned activity.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      type: { type: 'string', enum: ['opening_drill', 'puzzle', 'guided_lesson'] },
+      title: { type: 'string' },
+      goal: { type: 'string' },
+      topic: { type: 'string' },
+      learnerColor: { type: 'string', enum: ['white', 'black'] },
+      initialFen: { type: 'string' },
+      line: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 24 },
+      hints: { type: 'array', items: { type: 'string' }, maxItems: 3 }
+    },
+    required: ['type', 'title', 'goal', 'initialFen', 'line'],
     additionalProperties: false
   }
 }, {
@@ -337,18 +356,26 @@ class MentorToolService {
 
     if (name === 'start_activity') {
       if (!this.activityService) throw new Error('Mentor activities are unavailable.');
-      if (args.type !== 'practice_game') {
-        throw new Error(`${args.type} requires a catalog or validated proposal.`);
-      }
       const state = this.chessService.getState(conversationId);
-      const activity = this.activityService.startPractice(conversationId, {
+      const activity = await this.activityService.startActivity(conversationId, {
+        type: args.type,
         learnerColor: args.learnerColor || 'white',
         startFrom: args.startFrom || 'standard',
+        sourceId: args.sourceId,
+        proposal: args.proposal,
         expectedRevision: state.revision,
-        requestId
+        requestId,
+        signal
       });
       onProgress(1, 1);
       return { activity, board: compactBoardState(this.chessService.getState(conversationId)) };
+    }
+
+    if (name === 'propose_activity') {
+      if (!this.activityService) throw new Error('Mentor activities are unavailable.');
+      const result = await this.activityService.proposeActivity(args, { signal });
+      onProgress(1, 1);
+      return result;
     }
 
     if (name === 'request_prediction') {

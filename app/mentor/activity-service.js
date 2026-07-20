@@ -1,6 +1,12 @@
 const { Chess } = require('chess.js');
 const { randomUUID } = require('crypto');
 const { STANDARD_FEN } = require('./store');
+const {
+  getCatalogItem,
+  listCatalog,
+  recommendCatalog,
+  validateCatalogItem
+} = require('./curriculum');
 
 const ACTIVITY_TYPES = new Set(['practice_game', 'opening_drill', 'puzzle', 'guided_lesson']);
 const ACTIVE_STATUSES = new Set(['active', 'paused']);
@@ -62,7 +68,9 @@ class MentorActivityService {
     store,
     chessService,
     analysisService,
+    engineService = null,
     emit = () => {},
+    emitGlobal = () => {},
     emitBoardUpdate = () => {},
     createId = randomUUID,
     logger = console
@@ -70,7 +78,9 @@ class MentorActivityService {
     this.store = store;
     this.chessService = chessService;
     this.analysisService = analysisService;
+    this.engineService = engineService;
     this.emit = emit;
+    this.emitGlobal = emitGlobal;
     this.emitBoardUpdate = emitBoardUpdate;
     this.createId = createId;
     this.logger = logger;
@@ -90,6 +100,27 @@ class MentorActivityService {
   get(conversationId) {
     const activity = this.store.getActiveActivity(conversationId);
     return activitySummary(activity, activity ? this.store.listActivityEvents(activity.id) : []);
+  }
+
+  getProgressSummary() {
+    const profile = this.store.getLearnerProfile();
+    const topics = this.store.listTopicProgress();
+    return {
+      profile,
+      topics,
+      recommendations: recommendCatalog(profile, topics)
+    };
+  }
+
+  updateProfile(patch) {
+    const profile = this.store.updateLearnerProfile(patch || {});
+    const summary = this.getProgressSummary();
+    this.emitGlobal('mentor-progress-updated', summary);
+    return { ...summary, profile };
+  }
+
+  catalog(type = null) {
+    return listCatalog(type);
   }
 
   reconcile(conversationId, { resumeMentorTurn = false } = {}) {
@@ -211,6 +242,160 @@ class MentorActivityService {
     return this.get(conversationId);
   }
 
+  startCatalogActivity(conversationId, {
+    sourceId,
+    learnerColor = 'white',
+    expectedRevision,
+    requestId = null,
+    customItem = null
+  } = {}) {
+    const item = customItem || getCatalogItem(sourceId);
+    if (!item) throw new MentorActivityError('Catalog activity not found.', 'activity_source_not_found', 404);
+    if (item.fixedLearnerColor) learnerColor = item.fixedLearnerColor;
+    if (!['white', 'black'].includes(learnerColor)) {
+      throw new MentorActivityError('Learner color must be white or black.', 'invalid_learner_color');
+    }
+    let board = this.assertRevision(conversationId, expectedRevision);
+    if (this.store.getActiveActivity(conversationId)) {
+      throw new MentorActivityError('End the current activity before starting another.', 'activity_already_active', 409);
+    }
+    if (board.fen !== item.initialFen) {
+      const result = this.chessService.setPosition(conversationId, {
+        fen: item.initialFen,
+        expectedRevision: board.revision,
+        actionId: `activity:setup:${this.createId()}`,
+        actor: 'system'
+      });
+      this.emitBoardUpdate(conversationId, result);
+      board = result.state;
+    }
+    const mentorColor = oppositeColor(learnerColor);
+    const firstColor = moveColor(board.fen, item.line[0]) === colorCode(learnerColor)
+      ? 'learner'
+      : 'mentor';
+    const phase = firstColor === 'learner'
+      ? 'learner_turn'
+      : requestId ? 'mentor_thinking' : 'mentor_turn';
+    let activity = this.store.createActivity({
+      conversationId,
+      type: item.type,
+      title: item.title,
+      goal: item.goal,
+      learnerColor,
+      mentorColor,
+      sourceId: item.id,
+      startFen: board.fen,
+      startRevision: board.revision,
+      boardRevision: board.revision,
+      phase,
+      totalSteps: item.line.length,
+      config: {
+        line: item.line,
+        hints: item.hints || [],
+        topic: item.topic,
+        checkpoints: item.checkpoints || [],
+        curated: !customItem,
+        generated: Boolean(customItem)
+      },
+      state: { completedMentorTurns: 0, fallbackMoves: 0, lastHint: null }
+    });
+    if (firstColor === 'mentor' && requestId) {
+      activity = this.store.updateActivity(activity.id, { pendingRequestId: requestId });
+    }
+    this.record(activity, 'catalog_ready', { sourceId: item.id, phase, fen: board.fen });
+    if (phase === 'mentor_turn') this.scheduleMentorTurn(conversationId, 'activity_started');
+    return this.get(conversationId);
+  }
+
+  async startActivity(conversationId, options = {}) {
+    if (options.type === 'practice_game') return this.startPractice(conversationId, options);
+    if (options.proposal) {
+      const validation = await this.proposeActivity(options.proposal, { signal: options.signal });
+      if (validation.accepted) {
+        return this.startCatalogActivity(conversationId, {
+          ...options,
+          sourceId: validation.proposal.id,
+          customItem: validation.proposal
+        });
+      }
+      return this.startCatalogActivity(conversationId, {
+        ...options,
+        sourceId: validation.fallback.id
+      });
+    }
+    return this.startCatalogActivity(conversationId, options);
+  }
+
+  async proposeActivity(proposal = {}, { signal } = {}) {
+    try {
+      const item = {
+        id: `generated-${this.createId()}`,
+        type: proposal.type,
+        title: String(proposal.title || 'Custom activity').slice(0, 80),
+        goal: String(proposal.goal || '').slice(0, 240),
+        topic: String(proposal.topic || 'custom').slice(0, 48),
+        skillBands: ['Beginner', 'Intermediate', 'Advanced'],
+        fixedLearnerColor: proposal.learnerColor || null,
+        initialFen: proposal.initialFen,
+        line: proposal.line,
+        hints: Array.isArray(proposal.hints) ? proposal.hints.slice(0, 3).map((hint) => String(hint).slice(0, 160)) : []
+      };
+      if (!['opening_drill', 'puzzle', 'guided_lesson'].includes(item.type)) {
+        throw new Error('Generated activities must be an opening drill, puzzle, or guided lesson.');
+      }
+      validateCatalogItem(item);
+      if (!this.engineService && ['opening_drill', 'puzzle'].includes(item.type)) {
+        throw new Error('Stockfish validation is unavailable.');
+      }
+      if (item.type === 'puzzle') await this.validateGeneratedPuzzle(item, signal);
+      if (item.type === 'opening_drill') await this.validateGeneratedOpening(item, signal);
+      return { accepted: true, proposal: item, fallback: null };
+    } catch (error) {
+      const fallback = recommendCatalog(
+        this.store.getLearnerProfile(),
+        this.store.listTopicProgress(),
+        ['opening_drill', 'puzzle', 'guided_lesson'].includes(proposal.type) ? proposal.type : null
+      )[0];
+      return { accepted: false, error: error.message, proposal: null, fallback };
+    }
+  }
+
+  async validateGeneratedPuzzle(item, signal) {
+    const game = new Chess(item.initialFen);
+    const mover = game.turn() === 'w' ? 'white' : 'black';
+    const analysis = await this.engineService.analyzeFen(game.fen(), { mode: 'quick', multiPv: 3, signal });
+    const best = analysis.lines?.[0];
+    const second = analysis.lines?.[1];
+    if (!best || best.move !== item.line[0]) throw new Error('The puzzle solution is not Stockfish\'s best first move.');
+    const bestValue = scoreForSide(best.score, mover);
+    const secondValue = second ? scoreForSide(second.score, mover) : null;
+    const forcedMate = best.score?.type === 'mate' && bestValue > 0;
+    const unique = best.score?.type === 'cp' && second?.score?.type === 'cp'
+      && bestValue - secondValue >= 150;
+    if (!forcedMate && !unique) throw new Error('The puzzle does not have a forced mate or a unique 150-centipawn first move.');
+  }
+
+  async validateGeneratedOpening(item, signal) {
+    const game = new Chess(item.initialFen);
+    for (const expectedUci of item.line) {
+      const mover = game.turn() === 'w' ? 'white' : 'black';
+      const analysis = await this.engineService.analyzeFen(game.fen(), {
+        mode: 'quick', movetimeMs: 250, multiPv: 3, signal
+      });
+      const best = analysis.lines?.[0];
+      const selected = analysis.lines?.find((line) => line.move === expectedUci);
+      if (!best || !selected) throw new Error(`Opening move ${expectedUci} is outside Stockfish's top three.`);
+      if (best.score?.type === 'mate' && selected.move !== best.move) {
+        throw new Error(`Opening move ${expectedUci} misses a forced mate.`);
+      }
+      if (best.score?.type === 'cp' && selected.score?.type === 'cp'
+        && scoreForSide(best.score, mover) - scoreForSide(selected.score, mover) > 50) {
+        throw new Error(`Opening move ${expectedUci} is more than 50 centipawns below the best move.`);
+      }
+      game.move({ from: expectedUci.slice(0, 2), to: expectedUci.slice(2, 4), promotion: expectedUci[4] });
+    }
+  }
+
   pause(conversationId, reason = 'learner_paused') {
     const activity = this.store.getActiveActivity(conversationId);
     if (!activity) throw new MentorActivityError('No active activity was found.', 'activity_not_found', 404);
@@ -273,6 +458,17 @@ class MentorActivityService {
       || moveColor(board.fen, uci) !== colorCode(activity.learnerColor)) {
       throw new MentorActivityError(`You are playing ${activity.learnerColor}.`, 'activity_wrong_color', 409);
     }
+    const expectedMove = activity.config.line?.[activity.stepIndex];
+    if (expectedMove && uci !== expectedMove) {
+      const updated = this.store.updateActivity(activity.id, { attempts: activity.attempts + 1 });
+      this.record(updated, 'incorrect_move', { attemptedUci: uci, expectedUci: expectedMove });
+      throw new MentorActivityError(
+        'That move does not match this activity’s objective. The position has not changed.',
+        'activity_incorrect_move',
+        422,
+        { activity: this.get(conversationId), attemptedUci: uci }
+      );
+    }
     return activity;
   }
 
@@ -292,12 +488,14 @@ class MentorActivityService {
     const activity = this.store.getActiveActivity(conversationId);
     if (!activity || activity.status !== 'active' || result.duplicate) return this.get(conversationId);
     const move = result.state.history.at(-1);
+    if (activity.type !== 'practice_game') {
+      return this.advanceScriptedActivity(activity, result, 'learner');
+    }
     if (result.state.gameStatus.isGameOver) {
       const updated = this.store.updateActivity(activity.id, {
         status: 'complete',
         phase: 'game_over',
         boardRevision: result.state.revision,
-        attempts: activity.attempts + 1,
         pendingRequestId: null,
         completedAt: Date.now()
       });
@@ -307,7 +505,6 @@ class MentorActivityService {
     const updated = this.store.updateActivity(activity.id, {
       phase: 'mentor_turn',
       boardRevision: result.state.revision,
-      attempts: activity.attempts + 1,
       pendingRequestId: null
     });
     this.record(updated, 'learner_move', { move, revision: result.state.revision });
@@ -343,6 +540,22 @@ class MentorActivityService {
     return this.get(conversationId);
   }
 
+  requestHint(conversationId) {
+    const activity = this.store.getActiveActivity(conversationId);
+    if (!activity || !['opening_drill', 'puzzle', 'guided_lesson'].includes(activity.type)) {
+      throw new MentorActivityError('Hints are available during drills, puzzles, and lessons.', 'hint_not_available', 409);
+    }
+    const hints = activity.config.hints || [];
+    const level = Math.min(3, activity.hints + 1);
+    const hint = hints[Math.min(level - 1, hints.length - 1)] || 'Look for forcing moves and the activity goal.';
+    const updated = this.store.updateActivity(activity.id, {
+      hints: level,
+      state: { ...activity.state, lastHint: hint }
+    });
+    this.record(updated, 'hint_requested', { level, hint });
+    return { activity: this.get(conversationId), level, hint };
+  }
+
   validateTool(conversationId, requestId, name, args = {}) {
     if (ACTIVITY_TOOL_NAMES.has(name)) return null;
     const activity = this.store.getActiveActivity(conversationId);
@@ -364,7 +577,14 @@ class MentorActivityService {
       || moveColor(board.fen, args.uci || '') !== colorCode(activity.mentorColor)) {
       throw new MentorActivityError(`The mentor controls ${activity.mentorColor}.`, 'activity_wrong_color', 409);
     }
-    if (board.legalMoves.length > 1) this.assertTeachingCandidate(conversationId, requestId, activity, args.uci);
+    const scriptedMove = activity.config.line?.[activity.stepIndex];
+    if (scriptedMove) {
+      if (args.uci !== scriptedMove) {
+        throw new MentorActivityError('Use the validated continuation for this activity.', 'activity_scripted_move_required', 409);
+      }
+    } else if (board.legalMoves.length > 1) {
+      this.assertTeachingCandidate(conversationId, requestId, activity, args.uci);
+    }
     return activity;
   }
 
@@ -398,6 +618,9 @@ class MentorActivityService {
     const activity = this.store.getActiveActivity(conversationId);
     if (!activity || activity.status !== 'active') return null;
     if (!fallback && activity.pendingRequestId !== requestId) return null;
+    if (activity.type !== 'practice_game') {
+      return this.advanceScriptedActivity(activity, result, 'mentor', { fallback });
+    }
     const move = result.state.history.at(-1);
     const nextState = {
       ...activity.state,
@@ -426,6 +649,63 @@ class MentorActivityService {
     return this.get(conversationId);
   }
 
+  advanceScriptedActivity(activity, result, actor, { fallback = false } = {}) {
+    const move = result.state.history.at(-1);
+    const nextStep = activity.stepIndex + 1;
+    const nextState = {
+      ...activity.state,
+      completedMentorTurns: Number(activity.state.completedMentorTurns || 0) + (actor === 'mentor' ? 1 : 0),
+      fallbackMoves: Number(activity.state.fallbackMoves || 0) + (fallback ? 1 : 0)
+    };
+    if (nextStep >= activity.totalSteps || result.state.gameStatus.isGameOver) {
+      return this.completeActivity(activity, result, {
+        stepIndex: nextStep,
+        state: nextState,
+        eventType: result.state.gameStatus.isGameOver ? 'game_over' : 'activity_completed',
+        payload: { move, actor, gameStatus: result.state.gameStatus }
+      });
+    }
+    const nextUci = activity.config.line[nextStep];
+    const nextActor = moveColor(result.state.fen, nextUci) === colorCode(activity.learnerColor)
+      ? 'learner'
+      : 'mentor';
+    const updated = this.store.updateActivity(activity.id, {
+      stepIndex: nextStep,
+      phase: nextActor === 'learner' ? 'learner_turn' : 'mentor_turn',
+      boardRevision: result.state.revision,
+      pendingRequestId: null,
+      state: nextState
+    });
+    this.record(updated, actor === 'learner' ? 'learner_move' : fallback ? 'engine_fallback_move' : 'mentor_move', {
+      move,
+      nextStep,
+      nextActor
+    });
+    if (nextActor === 'mentor') this.scheduleMentorTurn(activity.conversationId, 'scripted_continuation');
+    return this.get(activity.conversationId);
+  }
+
+  completeActivity(activity, result, { stepIndex, state, eventType, payload }) {
+    const phase = result.state.gameStatus.isGameOver ? 'game_over' : 'complete';
+    const updated = this.store.updateActivity(activity.id, {
+      status: 'complete',
+      phase,
+      stepIndex,
+      boardRevision: result.state.revision,
+      pendingRequestId: null,
+      state,
+      completedAt: Date.now()
+    });
+    this.record(updated, eventType, payload);
+    const topics = [activity.config.topic].filter(Boolean);
+    const points = activity.attempts > 0 ? 3 : activity.hints > 0 ? 6 : 10;
+    const progress = this.store.awardActivityProgress(activity.id, topics, points);
+    if (progress.awarded) {
+      this.emitGlobal('mentor-progress-updated', this.getProgressSummary());
+    }
+    return activitySummary(updated, this.store.listActivityEvents(updated.id));
+  }
+
   scheduleMentorTurn(conversationId, reason) {
     if (this.inFlight.has(conversationId)) return this.inFlight.get(conversationId);
     const promise = this.executeMentorTurn(conversationId, reason)
@@ -445,12 +725,15 @@ class MentorActivityService {
     const prefix = corrective
       ? 'Your previous response analyzed the position but did not make the required opponent move.'
       : `The learner committed ${board.history.at(-1)?.san || 'a move'} and it is now your ${activity.mentorColor} turn.`;
+    const scriptedMove = activity.config.line?.[activity.stepIndex];
     return [
       '[MENTOR_ACTIVITY_TURN]',
       prefix,
       `Activity: ${activity.title}. Learner: ${activity.learnerColor}. Mentor: ${activity.mentorColor}.`,
       `Authoritative revision: ${board.revision}. FEN: ${board.fen}`,
-      'You must use analyze_position in quick mode, then call play_move exactly once with a verified teaching candidate.',
+      scriptedMove
+        ? `This reviewed activity requires exactly ${scriptedMove}. Call play_move exactly once with that move.`
+        : 'You must use analyze_position in quick mode, then call play_move exactly once with a verified teaching candidate.',
       'You may instead call request_prediction when a prediction exercise is specifically useful.',
       'Do not finish with analysis alone. Explain the completed action naturally after its tool result.'
     ].join('\n');
@@ -521,8 +804,9 @@ class MentorActivityService {
     const activity = this.store.getActiveActivity(conversationId);
     if (!activity || activity.status !== 'active' || activity.phase !== 'mentor_thinking') return;
     const board = this.chessService.getState(conversationId);
-    const analysis = await this.analysisService.analyzePosition(conversationId, { mode: 'quick' });
-    const uci = analysis.bestMove?.uci;
+    const scriptedMove = activity.config.line?.[activity.stepIndex];
+    const analysis = scriptedMove ? null : await this.analysisService.analyzePosition(conversationId, { mode: 'quick' });
+    const uci = scriptedMove || analysis?.bestMove?.uci;
     if (!uci) throw new MentorActivityError('Stockfish returned no fallback move.', 'activity_fallback_unavailable', 503);
     const actionId = `activity:fallback:${activity.id}:${board.revision}`;
     const result = this.chessService.move(conversationId, {

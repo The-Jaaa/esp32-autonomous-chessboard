@@ -320,6 +320,7 @@ async function socketRegressions() {
     'annotate_board',
     'get_activity_state',
     'start_activity',
+    'propose_activity',
     'request_prediction',
     'request_hint',
     'end_activity'

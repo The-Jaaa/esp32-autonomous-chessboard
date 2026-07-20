@@ -73,7 +73,9 @@ function createMentorFeature({
     store,
     chessService,
     analysisService: mentorAnalysis,
+    engineService: mentorEngine,
     emit,
+    emitGlobal: (event, payload) => io.emit(event, payload),
     emitBoardUpdate
   });
   toolService.setActivityService(activityService);
