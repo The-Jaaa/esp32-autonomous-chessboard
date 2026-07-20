@@ -317,7 +317,12 @@ async function socketRegressions() {
     'load_position',
     'reset_board',
     'set_orientation',
-    'annotate_board'
+    'annotate_board',
+    'get_activity_state',
+    'start_activity',
+    'request_prediction',
+    'request_hint',
+    'end_activity'
   ];
   assert.deepStrictEqual([...declarationNames].sort(), [...expectedToolNames].sort());
 

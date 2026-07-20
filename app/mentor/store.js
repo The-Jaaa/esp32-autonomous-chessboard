@@ -84,6 +84,61 @@ function mapToolCall(row) {
   };
 }
 
+function parseJson(value, fallback = {}) {
+  if (!value) return fallback;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+function mapActivity(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    conversationId: row.conversation_id,
+    type: row.activity_type,
+    status: row.status,
+    phase: row.phase,
+    title: row.title,
+    goal: row.goal || '',
+    learnerColor: row.learner_color,
+    mentorColor: row.mentor_color,
+    sourceId: row.source_id || null,
+    startFen: row.start_fen,
+    startRevision: Number(row.start_revision),
+    boardRevision: Number(row.board_revision),
+    stepIndex: Number(row.step_index),
+    totalSteps: Number(row.total_steps),
+    attempts: Number(row.attempts),
+    hints: Number(row.hints),
+    generation: Number(row.generation),
+    leaseOwner: row.lease_owner || null,
+    leaseExpiresAt: row.lease_expires_at || null,
+    pendingRequestId: row.pending_request_id || null,
+    predictionPrompt: row.prediction_prompt || null,
+    config: parseJson(row.config_json),
+    state: parseJson(row.state_json),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    completedAt: row.completed_at || null
+  };
+}
+
+function mapActivityEvent(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    activityId: row.activity_id,
+    conversationId: row.conversation_id,
+    sequence: Number(row.sequence),
+    type: row.event_type,
+    payload: parseJson(row.payload_json),
+    createdAt: row.created_at
+  };
+}
+
 function mapAnnotations(row, revision = 0) {
   if (!row || Number(row.position_revision) !== Number(revision)) {
     return { highlights: [], arrows: [] };
@@ -124,6 +179,7 @@ class MentorStore {
     this.migrate();
     this.recoverInterruptedMessages();
     this.recoverInterruptedToolCalls();
+    this.recoverInterruptedActivities();
   }
 
   migrate() {
@@ -236,6 +292,67 @@ class MentorStore {
           updated_at INTEGER NOT NULL
         );
       `
+    }, {
+      version: 4,
+      sql: `
+        CREATE TABLE mentor_activities (
+          id TEXT PRIMARY KEY,
+          conversation_id TEXT NOT NULL REFERENCES mentor_conversations(id) ON DELETE CASCADE,
+          activity_type TEXT NOT NULL CHECK(activity_type IN ('practice_game', 'opening_drill', 'puzzle', 'guided_lesson')),
+          status TEXT NOT NULL CHECK(status IN ('active', 'paused', 'complete', 'cancelled')),
+          phase TEXT NOT NULL CHECK(phase IN ('learner_turn', 'mentor_turn', 'mentor_thinking', 'awaiting_prediction', 'paused', 'complete', 'game_over')),
+          title TEXT NOT NULL,
+          goal TEXT NOT NULL DEFAULT '',
+          learner_color TEXT NOT NULL CHECK(learner_color IN ('white', 'black')),
+          mentor_color TEXT NOT NULL CHECK(mentor_color IN ('white', 'black')),
+          source_id TEXT,
+          start_fen TEXT NOT NULL,
+          start_revision INTEGER NOT NULL,
+          board_revision INTEGER NOT NULL,
+          step_index INTEGER NOT NULL DEFAULT 0,
+          total_steps INTEGER NOT NULL DEFAULT 0,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          hints INTEGER NOT NULL DEFAULT 0,
+          generation INTEGER NOT NULL DEFAULT 1,
+          pending_request_id TEXT,
+          prediction_prompt TEXT,
+          config_json TEXT NOT NULL DEFAULT '{}',
+          state_json TEXT NOT NULL DEFAULT '{}',
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          completed_at INTEGER
+        );
+
+        CREATE UNIQUE INDEX mentor_activities_one_active
+          ON mentor_activities(conversation_id)
+          WHERE status IN ('active', 'paused');
+
+        CREATE INDEX mentor_activities_conversation_updated
+          ON mentor_activities(conversation_id, updated_at DESC);
+
+        CREATE TABLE mentor_activity_events (
+          id TEXT PRIMARY KEY,
+          activity_id TEXT NOT NULL REFERENCES mentor_activities(id) ON DELETE CASCADE,
+          conversation_id TEXT NOT NULL REFERENCES mentor_conversations(id) ON DELETE CASCADE,
+          sequence INTEGER NOT NULL,
+          event_type TEXT NOT NULL,
+          payload_json TEXT NOT NULL DEFAULT '{}',
+          created_at INTEGER NOT NULL,
+          UNIQUE(activity_id, sequence)
+        );
+
+        CREATE INDEX mentor_activity_events_activity_sequence
+          ON mentor_activity_events(activity_id, sequence);
+      `
+    }, {
+      version: 5,
+      sql: `
+        ALTER TABLE mentor_activities ADD COLUMN lease_owner TEXT;
+        ALTER TABLE mentor_activities ADD COLUMN lease_expires_at INTEGER;
+
+        CREATE INDEX mentor_activities_lease
+          ON mentor_activities(status, phase, lease_expires_at);
+      `
     }];
 
     const applied = new Set(
@@ -275,6 +392,17 @@ class MentorStore {
           error_text = 'Tool execution was interrupted by a backend restart.',
           updated_at = ?
       WHERE status IN ('pending', 'running')
+    `).run(timestamp).changes;
+  }
+
+  recoverInterruptedActivities() {
+    const timestamp = this.now();
+    return this.db.prepare(`
+      UPDATE mentor_activities
+      SET phase = 'mentor_turn', pending_request_id = NULL,
+          generation = generation + 1, lease_owner = NULL,
+          lease_expires_at = NULL, updated_at = ?
+      WHERE status = 'active' AND phase = 'mentor_thinking'
     `).run(timestamp).changes;
   }
 
@@ -409,7 +537,7 @@ class MentorStore {
 
     const conversation = this.getConversation(conversationId);
     if (!conversation) return null;
-    if (!['text', 'voice'].includes(kind)) {
+    if (!['text', 'voice', 'activity'].includes(kind)) {
       throw new Error(`Unsupported mentor message kind: ${kind}`);
     }
     if (!['pending', 'streaming', 'complete', 'failed', 'cancelled'].includes(assistantStatus)) {
@@ -542,6 +670,14 @@ class MentorStore {
     `).all(conversationId).map(mapToolCall);
   }
 
+  listToolCallsForRequest(conversationId, requestId) {
+    return this.db.prepare(`
+      SELECT * FROM mentor_tool_calls
+      WHERE conversation_id = ? AND request_id = ?
+      ORDER BY ordinal ASC, created_at ASC
+    `).all(conversationId, requestId).map(mapToolCall);
+  }
+
   updateToolCall(id, patch = {}) {
     const current = this.getToolCall(id);
     if (!current) return null;
@@ -601,6 +737,171 @@ class MentorStore {
       this.now()
     );
     return { status: 'committed' };
+  }
+
+  createActivity({
+    conversationId,
+    type,
+    title,
+    goal = '',
+    learnerColor,
+    mentorColor,
+    sourceId = null,
+    startFen,
+    startRevision,
+    boardRevision = startRevision,
+    phase,
+    totalSteps = 0,
+    config = {},
+    state = {}
+  }) {
+    if (this.getActiveActivity(conversationId)) {
+      const error = new Error('This conversation already has an active mentor activity.');
+      error.code = 'activity_already_active';
+      throw error;
+    }
+    const id = this.createId();
+    const timestamp = this.now();
+    this.db.prepare(`
+      INSERT INTO mentor_activities(
+        id, conversation_id, activity_type, status, phase, title, goal,
+        learner_color, mentor_color, source_id, start_fen, start_revision,
+        board_revision, total_steps, config_json, state_json, created_at, updated_at
+      ) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      conversationId,
+      type,
+      phase,
+      title,
+      goal,
+      learnerColor,
+      mentorColor,
+      sourceId,
+      startFen,
+      startRevision,
+      boardRevision,
+      totalSteps,
+      JSON.stringify(config || {}),
+      JSON.stringify(state || {}),
+      timestamp,
+      timestamp
+    );
+    const activity = this.getActivity(id);
+    this.appendActivityEvent(id, conversationId, 'started', { phase, boardRevision });
+    return activity;
+  }
+
+  getActivity(id) {
+    return mapActivity(this.db.prepare('SELECT * FROM mentor_activities WHERE id = ?').get(id));
+  }
+
+  getActiveActivity(conversationId) {
+    return mapActivity(this.db.prepare(`
+      SELECT * FROM mentor_activities
+      WHERE conversation_id = ? AND status IN ('active', 'paused')
+      ORDER BY updated_at DESC LIMIT 1
+    `).get(conversationId));
+  }
+
+  listActivities(conversationId) {
+    return this.db.prepare(`
+      SELECT * FROM mentor_activities WHERE conversation_id = ?
+      ORDER BY created_at ASC
+    `).all(conversationId).map(mapActivity);
+  }
+
+  updateActivity(id, patch = {}) {
+    const current = this.getActivity(id);
+    if (!current) return null;
+    const next = {
+      status: patch.status || current.status,
+      phase: patch.phase || current.phase,
+      boardRevision: Number.isInteger(patch.boardRevision) ? patch.boardRevision : current.boardRevision,
+      stepIndex: Number.isInteger(patch.stepIndex) ? patch.stepIndex : current.stepIndex,
+      totalSteps: Number.isInteger(patch.totalSteps) ? patch.totalSteps : current.totalSteps,
+      attempts: Number.isInteger(patch.attempts) ? patch.attempts : current.attempts,
+      hints: Number.isInteger(patch.hints) ? patch.hints : current.hints,
+      generation: Number.isInteger(patch.generation) ? patch.generation : current.generation,
+      pendingRequestId: Object.prototype.hasOwnProperty.call(patch, 'pendingRequestId')
+        ? patch.pendingRequestId
+        : current.pendingRequestId,
+      predictionPrompt: Object.prototype.hasOwnProperty.call(patch, 'predictionPrompt')
+        ? patch.predictionPrompt
+        : current.predictionPrompt,
+      config: Object.prototype.hasOwnProperty.call(patch, 'config') ? patch.config : current.config,
+      state: Object.prototype.hasOwnProperty.call(patch, 'state') ? patch.state : current.state,
+      completedAt: Object.prototype.hasOwnProperty.call(patch, 'completedAt')
+        ? patch.completedAt
+        : current.completedAt
+    };
+    this.db.prepare(`
+      UPDATE mentor_activities
+      SET status = ?, phase = ?, board_revision = ?, step_index = ?, total_steps = ?,
+          attempts = ?, hints = ?, generation = ?, pending_request_id = ?,
+          prediction_prompt = ?, config_json = ?, state_json = ?, completed_at = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      next.status,
+      next.phase,
+      next.boardRevision,
+      next.stepIndex,
+      next.totalSteps,
+      next.attempts,
+      next.hints,
+      next.generation,
+      next.pendingRequestId,
+      next.predictionPrompt,
+      JSON.stringify(next.config || {}),
+      JSON.stringify(next.state || {}),
+      next.completedAt,
+      this.now(),
+      id
+    );
+    return this.getActivity(id);
+  }
+
+  claimActivityLease(id, owner, ttlMs = 90000) {
+    const timestamp = this.now();
+    const expiresAt = timestamp + Math.max(1000, Number(ttlMs) || 90000);
+    const result = this.db.prepare(`
+      UPDATE mentor_activities
+      SET lease_owner = ?, lease_expires_at = ?, updated_at = ?
+      WHERE id = ? AND status = 'active'
+        AND (lease_owner IS NULL OR lease_expires_at <= ? OR lease_owner = ?)
+    `).run(owner, expiresAt, timestamp, id, timestamp, owner);
+    return result.changes === 1 ? this.getActivity(id) : null;
+  }
+
+  releaseActivityLease(id, owner) {
+    const result = this.db.prepare(`
+      UPDATE mentor_activities
+      SET lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
+      WHERE id = ? AND lease_owner = ?
+    `).run(this.now(), id, owner);
+    return result.changes === 1;
+  }
+
+  appendActivityEvent(activityId, conversationId, type, payload = {}) {
+    const sequence = Number(this.db.prepare(`
+      SELECT COALESCE(max(sequence), 0) + 1 AS next_sequence
+      FROM mentor_activity_events WHERE activity_id = ?
+    `).get(activityId).next_sequence);
+    const id = this.createId();
+    this.db.prepare(`
+      INSERT INTO mentor_activity_events(
+        id, activity_id, conversation_id, sequence, event_type, payload_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(id, activityId, conversationId, sequence, type, JSON.stringify(payload || {}), this.now());
+    return mapActivityEvent(this.db.prepare(
+      'SELECT * FROM mentor_activity_events WHERE id = ?'
+    ).get(id));
+  }
+
+  listActivityEvents(activityId) {
+    return this.db.prepare(`
+      SELECT * FROM mentor_activity_events WHERE activity_id = ? ORDER BY sequence ASC
+    `).all(activityId).map(mapActivityEvent);
   }
 
   touchConversation(conversationId) {

@@ -112,6 +112,41 @@ const TOOL_DECLARATIONS = [{
     required: ['highlights', 'arrows'],
     additionalProperties: false
   }
+}, {
+  name: 'get_activity_state',
+  description: 'Read the current structured lesson or practice activity state for this conversation.',
+  parametersJsonSchema: { type: 'object', properties: {}, additionalProperties: false }
+}, {
+  name: 'start_activity',
+  description: 'Start a confirmed mentor activity. Only call after the learner explicitly agrees to start.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      type: { type: 'string', enum: ['practice_game', 'opening_drill', 'puzzle', 'guided_lesson'] },
+      learnerColor: { type: 'string', enum: ['white', 'black'] },
+      startFrom: { type: 'string', enum: ['standard', 'current'] },
+      sourceId: { type: 'string' }
+    },
+    required: ['type'],
+    additionalProperties: false
+  }
+}, {
+  name: 'request_prediction',
+  description: 'Pause an active mentor turn and visibly ask the learner to predict the opponent move.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: { prompt: { type: 'string' } },
+    required: ['prompt'],
+    additionalProperties: false
+  }
+}, {
+  name: 'request_hint',
+  description: 'Advance to the next hint for the active opening, puzzle, or guided lesson.',
+  parametersJsonSchema: { type: 'object', properties: {}, additionalProperties: false }
+}, {
+  name: 'end_activity',
+  description: 'End the current mentor activity while preserving the current board position.',
+  parametersJsonSchema: { type: 'object', properties: {}, additionalProperties: false }
 }];
 
 function makeAbortError(message = 'Mentor tool execution was cancelled.') {
@@ -156,10 +191,11 @@ function progressTotalFor(name, args) {
 }
 
 class MentorToolService {
-  constructor({ store, chessService, analysisService = null, emit = () => {}, emitBoardUpdate = () => {}, delay = waitWithSignal }) {
+  constructor({ store, chessService, analysisService = null, activityService = null, emit = () => {}, emitBoardUpdate = () => {}, delay = waitWithSignal }) {
     this.store = store;
     this.chessService = chessService;
     this.analysisService = analysisService;
+    this.activityService = activityService;
     this.emit = emit;
     this.emitBoardUpdate = emitBoardUpdate;
     this.delay = delay;
@@ -168,6 +204,10 @@ class MentorToolService {
 
   declarations() {
     return TOOL_DECLARATIONS;
+  }
+
+  setActivityService(activityService) {
+    this.activityService = activityService;
   }
 
   publish(conversationId, event, toolCall) {
@@ -235,8 +275,10 @@ class MentorToolService {
     });
     try {
       if (signal?.aborted) throw makeAbortError();
+      this.activityService?.validateTool(conversationId, requestId, name, args);
       const result = await this.runTool(name, args, {
         conversationId,
+        requestId,
         toolCall,
         signal,
         onProgress: (progressCurrent, progressTotal) => {
@@ -282,10 +324,55 @@ class MentorToolService {
   }
 
   async runTool(name, args, context) {
-    const { conversationId, toolCall, signal, onProgress } = context;
+    const { conversationId, requestId, toolCall, signal, onProgress } = context;
     if (name === 'get_board_state') {
       onProgress(1, 1);
       return compactBoardState(this.chessService.getState(conversationId));
+    }
+
+    if (name === 'get_activity_state') {
+      onProgress(1, 1);
+      return this.activityService?.get(conversationId) || null;
+    }
+
+    if (name === 'start_activity') {
+      if (!this.activityService) throw new Error('Mentor activities are unavailable.');
+      if (args.type !== 'practice_game') {
+        throw new Error(`${args.type} requires a catalog or validated proposal.`);
+      }
+      const state = this.chessService.getState(conversationId);
+      const activity = this.activityService.startPractice(conversationId, {
+        learnerColor: args.learnerColor || 'white',
+        startFrom: args.startFrom || 'standard',
+        expectedRevision: state.revision,
+        requestId
+      });
+      onProgress(1, 1);
+      return { activity, board: compactBoardState(this.chessService.getState(conversationId)) };
+    }
+
+    if (name === 'request_prediction') {
+      if (!this.activityService) throw new Error('Mentor activities are unavailable.');
+      const activity = this.activityService.requestPrediction(conversationId, {
+        requestId,
+        prompt: args.prompt
+      });
+      onProgress(1, 1);
+      return { activity };
+    }
+
+    if (name === 'request_hint') {
+      if (!this.activityService?.requestHint) throw new Error('Hints are unavailable for this activity.');
+      const result = this.activityService.requestHint(conversationId);
+      onProgress(1, 1);
+      return result;
+    }
+
+    if (name === 'end_activity') {
+      if (!this.activityService) throw new Error('Mentor activities are unavailable.');
+      const activity = this.activityService.end(conversationId, 'mentor_ended');
+      onProgress(1, 1);
+      return { activity };
     }
 
     if (name === 'analyze_position') {
@@ -317,9 +404,12 @@ class MentorToolService {
       const result = this.chessService.move(conversationId, {
         uci: args.uci,
         expectedRevision: state.revision,
-        actionId
+        actionId,
+        actor: this.activityService?.get(conversationId) ? 'mentor' : 'unknown',
+        activityId: this.activityService?.get(conversationId)?.id || null
       });
       this.boardUpdate(conversationId, result, actionId);
+      this.activityService?.mentorMoveCommitted(conversationId, requestId, result);
       onProgress(1, 1);
       return { move: result.state.history.at(-1), board: compactBoardState(result.state) };
     }

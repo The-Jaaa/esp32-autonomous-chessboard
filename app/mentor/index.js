@@ -5,6 +5,7 @@ const { MentorChessService } = require('./chess-service');
 const { MentorToolService } = require('./tool-service');
 const { MentorEngineService } = require('./engine-service');
 const { MentorAnalysisService } = require('./analysis-service');
+const { MentorActivityService } = require('./activity-service');
 const {
   DEFAULT_LIVE_MODEL,
   DEFAULT_LIVE_VOICE,
@@ -49,6 +50,7 @@ function createMentorFeature({
   };
 
   let liveService;
+  let activityService;
   const emitBoardUpdate = (conversationId, result) => {
     io.to(roomName(conversationId)).emit('mentor-board-updated', {
       conversationId,
@@ -67,10 +69,19 @@ function createMentorFeature({
     emit,
     emitBoardUpdate
   });
+  activityService = new MentorActivityService({
+    store,
+    chessService,
+    analysisService: mentorAnalysis,
+    emit,
+    emitBoardUpdate
+  });
+  toolService.setActivityService(activityService);
   const service = new MentorService({
     store,
     provider: textProvider,
     toolService,
+    activityService,
     contextProvider: (conversationId) => chessService.promptContext(conversationId),
     emit
   });
@@ -82,16 +93,25 @@ function createMentorFeature({
     chessService,
     textService: service,
     toolService,
+    activityService,
     connector,
     emit,
     model: liveModel,
     voiceName: liveVoice
+  });
+  activityService.setRunners({
+    isLiveActive: (conversationId) => liveService.isConversationActive(conversationId),
+    text: ({ conversationId, requestId, displayText, prompt }) =>
+      service.submitActivityTurn(conversationId, { requestId, displayText, prompt }),
+    live: ({ conversationId, requestId, displayText, prompt }) =>
+      liveService.requestActivityTurn(conversationId, { requestId, displayText, prompt })
   });
 
   app.use('/api/mentor', createMentorRouter({
     store,
     service,
     chessService,
+    activityService,
     liveService,
     emitBoardUpdate
   }));
@@ -106,6 +126,7 @@ function createMentorFeature({
         if (room.startsWith('mentor:')) socket.leave(room);
       }
       socket.join(roomName(conversationId));
+      activityService.reconcile(conversationId, { resumeMentorTurn: true });
       acknowledge({ success: true, conversationId });
     });
 
@@ -124,6 +145,7 @@ function createMentorFeature({
     store,
     service,
     chessService,
+    activityService,
     toolService,
     analysisService: mentorAnalysis,
     engineService: mentorEngine,

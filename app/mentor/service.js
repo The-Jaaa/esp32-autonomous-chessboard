@@ -12,10 +12,11 @@ function validateMessageText(text) {
 const MAX_TOOL_CALLS = 12;
 
 class MentorService {
-  constructor({ store, provider, toolService = null, contextProvider = null, emit = () => {}, logger = console }) {
+  constructor({ store, provider, toolService = null, activityService = null, contextProvider = null, emit = () => {}, logger = console }) {
     this.store = store;
     this.provider = provider;
     this.toolService = toolService;
+    this.activityService = activityService;
     this.contextProvider = contextProvider;
     this.emit = emit;
     this.logger = logger;
@@ -31,7 +32,7 @@ class MentorService {
     return [...this.active.keys()].some((key) => key.startsWith(prefix));
   }
 
-  submitMessage(conversationId, { requestId, text }) {
+  submitMessage(conversationId, { requestId, text }, internal = {}) {
     if (!validateRequestId(requestId)) {
       const error = new Error('requestId must contain 1-128 letters, numbers, dots, colons, dashes, or underscores.');
       error.statusCode = 400;
@@ -42,10 +43,14 @@ class MentorService {
       error.statusCode = 400;
       throw error;
     }
+    if (!internal.skipActivityPreparation) {
+      this.activityService?.prepareConversationTurn(conversationId, requestId);
+    }
 
     const pair = this.store.createMessagePair(conversationId, {
       requestId,
-      text: text.trim()
+      text: text.trim(),
+      kind: internal.kind || 'text'
     });
     if (!pair) {
       const error = new Error('Conversation not found.');
@@ -59,10 +64,19 @@ class MentorService {
       const active = {
         controller,
         assistantMessageId: pair.assistantMessage.id,
-        cancellationEmitted: false
+        cancellationEmitted: false,
+        promptOverride: internal.promptOverride || null,
+        resolveCompletion: null,
+        completion: null
       };
+      active.completion = new Promise((resolve) => { active.resolveCompletion = resolve; });
       this.active.set(activeKey, active);
       queueMicrotask(() => this.runStream(conversationId, requestId, pair.assistantMessage, active));
+      pair.completion = active.completion;
+    } else if (this.active.has(activeKey)) {
+      pair.completion = this.active.get(activeKey).completion;
+    } else {
+      pair.completion = Promise.resolve(pair.assistantMessage);
     }
 
     return pair;
@@ -79,8 +93,14 @@ class MentorService {
     });
 
     try {
-      const messages = this.store.contextMessages(conversationId, 24000)
+      let messages = this.store.contextMessages(conversationId, 24000)
         .filter((message) => message.content);
+      if (active.promptOverride && messages.length) {
+        messages = [
+          ...messages.slice(0, -1),
+          { ...messages.at(-1), content: active.promptOverride }
+        ];
+      }
       const chessContext = this.contextProvider ? this.contextProvider(conversationId) : null;
       let toolOrdinal = 0;
       for await (const delta of this.provider.stream({
@@ -146,8 +166,20 @@ class MentorService {
         });
       }
     } finally {
+      active.resolveCompletion?.(this.store.getMessage(assistantMessage.id));
       this.active.delete(activeKey);
     }
+  }
+
+  submitActivityTurn(conversationId, { requestId, displayText, prompt }) {
+    return this.submitMessage(conversationId, {
+      requestId,
+      text: displayText
+    }, {
+      kind: 'activity',
+      promptOverride: prompt,
+      skipActivityPreparation: true
+    });
   }
 
   emitCancellation(conversationId, requestId, active) {

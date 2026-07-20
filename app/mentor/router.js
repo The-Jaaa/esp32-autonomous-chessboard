@@ -4,7 +4,7 @@ function asyncRoute(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
 }
 
-function createMentorRouter({ store, service, chessService, liveService, emitBoardUpdate = () => {} }) {
+function createMentorRouter({ store, service, chessService, activityService, liveService, emitBoardUpdate = () => {} }) {
   const router = express.Router();
   const withToolCalls = (conversation) => {
     const toolCalls = store.listToolCalls(conversation.id);
@@ -32,7 +32,8 @@ function createMentorRouter({ store, service, chessService, liveService, emitBoa
       conversation: {
         ...conversation,
         messages: [],
-        chess: chessService.getState(conversation.id)
+        chess: chessService.getState(conversation.id),
+        activity: activityService?.get(conversation.id) || null
       }
     });
   });
@@ -43,7 +44,8 @@ function createMentorRouter({ store, service, chessService, liveService, emitBoa
     return res.json({
       conversation: {
         ...withToolCalls(conversation),
-        chess: chessService.getState(conversation.id)
+        chess: chessService.getState(conversation.id),
+        activity: activityService?.get(conversation.id) || null
       }
     });
   });
@@ -91,17 +93,76 @@ function createMentorRouter({ store, service, chessService, liveService, emitBoa
     }
   };
 
-  router.post('/conversations/:id/moves', commitBoardAction((req) =>
-    chessService.move(req.params.id, req.body || {})));
+  router.post('/conversations/:id/moves', (req, res, next) => {
+    try {
+      const active = activityService?.validateLearnerMove(req.params.id, req.body || {});
+      const result = chessService.move(req.params.id, {
+        ...(req.body || {}),
+        actor: active ? 'learner' : 'unknown',
+        activityId: active?.id || null
+      });
+      activityService?.learnerMoveCommitted(req.params.id, result);
+      emitBoardUpdate(req.params.id, result);
+      return res.json(result);
+    } catch (error) {
+      return next(error);
+    }
+  });
 
-  router.put('/conversations/:id/position', commitBoardAction((req) =>
-    chessService.setPosition(req.params.id, req.body || {})));
+  router.put('/conversations/:id/position', commitBoardAction((req) => {
+    activityService?.assertBoardSetupAllowed(req.params.id);
+    return chessService.setPosition(req.params.id, req.body || {});
+  }));
 
-  router.post('/conversations/:id/reset', commitBoardAction((req) =>
-    chessService.reset(req.params.id, req.body || {})));
+  router.post('/conversations/:id/reset', commitBoardAction((req) => {
+    activityService?.assertBoardSetupAllowed(req.params.id);
+    return chessService.reset(req.params.id, req.body || {});
+  }));
 
   router.patch('/conversations/:id/board', commitBoardAction((req) =>
     chessService.setOrientation(req.params.id, req.body || {})));
+
+  router.post('/conversations/:id/activities', (req, res, next) => {
+    try {
+      if (req.body?.type !== 'practice_game') {
+        return res.status(400).json({ error: 'This activity requires a catalog item or validated proposal.' });
+      }
+      const activity = activityService.startPractice(req.params.id, req.body || {});
+      return res.status(201).json({ activity, state: chessService.getState(req.params.id) });
+    } catch (error) {
+      return next(error);
+    }
+  });
+
+  router.post('/conversations/:id/activities/:activityId/pause', (req, res, next) => {
+    try {
+      const activity = activityService.get(req.params.id);
+      if (!activity || activity.id !== req.params.activityId) return res.status(404).json({ error: 'Activity not found.' });
+      return res.json({ activity: activityService.pause(req.params.id) });
+    } catch (error) {
+      return next(error);
+    }
+  });
+
+  router.post('/conversations/:id/activities/:activityId/resume', (req, res, next) => {
+    try {
+      const activity = activityService.get(req.params.id);
+      if (!activity || activity.id !== req.params.activityId) return res.status(404).json({ error: 'Activity not found.' });
+      return res.json({ activity: activityService.resume(req.params.id) });
+    } catch (error) {
+      return next(error);
+    }
+  });
+
+  router.post('/conversations/:id/activities/:activityId/end', (req, res, next) => {
+    try {
+      const activity = activityService.get(req.params.id);
+      if (!activity || activity.id !== req.params.activityId) return res.status(404).json({ error: 'Activity not found.' });
+      return res.json({ activity: activityService.end(req.params.id) });
+    } catch (error) {
+      return next(error);
+    }
+  });
 
   router.use((error, req, res, next) => {
     if (res.headersSent) return next(error);

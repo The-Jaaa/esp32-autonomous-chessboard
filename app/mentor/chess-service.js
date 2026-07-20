@@ -209,7 +209,7 @@ class MentorChessService {
     };
   }
 
-  move(conversationId, { uci, expectedRevision, actionId }) {
+  move(conversationId, { uci, expectedRevision, actionId, actor = 'unknown', activityId = null }) {
     const revision = requireRevision(expectedRevision);
     const normalizedAction = normalizeActionId(actionId);
     const duplicate = this.store.getBoardEventByAction(conversationId, normalizedAction);
@@ -244,14 +244,16 @@ class MentorChessService {
         san: move.san,
         from: move.from,
         to: move.to,
-        promotion: move.promotion || null
+        promotion: move.promotion || null,
+        actor,
+        activityId
       },
       before,
       game: reconstructed.game
     });
   }
 
-  setPosition(conversationId, { fen, expectedRevision, actionId }) {
+  setPosition(conversationId, { fen, expectedRevision, actionId, actor = 'unknown', activityId = null }) {
     const revision = requireRevision(expectedRevision);
     const normalizedAction = normalizeActionId(actionId);
     const duplicate = this.store.getBoardEventByAction(conversationId, normalizedAction);
@@ -267,13 +269,13 @@ class MentorChessService {
       expectedRevision: revision,
       eventType: 'set_position',
       actionId: normalizedAction,
-      payload: { fen: normalizedFen },
+      payload: { fen: normalizedFen, actor, activityId },
       before,
       game: reconstructed.game
     });
   }
 
-  reset(conversationId, { expectedRevision, actionId }) {
+  reset(conversationId, { expectedRevision, actionId, actor = 'unknown', activityId = null }) {
     const revision = requireRevision(expectedRevision);
     const normalizedAction = normalizeActionId(actionId);
     const duplicate = this.store.getBoardEventByAction(conversationId, normalizedAction);
@@ -288,7 +290,7 @@ class MentorChessService {
       expectedRevision: revision,
       eventType: 'reset',
       actionId: normalizedAction,
-      payload: {},
+      payload: { actor, activityId },
       before,
       game: reconstructed.game
     });

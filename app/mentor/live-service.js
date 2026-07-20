@@ -28,6 +28,9 @@ const LIVE_SYSTEM_INSTRUCTION = [
   'Use the supplied conversation and chess workspace context to continue the same lesson.',
   'The user may speak or type and may interrupt you while you are speaking.',
   'Use the available virtual-board tools proactively when a visual example will improve the lesson.',
+  'Start a structured activity only after the learner explicitly agrees.',
+  'During an assigned activity turn, analyze first and then make exactly one mentor move, unless you explicitly request a prediction.',
+  'Do not leave an assigned mentor turn at analysis alone.',
   'Use Stockfish analysis tools before making objective claims about evaluations, best moves, tactics, or move quality.',
   'Never claim that a tool succeeded until its function response confirms success.',
   'These tools affect only the conversation workspace. Never imply that they control the physical chessboard.',
@@ -288,6 +291,7 @@ class MentorLiveService {
     chessService,
     textService,
     toolService,
+    activityService = null,
     connector,
     emit = () => {},
     model = DEFAULT_LIVE_MODEL,
@@ -299,6 +303,7 @@ class MentorLiveService {
     this.chessService = chessService;
     this.textService = textService;
     this.toolService = toolService;
+    this.activityService = activityService;
     this.connector = connector;
     this.emit = emit;
     this.model = model;
@@ -473,6 +478,7 @@ class MentorLiveService {
     if (!validateMessageText(payload.text)) {
       throw liveError('Message text must contain 1-8000 characters.', 'mentor_live_invalid_text');
     }
+    this.activityService?.prepareConversationTurn(record.conversationId, payload.requestId);
     const existing = this.store.getRequestMessages(record.conversationId, payload.requestId);
     if (existing.length) {
       return {
@@ -518,7 +524,7 @@ class MentorLiveService {
   }
 
   createTurn(record, values) {
-    return {
+    const turn = {
       turnId: values.turnId || this.createId(),
       requestId: values.requestId,
       source: values.source,
@@ -538,8 +544,12 @@ class MentorLiveService {
       cancelled: false,
       placeholderTitle: null,
       shellEmitted: values.shellEmitted === true,
-      record
+      record,
+      resolveCompletion: null,
+      completion: null
     };
+    turn.completion = new Promise((resolve) => { turn.resolveCompletion = resolve; });
+    return turn;
   }
 
   createAudioTurn(record) {
@@ -582,7 +592,7 @@ class MentorLiveService {
       turn.pair = this.store.createMessagePair(record.conversationId, {
         requestId: turn.requestId,
         text: userText,
-        kind: 'voice',
+        kind: turn.source === 'activity' ? 'activity' : 'voice',
         assistantContent: turn.assistantText,
         assistantStatus: 'streaming'
       });
@@ -642,10 +652,12 @@ class MentorLiveService {
     if (record.closing) return;
     if (record.turn && !record.turn.toolBusy
       && !(record.turn.source === 'audio' && record.turn.hadTools)
-      && (record.turn.source === 'text' || record.turn.source === 'context' || record.turn.assistantText)) {
+      && (record.turn.source === 'text' || record.turn.source === 'activity'
+        || record.turn.source === 'context' || record.turn.assistantText)) {
       this.finalizeTurn(record, 'cancelled');
     }
     const turn = this.currentTurn(record);
+    this.activityService?.prepareConversationTurn(record.conversationId, turn.requestId);
     turn.userText = mergeTranscript(turn.userText, text);
     const message = this.updateTurnUserMessage(record, turn);
     this.emit(record.conversationId, 'mentor-live-user-transcript', {
@@ -921,6 +933,7 @@ class MentorLiveService {
     record.contextPending = false;
 
     if (turn.source === 'context') {
+      turn.resolveCompletion?.(null);
       this.flushBoardContext(record);
       return null;
     }
@@ -963,8 +976,52 @@ class MentorLiveService {
       message: pair.assistantMessage,
       conversation
     });
+    turn.resolveCompletion?.({ status: assistantStatus, ...pair });
     this.flushBoardContext(record);
     return pair;
+  }
+
+  requestActivityTurn(conversationId, { requestId, displayText, prompt }) {
+    const record = this.byConversation.get(conversationId);
+    if (!record || record.closing || !record.ready) return null;
+    if (record.turn || this.hasActiveTools(conversationId)) {
+      const error = new Error('The Live mentor is already handling another turn.');
+      error.code = 'mentor_live_busy';
+      throw error;
+    }
+    const pair = this.store.createMessagePair(conversationId, {
+      requestId,
+      text: displayText,
+      kind: 'activity'
+    });
+    const turn = this.createTurn(record, {
+      turnId: this.createId(),
+      requestId,
+      source: 'activity',
+      userText: displayText,
+      assistantText: '',
+      pair
+    });
+    record.contextPending = false;
+    record.turn = turn;
+    this.emit(conversationId, 'mentor-live-user-transcript', {
+      ...this.statusPayload(record, 'listening'),
+      turnId: turn.turnId,
+      text: displayText,
+      isFinal: true,
+      message: pair.userMessage
+    });
+    this.emit(conversationId, 'mentor-live-assistant-transcript', {
+      ...this.statusPayload(record, 'thinking'),
+      turnId: turn.turnId,
+      text: '',
+      isFinal: false,
+      message: pair.assistantMessage
+    });
+    turn.shellEmitted = true;
+    record.providerSession.sendRealtimeInput({ text: prompt });
+    this.emitStatus(record, 'thinking');
+    return { ...pair, completion: turn.completion, sessionId: record.sessionId };
   }
 
   notifyBoardUpdated(conversationId, state, { actionId = null } = {}) {
