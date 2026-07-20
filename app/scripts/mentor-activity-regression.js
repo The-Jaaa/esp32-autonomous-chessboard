@@ -125,6 +125,9 @@ async function guaranteedFallbackRegression() {
   assert.strictEqual(activity.events.filter((event) => event.type === 'mentor_turn_corrective').length, 1);
   assert.strictEqual(activity.events.filter((event) => event.type === 'engine_fallback_move').length, 1);
   assert.strictEqual(harness.store.listMessages(conversation.id).filter((message) => message.kind === 'activity').length, 4);
+  const fallbackCard = harness.store.listToolCalls(conversation.id).find((call) => call.name === 'engine_fallback');
+  assert.strictEqual(fallbackCard.status, 'complete');
+  assert.strictEqual(fallbackCard.result.move.uci, 'e7e5');
   harness.store.close();
 }
 
@@ -241,8 +244,40 @@ function restartRecoveryRegression() {
   cleanup(temp.directory);
 }
 
+async function explicitConsentRegression() {
+  const harness = createHarness({ async *stream() { yield 'Ready.'; } });
+  const declined = harness.store.createConversation();
+  harness.store.createMessagePair(declined.id, {
+    requestId: 'ask-only', text: 'What is a practice game?'
+  });
+  await assert.rejects(
+    harness.toolService.runTool('start_activity', { type: 'practice_game' }, {
+      conversationId: declined.id,
+      requestId: 'ask-only',
+      signal: null,
+      onProgress: () => {}
+    }),
+    (error) => error.code === 'activity_confirmation_required'
+  );
+  const accepted = harness.store.createConversation();
+  harness.store.createMessagePair(accepted.id, {
+    requestId: 'confirmed', text: 'Yes, start a practice game.'
+  });
+  const result = await harness.toolService.runTool('start_activity', {
+    type: 'practice_game', learnerColor: 'white', startFrom: 'standard'
+  }, {
+    conversationId: accepted.id,
+    requestId: 'confirmed',
+    signal: null,
+    onProgress: () => {}
+  });
+  assert.strictEqual(result.activity.type, 'practice_game');
+  harness.store.close();
+}
+
 async function main() {
   restartRecoveryRegression();
+  await explicitConsentRegression();
   await guaranteedFallbackRegression();
   await teachingMoveRegression();
   await blackLearnerAndDuplicateTriggerRegression();

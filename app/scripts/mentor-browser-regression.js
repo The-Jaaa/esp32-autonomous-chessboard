@@ -213,6 +213,59 @@ async function runViewport(browser, viewport) {
   await expectText(page.locator('.mentor-move-list'), 'e4');
 
   await createNewConversation(page);
+  await page.getByRole('button', { name: 'Start activity' }).click();
+  await page.locator('.mentor-activity-dialog').waitFor({ state: 'visible' });
+  await page.getByRole('button', { name: 'Puzzle', exact: true }).click();
+  await page.getByLabel('Activity').selectOption('back-rank-mate');
+  await page.getByRole('button', { name: 'Start', exact: true }).click();
+  await expectText(page.locator('.mentor-activity-bar'), 'Your turn');
+  assert.strictEqual(await page.getByRole('button', { name: 'Reset board' }).isDisabled(), true);
+  await page.getByRole('button', { name: 'Request hint' }).click();
+  await expectText(page.locator('.mentor-notice'), 'Hint 1');
+  await dragSquare(page, 'e1', 'e7');
+  await expectText(page.locator('.mentor-error'), 'does not match this activity');
+  await expectText(page.locator('.mentor-move-list-header'), '0 plies');
+  await page.waitForTimeout(500);
+  await dragSquare(page, 'e1', 'e8');
+  await expectText(page.locator('.mentor-move-list'), 'Re8#');
+  await expectText(page.locator('.mentor-activity-bar'), 'Guided practice');
+
+  await page.locator('.mentor-board-tools').getByRole('button', { name: 'Learner profile' }).click();
+  await expectText(page.locator('.mentor-profile-dialog'), 'mate patterns');
+  await page.getByRole('button', { name: 'Intermediate', exact: true }).click();
+  await page.getByLabel('Goals').fill('Improve calculation\nLearn openings');
+  await page.getByRole('button', { name: 'Save profile' }).click();
+  await page.locator('.mentor-board-tools').getByRole('button', { name: 'Learner profile' }).click();
+  assert.strictEqual(await page.getByRole('button', { name: 'Intermediate', exact: true }).evaluate((element) => element.classList.contains('is-selected')), true);
+  assert.match(await page.getByLabel('Goals').inputValue(), /Improve calculation/);
+  await page.getByRole('button', { name: 'Close' }).click();
+
+  await page.getByRole('button', { name: 'Start activity' }).click();
+  await page.getByRole('button', { name: 'Start', exact: true }).click();
+  await expectText(page.locator('.mentor-activity-bar'), 'Your turn');
+  await page.getByRole('button', { name: 'Pause activity' }).click();
+  await expectText(page.locator('.mentor-activity-bar'), 'Paused');
+  await page.getByRole('button', { name: 'Resume activity' }).click();
+  await expectText(page.locator('.mentor-activity-bar'), 'Your turn');
+  await page.getByRole('button', { name: 'End activity' }).click();
+  await expectText(page.locator('.mentor-activity-bar'), 'Guided practice');
+
+  await page.getByRole('button', { name: 'Load FEN' }).click();
+  const promotionFen = '7k/P7/8/8/8/8/8/7K w - - 0 1';
+  await page.getByLabel('Forsyth-Edwards Notation').fill(promotionFen);
+  await page.getByRole('button', { name: 'Load position' }).click();
+  await page.waitForFunction(async (expectedFen) => {
+    const id = location.pathname.split('/').at(-1);
+    const detail = await fetch(`/api/mentor/conversations/${id}`).then((response) => response.json());
+    return detail.conversation?.chess?.fen === expectedFen;
+  }, promotionFen);
+  await page.waitForTimeout(500);
+  await dragSquare(page, 'a7', 'a8');
+  await page.locator('.mentor-promotion-dialog').waitFor({ state: 'visible' });
+  await page.getByRole('button', { name: 'Rook' }).click();
+  await expectText(page.locator('.mentor-move-list'), 'a8=R+');
+
+  await createNewConversation(page);
   await page.getByPlaceholder('Ask your chess mentor').fill('Run the browser tool demo.');
   const demoStarted = Date.now();
   await page.getByRole('button', { name: 'Send message' }).click();

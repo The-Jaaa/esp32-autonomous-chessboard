@@ -141,6 +141,7 @@ async function socketRegressions() {
   const second = await createConversation();
   const textBusy = await createConversation();
   const toolConversation = await createConversation();
+  const activityConversation = await createConversation();
   const client = createClient(baseUrl, { transports: ['websocket'] });
   const competingClient = createClient(baseUrl, { transports: ['websocket'] });
   await Promise.all([
@@ -519,6 +520,37 @@ async function socketRegressions() {
   await emitWithAck(client, 'mentor-live-stop', {
     conversationId: toolConversation.id,
     sessionId: toolStart.sessionId
+  });
+
+  await emitWithAck(client, 'mentor-subscribe', { conversationId: activityConversation.id });
+  const activityLive = await emitWithAck(client, 'mentor-live-start', { conversationId: activityConversation.id });
+  assert.strictEqual(activityLive.success, true);
+  const activityStart = await fetch(`${baseUrl}/api/mentor/conversations/${activityConversation.id}/activities`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'practice_game', learnerColor: 'white', startFrom: 'standard', expectedRevision: 0 })
+  });
+  assert.strictEqual(activityStart.status, 201);
+  const learnerMove = await fetch(`${baseUrl}/api/mentor/conversations/${activityConversation.id}/moves`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ uci: 'e2e4', expectedRevision: 0, actionId: 'live-activity-e4' })
+  });
+  assert.strictEqual(learnerMove.status, 200);
+  await waitForCondition(
+    () => feature.chessService.getState(activityConversation.id).history.length === 2,
+    'Live activity did not guarantee the opponent reply.',
+    5000
+  );
+  assert.strictEqual(feature.activityService.get(activityConversation.id).phase, 'learner_turn');
+  assert.strictEqual(feature.activityService.get(activityConversation.id).state.fallbackMoves, 1);
+  assert.strictEqual(
+    feature.store.listMessages(activityConversation.id).filter((message) => message.kind === 'activity').length,
+    4
+  );
+  await emitWithAck(client, 'mentor-live-stop', {
+    conversationId: activityConversation.id,
+    sessionId: activityLive.sessionId
   });
 
   await emitWithAck(client, 'mentor-subscribe', { conversationId: second.id });

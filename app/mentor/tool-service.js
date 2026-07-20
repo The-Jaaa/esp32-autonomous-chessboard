@@ -2,6 +2,16 @@ const { Chess } = require('chess.js');
 
 const MAX_LINE_PLIES = 24;
 const MOVE_PATTERN = /^[a-h][1-8][a-h][1-8][qrbn]?$/;
+const CUSTOM_ACTIVITY_PROPERTIES = {
+  type: { type: 'string', enum: ['opening_drill', 'puzzle', 'guided_lesson'] },
+  title: { type: 'string' },
+  goal: { type: 'string' },
+  topic: { type: 'string' },
+  learnerColor: { type: 'string', enum: ['white', 'black'] },
+  initialFen: { type: 'string' },
+  line: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 24 },
+  hints: { type: 'array', items: { type: 'string' }, maxItems: 3 }
+};
 
 const TOOL_DECLARATIONS = [{
   name: 'get_board_state',
@@ -126,7 +136,12 @@ const TOOL_DECLARATIONS = [{
       learnerColor: { type: 'string', enum: ['white', 'black'] },
       startFrom: { type: 'string', enum: ['standard', 'current'] },
       sourceId: { type: 'string' },
-      proposal: { type: 'object' }
+      proposal: {
+        type: 'object',
+        properties: CUSTOM_ACTIVITY_PROPERTIES,
+        required: ['type', 'title', 'goal', 'initialFen', 'line'],
+        additionalProperties: false
+      }
     },
     required: ['type'],
     additionalProperties: false
@@ -136,16 +151,7 @@ const TOOL_DECLARATIONS = [{
   description: 'Validate a custom opening drill, puzzle, or guided lesson without starting it. Ask the learner before starting the returned activity.',
   parametersJsonSchema: {
     type: 'object',
-    properties: {
-      type: { type: 'string', enum: ['opening_drill', 'puzzle', 'guided_lesson'] },
-      title: { type: 'string' },
-      goal: { type: 'string' },
-      topic: { type: 'string' },
-      learnerColor: { type: 'string', enum: ['white', 'black'] },
-      initialFen: { type: 'string' },
-      line: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 24 },
-      hints: { type: 'array', items: { type: 'string' }, maxItems: 3 }
-    },
+    properties: CUSTOM_ACTIVITY_PROPERTIES,
     required: ['type', 'title', 'goal', 'initialFen', 'line'],
     additionalProperties: false
   }
@@ -356,6 +362,7 @@ class MentorToolService {
 
     if (name === 'start_activity') {
       if (!this.activityService) throw new Error('Mentor activities are unavailable.');
+      this.activityService.assertExplicitStartConsent(conversationId, requestId);
       const state = this.chessService.getState(conversationId);
       const activity = await this.activityService.startActivity(conversationId, {
         type: args.type,

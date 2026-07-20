@@ -6,19 +6,27 @@ import {
   ArrowDown,
   ArrowUp,
   Bot,
+  BookOpen,
   Check,
   ChevronLeft,
   Ellipsis,
   Gauge,
+  GraduationCap,
+  Lightbulb,
   Mic,
   MicOff,
   LoaderCircle,
   Pencil,
+  Play,
   Plus,
+  Pause,
+  Puzzle,
   RefreshCcw,
   Repeat2,
   Search,
+  Settings2,
   Square,
+  Swords,
   Trash2,
   X
 } from 'lucide-react';
@@ -149,9 +157,187 @@ function toolLabel(toolCall) {
     load_position: 'Load teaching position',
     reset_board: 'Reset board',
     set_orientation: `Show ${args.orientation || ''} perspective`.trim(),
-    annotate_board: 'Annotate board'
+    annotate_board: 'Annotate board',
+    get_activity_state: 'Read activity state',
+    propose_activity: 'Validate activity',
+    start_activity: 'Start activity',
+    request_prediction: 'Request prediction',
+    request_hint: 'Give hint',
+    end_activity: 'End activity',
+    engine_fallback: `Engine fallback ${args.uci || ''}`.trim(),
+    activity_fallback: `Reviewed continuation ${args.uci || ''}`.trim()
   };
   return labels[toolCall.name] || toolCall.name.replaceAll('_', ' ');
+}
+
+function activityPhaseLabel(activity) {
+  const labels = {
+    learner_turn: 'Your turn',
+    mentor_turn: 'Mentor turn',
+    mentor_thinking: 'Mentor thinking',
+    awaiting_prediction: 'Prediction requested',
+    paused: 'Paused',
+    complete: 'Complete',
+    game_over: 'Game over'
+  };
+  return labels[activity?.phase] || 'Ready';
+}
+
+function activityTypeLabel(type) {
+  return {
+    practice_game: 'Practice game',
+    opening_drill: 'Opening drill',
+    puzzle: 'Puzzle',
+    guided_lesson: 'Guided lesson'
+  }[type] || 'Activity';
+}
+
+function ActivityBar({ activity, busy, onStart, onPause, onResume, onHint, onEnd, onProfile }) {
+  if (!activity) {
+    return (
+      <div className="mentor-activity-bar is-idle">
+        <div><GraduationCap size={17} /><span><strong>Guided practice</strong><small>Start a game, drill, puzzle, or lesson</small></span></div>
+        <div className="mentor-activity-actions">
+          <button onClick={onProfile} title="Learner profile" aria-label="Learner profile"><Settings2 size={15} /></button>
+          <button className="is-primary" onClick={onStart}><Play size={14} /> Start activity</button>
+        </div>
+      </div>
+    );
+  }
+  const progress = activity.totalSteps ? Math.min(100, Math.round((activity.stepIndex / activity.totalSteps) * 100)) : 0;
+  return (
+    <div className={`mentor-activity-bar is-active is-${activity.phase}`} data-activity-phase={activity.phase}>
+      <div className="mentor-activity-main">
+        <span className="mentor-activity-icon"><GraduationCap size={16} /></span>
+        <span>
+          <strong>{activity.title}</strong>
+          <small>{activityPhaseLabel(activity)} · {activityTypeLabel(activity.type)} · You play {activity.learnerColor}</small>
+        </span>
+      </div>
+      {activity.totalSteps > 0 && <span className="mentor-activity-progress"><i style={{ width: `${progress}%` }} /></span>}
+      <div className="mentor-activity-actions">
+        {['opening_drill', 'puzzle', 'guided_lesson'].includes(activity.type) && (
+          <button onClick={onHint} disabled={busy} title="Request hint" aria-label="Request hint"><Lightbulb size={15} /></button>
+        )}
+        {activity.status === 'paused'
+          ? <button onClick={onResume} disabled={busy} title="Resume activity" aria-label="Resume activity"><Play size={15} /></button>
+          : <button onClick={onPause} disabled={busy} title="Pause activity" aria-label="Pause activity"><Pause size={15} /></button>}
+        <button onClick={onEnd} disabled={busy} title="End activity" aria-label="End activity"><X size={15} /></button>
+      </div>
+    </div>
+  );
+}
+
+function ActivityDialog({ catalog, boardRevision, onClose, onStart }) {
+  const [type, setType] = useState('practice_game');
+  const [sourceId, setSourceId] = useState('');
+  const [learnerColor, setLearnerColor] = useState('white');
+  const [startFrom, setStartFrom] = useState('standard');
+  const items = useMemo(() => catalog.filter((item) => item.type === type), [catalog, type]);
+  useEffect(() => {
+    setSourceId(items[0]?.id || '');
+    if (items[0]?.fixedLearnerColor) setLearnerColor(items[0].fixedLearnerColor);
+  }, [type, items]);
+  const selected = items.find((item) => item.id === sourceId);
+  const submit = (event) => {
+    event.preventDefault();
+    onStart({
+      type,
+      sourceId: type === 'practice_game' ? undefined : sourceId,
+      learnerColor: selected?.fixedLearnerColor || learnerColor,
+      startFrom: type === 'practice_game' ? startFrom : undefined,
+      expectedRevision: boardRevision
+    });
+  };
+  return (
+    <div className="mentor-modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <form className="mentor-dialog mentor-activity-dialog" onSubmit={submit}>
+        <header><div><span>ACTIVITY</span><h2>Start guided practice</h2></div><button type="button" onClick={onClose} title="Close"><X size={18} /></button></header>
+        <div className="mentor-dialog-body">
+          <div className="mentor-mode-grid">
+            {[
+              ['practice_game', Swords, 'Practice game'],
+              ['opening_drill', BookOpen, 'Opening drill'],
+              ['puzzle', Puzzle, 'Puzzle'],
+              ['guided_lesson', GraduationCap, 'Guided lesson']
+            ].map(([value, Icon, label]) => (
+              <button type="button" className={type === value ? 'is-selected' : ''} key={value} onClick={() => setType(value)}>
+                <Icon size={17} /><span>{label}</span>
+              </button>
+            ))}
+          </div>
+          {type !== 'practice_game' && (
+            <label>Activity
+              <select value={sourceId} onChange={(event) => {
+                const next = items.find((item) => item.id === event.target.value);
+                setSourceId(event.target.value);
+                if (next?.fixedLearnerColor) setLearnerColor(next.fixedLearnerColor);
+              }}>
+                {items.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
+              </select>
+            </label>
+          )}
+          {selected && <p className="mentor-activity-description"><strong>{selected.goal}</strong><span>{selected.moveCount} guided plies</span></p>}
+          {type === 'practice_game' && (
+            <label>Starting position
+              <select value={startFrom} onChange={(event) => setStartFrom(event.target.value)}>
+                <option value="standard">Standard position</option>
+                <option value="current">Current board</option>
+              </select>
+            </label>
+          )}
+          {!selected?.fixedLearnerColor && (
+            <fieldset><legend>Your color</legend><div className="mentor-segmented">
+              <button type="button" className={learnerColor === 'white' ? 'is-selected' : ''} onClick={() => setLearnerColor('white')}>White</button>
+              <button type="button" className={learnerColor === 'black' ? 'is-selected' : ''} onClick={() => setLearnerColor('black')}>Black</button>
+            </div></fieldset>
+          )}
+        </div>
+        <div className="mentor-dialog-actions"><button type="button" onClick={onClose}>Cancel</button><button type="submit" disabled={type !== 'practice_game' && !sourceId}>Start</button></div>
+      </form>
+    </div>
+  );
+}
+
+function ProfileDialog({ progress, onClose, onSave }) {
+  const [skillBand, setSkillBand] = useState(progress?.profile?.skillBand || 'Beginner');
+  const [goals, setGoals] = useState((progress?.profile?.goals || []).join('\n'));
+  const submit = (event) => {
+    event.preventDefault();
+    onSave(skillBand, goals.split('\n').map((goal) => goal.trim()).filter(Boolean));
+  };
+  return (
+    <div className="mentor-modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <form className="mentor-dialog mentor-profile-dialog" onSubmit={submit}>
+        <header><div><span>LEARNER</span><h2>Profile and progress</h2></div><button type="button" onClick={onClose} title="Close"><X size={18} /></button></header>
+        <div className="mentor-dialog-body">
+          <fieldset><legend>Current level</legend><div className="mentor-segmented">
+            {['Beginner', 'Intermediate', 'Advanced'].map((band) => <button type="button" key={band} className={skillBand === band ? 'is-selected' : ''} onClick={() => setSkillBand(band)}>{band}</button>)}
+          </div></fieldset>
+          <label>Goals<textarea value={goals} onChange={(event) => setGoals(event.target.value)} rows={3} placeholder="One goal per line" /></label>
+          <div className="mentor-mastery-list">
+            {(progress?.topics || []).map((topic) => <div key={topic.topic}><span>{topic.topic.replaceAll('_', ' ')}</span><i><b style={{ width: `${topic.mastery}%` }} /></i><strong>{topic.mastery}</strong></div>)}
+            {!progress?.topics?.length && <p>Complete an activity to begin tracking topic mastery.</p>}
+          </div>
+        </div>
+        <div className="mentor-dialog-actions"><button type="button" onClick={onClose}>Cancel</button><button type="submit">Save profile</button></div>
+      </form>
+    </div>
+  );
+}
+
+function PromotionDialog({ color, target, onChoose, onClose }) {
+  const pieces = [['q', 'Queen'], ['r', 'Rook'], ['b', 'Bishop'], ['n', 'Knight']];
+  return (
+    <div className="mentor-modal-backdrop" role="presentation">
+      <div className="mentor-dialog mentor-promotion-dialog" role="dialog" aria-modal="true" aria-label="Choose promotion piece">
+        <header><div><span>PROMOTION</span><h2>Promote on {target}</h2></div><button type="button" onClick={onClose} title="Cancel promotion"><X size={18} /></button></header>
+        <div className="mentor-promotion-options">
+          {pieces.map(([piece, label]) => <button key={piece} onClick={() => onChoose(piece)}><span>{color === 'w' ? piece.toUpperCase() : piece}</span><strong>{label}</strong></button>)}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function formatEngineScore(score) {
@@ -252,10 +438,11 @@ function ToolCallCard({ toolCall }) {
 function Message({ message }) {
   const isUser = message.role === 'user';
   return (
-    <article className={`mentor-message ${isUser ? 'is-user' : 'is-model'} ${message.kind === 'voice' ? 'is-voice' : ''}`}>
+    <article className={`mentor-message ${isUser ? 'is-user' : 'is-model'} ${message.kind === 'voice' ? 'is-voice' : ''} ${message.kind === 'activity' ? 'is-activity' : ''}`}>
       {!isUser && <div className="mentor-message-avatar"><Bot size={18} /></div>}
       <div className="mentor-message-content">
         {message.kind === 'voice' && <span className="mentor-message-kind"><Mic size={11} /> Voice</span>}
+        {message.kind === 'activity' && <span className="mentor-message-kind"><GraduationCap size={11} /> Activity</span>}
         {!!message.toolCalls?.length && (
           <div className="mentor-tool-list">
             {message.toolCalls.map((toolCall) => <ToolCallCard key={toolCall.id} toolCall={toolCall} />)}
@@ -282,6 +469,7 @@ export default function MentorWorkspace() {
   const [draft, setDraft] = useState('');
   const [activeRequestId, setActiveRequestId] = useState(null);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [loading, setLoading] = useState(true);
   const [socketReady, setSocketReady] = useState(false);
   const [boardState, setBoardState] = useState(null);
@@ -289,6 +477,13 @@ export default function MentorWorkspace() {
   const [pendingBoardAction, setPendingBoardAction] = useState(null);
   const [fenDialogOpen, setFenDialogOpen] = useState(false);
   const [fenDraft, setFenDraft] = useState('');
+  const [activity, setActivity] = useState(null);
+  const [progress, setProgress] = useState(null);
+  const [catalog, setCatalog] = useState([]);
+  const [activityDialogOpen, setActivityDialogOpen] = useState(false);
+  const [profileDialogOpen, setProfileDialogOpen] = useState(false);
+  const [activityBusy, setActivityBusy] = useState(false);
+  const [promotionPending, setPromotionPending] = useState(null);
   const messageScrollRef = useRef(null);
   const stickToBottomRef = useRef(true);
   const streamPollRef = useRef(null);
@@ -331,7 +526,9 @@ export default function MentorWorkspace() {
     onConversationChanged: onLiveConversationChanged
   });
   const mentorRequestBusy = Boolean(activeRequestId || live.toolBusy);
-  const boardInteractionLocked = Boolean(mentorRequestBusy || pendingBoardAction);
+  const activityMoveLocked = Boolean(activity && activity.phase !== 'learner_turn');
+  const boardInteractionLocked = Boolean(mentorRequestBusy || pendingBoardAction || activityMoveLocked || activityBusy);
+  const boardSetupLocked = Boolean(mentorRequestBusy || pendingBoardAction || activity || activityBusy);
 
   const createConversation = useCallback(async () => {
     const result = await mentorApi.createConversation();
@@ -372,8 +569,11 @@ export default function MentorWorkspace() {
         setConversation(nextConversation);
         setMessages(nextConversation.messages || []);
         setBoardState(nextConversation.chess);
+        setActivity(nextConversation.activity || null);
+        setProgress(nextConversation.progress || null);
         setPreviewFen(null);
         setPendingBoardAction(null);
+        setPromotionPending(null);
         const active = nextConversation.messages?.find((message) =>
           message.role === 'model' && ['pending', 'streaming'].includes(message.status));
         setActiveRequestId(active?.requestId || null);
@@ -429,6 +629,12 @@ export default function MentorWorkspace() {
       if (!matches(payload)) return;
       setMessages((current) => upsertToolCall(current, payload.toolCall));
     };
+    const onActivityUpdated = (payload) => {
+      if (!matches(payload)) return;
+      const next = payload.activity;
+      setActivity(next && ['active', 'paused'].includes(next.status) ? next : null);
+    };
+    const onProgressUpdated = (payload) => setProgress(payload);
 
     socket.on('mentor-message-start', onStart);
     socket.on('mentor-message-delta', onDelta);
@@ -441,6 +647,8 @@ export default function MentorWorkspace() {
     socket.on('mentor-tool-completed', onToolUpdated);
     socket.on('mentor-tool-failed', onToolUpdated);
     socket.on('mentor-tool-cancelled', onToolUpdated);
+    socket.on('mentor-activity-updated', onActivityUpdated);
+    socket.on('mentor-progress-updated', onProgressUpdated);
     return () => {
       if (streamPollRef.current) clearTimeout(streamPollRef.current);
       socket.emit('mentor-unsubscribe', { conversationId });
@@ -457,8 +665,69 @@ export default function MentorWorkspace() {
       socket.off('mentor-tool-completed', onToolUpdated);
       socket.off('mentor-tool-failed', onToolUpdated);
       socket.off('mentor-tool-cancelled', onToolUpdated);
+      socket.off('mentor-activity-updated', onActivityUpdated);
+      socket.off('mentor-progress-updated', onProgressUpdated);
     };
   }, [conversationId, refreshList, socket]);
+
+  const openActivityDialog = useCallback(async () => {
+    try {
+      if (!catalog.length) {
+        const result = await mentorApi.getCatalog();
+        setCatalog(result.catalog || []);
+      }
+      setActivityDialogOpen(true);
+    } catch (loadError) {
+      setError(loadError.message);
+    }
+  }, [catalog.length]);
+
+  const startActivity = async (options) => {
+    if (!conversationId || !boardState) return;
+    setActivityBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const result = await mentorApi.startActivity(conversationId, options);
+      setActivity(result.activity);
+      setBoardState(result.state);
+      setPreviewFen(null);
+      setActivityDialogOpen(false);
+    } catch (activityError) {
+      setError(activityError.message);
+    } finally {
+      setActivityBusy(false);
+    }
+  };
+
+  const updateActivity = async (operation) => {
+    if (!activity || activityBusy) return;
+    setActivityBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const result = await operation(activity.id);
+      setActivity(result?.activity && ['active', 'paused'].includes(result.activity.status) ? result.activity : null);
+      if (result?.hint) setNotice(`Hint ${result.level}: ${result.hint}`);
+    } catch (activityError) {
+      setError(activityError.message);
+    } finally {
+      setActivityBusy(false);
+    }
+  };
+
+  const saveProfile = async (skillBand, goals) => {
+    setActivityBusy(true);
+    try {
+      const result = await mentorApi.updateProfile(skillBand, goals);
+      setProgress(result);
+      setProfileDialogOpen(false);
+    } catch (profileError) {
+      setError(profileError.message);
+    } finally {
+      setActivityBusy(false);
+    }
+  };
 
   const reconcileStream = useCallback((id, requestId, attempt = 0) => {
     streamPollRef.current = setTimeout(async () => {
@@ -576,13 +845,12 @@ export default function MentorWorkspace() {
     }
   }, []);
 
-  const onBoardMove = useCallback((args) => {
-    if (!boardState || boardInteractionLocked || boardState.gameStatus.isGameOver) return false;
-    const { sourceSquare, targetSquare } = args;
+  const submitBoardMove = useCallback((sourceSquare, targetSquare, promotion) => {
+    if (!boardState) return false;
     const preview = new Chess(boardState.fen);
     let move;
     try {
-      move = preview.move({ from: sourceSquare, to: targetSquare, promotion: 'q' });
+      move = preview.move({ from: sourceSquare, to: targetSquare, promotion });
     } catch {
       return false;
     }
@@ -598,10 +866,33 @@ export default function MentorWorkspace() {
       actionId
     ));
     return true;
-  }, [boardInteractionLocked, boardState, commitBoardAction, conversationId]);
+  }, [boardState, commitBoardAction, conversationId]);
+
+  const onBoardMove = useCallback((args) => {
+    if (!boardState || boardInteractionLocked || boardState.gameStatus.isGameOver) return false;
+    const { sourceSquare, targetSquare } = args;
+    const game = new Chess(boardState.fen);
+    const piece = game.get(sourceSquare);
+    const promotion = piece?.type === 'p' && ['1', '8'].includes(targetSquare[1]);
+    if (promotion) {
+      const legalPromotion = game.moves({ verbose: true }).some((move) =>
+        move.from === sourceSquare && move.to === targetSquare && move.promotion);
+      if (!legalPromotion) return false;
+      setPromotionPending({ sourceSquare, targetSquare, color: piece.color });
+      return false;
+    }
+    return submitBoardMove(sourceSquare, targetSquare);
+  }, [boardInteractionLocked, boardState, submitBoardMove]);
+
+  const choosePromotion = useCallback((piece) => {
+    if (!promotionPending) return;
+    const { sourceSquare, targetSquare } = promotionPending;
+    setPromotionPending(null);
+    submitBoardMove(sourceSquare, targetSquare, piece);
+  }, [promotionPending, submitBoardMove]);
 
   const flipBoard = () => {
-    if (!boardState || boardInteractionLocked) return;
+    if (!boardState || mentorRequestBusy || pendingBoardAction || activityBusy) return;
     const actionId = crypto.randomUUID();
     const orientation = boardState.orientation === 'white' ? 'black' : 'white';
     commitBoardAction(actionId, () => mentorApi.setOrientation(
@@ -613,7 +904,7 @@ export default function MentorWorkspace() {
   };
 
   const resetBoard = () => {
-    if (!boardState || boardInteractionLocked) return;
+    if (!boardState || boardSetupLocked) return;
     const actionId = crypto.randomUUID();
     commitBoardAction(actionId, () => mentorApi.resetBoard(
       conversationId,
@@ -624,7 +915,7 @@ export default function MentorWorkspace() {
 
   const loadFen = async (event) => {
     event.preventDefault();
-    if (!boardState || boardInteractionLocked) return;
+    if (!boardState || boardSetupLocked) return;
     const actionId = crypto.randomUUID();
     const success = await commitBoardAction(actionId, () => mentorApi.loadPosition(
       conversationId,
@@ -745,6 +1036,7 @@ export default function MentorWorkspace() {
           )}
         </div>
         <div className="mentor-composer-wrap">
+          {notice && <div className="mentor-notice"><span>{notice}</span><button onClick={() => setNotice('')} title="Dismiss notice"><X size={15} /></button></div>}
           {error && <div className="mentor-error"><span>{error}</span><button onClick={() => setError('')} title="Dismiss error"><X size={15} /></button></div>}
           {(live.isActive || live.status === 'failed') && (
             <div className={`mentor-live-status is-${live.status}`}>
@@ -802,11 +1094,22 @@ export default function MentorWorkspace() {
         <header>
           <div><span>WORKSPACE</span><h2>Position board</h2></div>
           <div className="mentor-board-tools">
-            <button onClick={flipBoard} disabled={!boardState || boardInteractionLocked} title="Flip board" aria-label="Flip board"><Repeat2 size={17} /></button>
-            <button onClick={() => { setFenDraft(boardState?.fen || ''); setFenDialogOpen(true); }} disabled={!boardState || boardInteractionLocked} title="Load FEN" aria-label="Load FEN"><Pencil size={16} /></button>
-            <button onClick={resetBoard} disabled={!boardState || boardInteractionLocked} title="Reset board" aria-label="Reset board"><RefreshCcw size={16} /></button>
+            <button onClick={() => setProfileDialogOpen(true)} disabled={activityBusy} title="Learner profile" aria-label="Learner profile"><Settings2 size={16} /></button>
+            <button onClick={flipBoard} disabled={!boardState || mentorRequestBusy || !!pendingBoardAction || activityBusy} title="Flip board" aria-label="Flip board"><Repeat2 size={17} /></button>
+            <button onClick={() => { setFenDraft(boardState?.fen || ''); setFenDialogOpen(true); }} disabled={!boardState || boardSetupLocked} title="Load FEN" aria-label="Load FEN"><Pencil size={16} /></button>
+            <button onClick={resetBoard} disabled={!boardState || boardSetupLocked} title="Reset board" aria-label="Reset board"><RefreshCcw size={16} /></button>
           </div>
         </header>
+        <ActivityBar
+          activity={activity}
+          busy={activityBusy || mentorRequestBusy}
+          onStart={openActivityDialog}
+          onProfile={() => setProfileDialogOpen(true)}
+          onPause={() => updateActivity((id) => mentorApi.pauseActivity(conversationId, id))}
+          onResume={() => updateActivity((id) => mentorApi.resumeActivity(conversationId, id))}
+          onHint={() => updateActivity((id) => mentorApi.requestHint(conversationId, id))}
+          onEnd={() => updateActivity((id) => mentorApi.endActivity(conversationId, id))}
+        />
         <div className="mentor-board-stage">
           <div
             className={`mentor-eval-bar is-${boardState?.orientation || 'white'} ${currentAnalysis ? 'has-analysis' : ''}`}
@@ -833,7 +1136,7 @@ export default function MentorWorkspace() {
         </div>
         <div className="mentor-board-summary">
           <div><span>Turn</span><strong>{boardState?.turnName || 'White'}</strong></div>
-          <div><span>Status</span><strong>{live.toolBusy ? live.toolLabel : pendingBoardAction ? 'Saving move...' : boardState?.gameStatus.resultText || 'Ready'}</strong></div>
+          <div><span>Status</span><strong>{live.toolBusy ? live.toolLabel : pendingBoardAction ? 'Saving move...' : activity ? activityPhaseLabel(activity) : boardState?.gameStatus.resultText || 'Ready'}</strong></div>
         </div>
         <div className="mentor-move-list">
           <div className="mentor-move-list-header"><span>MOVE LIST</span><strong>{boardState?.history.length || 0} plies</strong></div>
@@ -867,6 +1170,25 @@ export default function MentorWorkspace() {
             </div>
           </form>
         </div>
+      )}
+      {activityDialogOpen && boardState && (
+        <ActivityDialog
+          catalog={catalog}
+          boardRevision={boardState.revision}
+          onClose={() => setActivityDialogOpen(false)}
+          onStart={startActivity}
+        />
+      )}
+      {profileDialogOpen && (
+        <ProfileDialog progress={progress} onClose={() => setProfileDialogOpen(false)} onSave={saveProfile} />
+      )}
+      {promotionPending && (
+        <PromotionDialog
+          color={promotionPending.color}
+          target={promotionPending.targetSquare}
+          onChoose={choosePromotion}
+          onClose={() => setPromotionPending(null)}
+        />
       )}
     </main>
   );

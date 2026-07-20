@@ -67,5 +67,35 @@ export const mentorApi = {
       method: 'PATCH',
       body: JSON.stringify({ orientation, expectedRevision, actionId })
     });
+  },
+  getCatalog(type = '') {
+    return request(`/catalog${type ? `?type=${encodeURIComponent(type)}` : ''}`);
+  },
+  getProfile() {
+    return request('/profile');
+  },
+  updateProfile(skillBand, goals) {
+    return request('/profile', {
+      method: 'PATCH',
+      body: JSON.stringify({ skillBand, goals })
+    });
+  },
+  startActivity(id, options) {
+    return request(`/conversations/${id}/activities`, {
+      method: 'POST',
+      body: JSON.stringify(options)
+    });
+  },
+  pauseActivity(id, activityId) {
+    return request(`/conversations/${id}/activities/${activityId}/pause`, { method: 'POST', body: '{}' });
+  },
+  resumeActivity(id, activityId) {
+    return request(`/conversations/${id}/activities/${activityId}/resume`, { method: 'POST', body: '{}' });
+  },
+  requestHint(id, activityId) {
+    return request(`/conversations/${id}/activities/${activityId}/hint`, { method: 'POST', body: '{}' });
+  },
+  endActivity(id, activityId) {
+    return request(`/conversations/${id}/activities/${activityId}/end`, { method: 'POST', body: '{}' });
   }
 };

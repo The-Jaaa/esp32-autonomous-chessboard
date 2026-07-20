@@ -113,7 +113,12 @@ class MentorActivityService {
   }
 
   updateProfile(patch) {
-    const profile = this.store.updateLearnerProfile(patch || {});
+    let profile;
+    try {
+      profile = this.store.updateLearnerProfile(patch || {});
+    } catch (error) {
+      throw new MentorActivityError(error.message, 'invalid_learner_profile');
+    }
     const summary = this.getProgressSummary();
     this.emitGlobal('mentor-progress-updated', summary);
     return { ...summary, profile };
@@ -121,6 +126,21 @@ class MentorActivityService {
 
   catalog(type = null) {
     return listCatalog(type);
+  }
+
+  assertExplicitStartConsent(conversationId, requestId) {
+    const userMessage = this.store.getRequestMessages(conversationId, requestId)
+      .find((message) => message.role === 'user');
+    const text = String(userMessage?.content || '').trim();
+    const explicit = /^(yes\b|yeah\b|yep\b|sure\b|ok(?:ay)?\b|sounds good\b|do it\b|go ahead\b|start\b|begin\b|let'?s\b|please start\b|i(?:'d| would) like to\b|i want to\b|play a\b|give me a\b|teach me\b|help me practice\b)/i.test(text);
+    if (!explicit) {
+      throw new MentorActivityError(
+        'Ask for the learner’s explicit agreement before starting an activity.',
+        'activity_confirmation_required',
+        409
+      );
+    }
+    return true;
   }
 
   reconcile(conversationId, { resumeMentorTurn = false } = {}) {
@@ -463,7 +483,7 @@ class MentorActivityService {
       const updated = this.store.updateActivity(activity.id, { attempts: activity.attempts + 1 });
       this.record(updated, 'incorrect_move', { attemptedUci: uci, expectedUci: expectedMove });
       throw new MentorActivityError(
-        'That move does not match this activity’s objective. The position has not changed.',
+        `That move does not match this activity’s objective. The position has not changed. ${activity.config.hints?.[Math.min(activity.hints, 2)] || 'Review the goal and try again.'}`,
         'activity_incorrect_move',
         422,
         { activity: this.get(conversationId), attemptedUci: uci }
@@ -710,7 +730,11 @@ class MentorActivityService {
     if (this.inFlight.has(conversationId)) return this.inFlight.get(conversationId);
     const promise = this.executeMentorTurn(conversationId, reason)
       .catch((error) => {
-        this.logger.error?.('[MENTOR_ACTIVITY_TURN_FAILED]', JSON.stringify({ conversationId, error: error.message }));
+        this.logger.error?.('[MENTOR_ACTIVITY_TURN_FAILED]', JSON.stringify({
+          conversationId,
+          error: error.message,
+          stack: error.stack
+        }));
         const activity = this.store.getActiveActivity(conversationId);
         if (activity?.status === 'active' && activity.phase === 'mentor_thinking') {
           this.pause(conversationId, 'mentor_turn_failed');
@@ -808,16 +832,59 @@ class MentorActivityService {
     const analysis = scriptedMove ? null : await this.analysisService.analyzePosition(conversationId, { mode: 'quick' });
     const uci = scriptedMove || analysis?.bestMove?.uci;
     if (!uci) throw new MentorActivityError('Stockfish returned no fallback move.', 'activity_fallback_unavailable', 503);
+    const requestId = activity.pendingRequestId;
+    const assistant = this.store.getRequestMessages(conversationId, requestId)
+      .find((message) => message.role === 'model');
+    const existingCalls = this.store.listToolCallsForRequest(conversationId, requestId);
+    const fallbackName = scriptedMove ? 'activity_fallback' : 'engine_fallback';
+    let fallbackCard = null;
+    if (assistant) {
+      fallbackCard = this.store.createToolCall({
+        conversationId,
+        requestId,
+        assistantMessageId: assistant.id,
+        providerCallId: `${fallbackName}:${activity.id}:${board.revision}`,
+        ordinal: Math.max(0, ...existingCalls.map((call) => call.ordinal)) + 1,
+        name: fallbackName,
+        arguments: { uci },
+        progressTotal: 1
+      }).toolCall;
+      fallbackCard = this.store.updateToolCall(fallbackCard.id, { status: 'running' });
+      this.emit(conversationId, 'mentor-tool-started', { conversationId, toolCall: fallbackCard });
+    }
     const actionId = `activity:fallback:${activity.id}:${board.revision}`;
-    const result = this.chessService.move(conversationId, {
-      uci,
-      expectedRevision: board.revision,
-      actionId,
-      actor: 'mentor',
-      activityId: activity.id
-    });
-    this.emitBoardUpdate(conversationId, result);
-    this.mentorMoveCommitted(conversationId, activity.pendingRequestId, result, { fallback: true });
+    try {
+      const result = this.chessService.move(conversationId, {
+        uci,
+        expectedRevision: board.revision,
+        actionId,
+        actor: 'mentor',
+        activityId: activity.id
+      });
+      this.emitBoardUpdate(conversationId, result);
+      this.mentorMoveCommitted(conversationId, requestId, result, { fallback: true });
+      if (fallbackCard) {
+        fallbackCard = this.store.updateToolCall(fallbackCard.id, {
+          status: 'complete',
+          result: {
+            kind: fallbackName,
+            move: result.state.history.at(-1),
+            reason: scriptedMove
+              ? 'Gemini did not complete the reviewed activity continuation.'
+              : 'Gemini did not complete its opponent turn after one corrective response.'
+          },
+          progressCurrent: 1,
+          progressTotal: 1
+        });
+        this.emit(conversationId, 'mentor-tool-completed', { conversationId, toolCall: fallbackCard });
+      }
+    } catch (error) {
+      if (fallbackCard) {
+        fallbackCard = this.store.updateToolCall(fallbackCard.id, { status: 'failed', error: error.message });
+        this.emit(conversationId, 'mentor-tool-failed', { conversationId, toolCall: fallbackCard });
+      }
+      throw error;
+    }
   }
 }
 

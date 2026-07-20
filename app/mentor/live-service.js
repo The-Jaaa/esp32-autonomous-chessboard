@@ -984,7 +984,7 @@ class MentorLiveService {
   requestActivityTurn(conversationId, { requestId, displayText, prompt }) {
     const record = this.byConversation.get(conversationId);
     if (!record || record.closing || !record.ready) return null;
-    if (record.turn || this.hasActiveTools(conversationId)) {
+    if (record.turn || this.hasActiveTools(record)) {
       const error = new Error('The Live mentor is already handling another turn.');
       error.code = 'mentor_live_busy';
       throw error;
