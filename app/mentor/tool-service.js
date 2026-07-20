@@ -163,6 +163,7 @@ class MentorToolService {
     this.emit = emit;
     this.emitBoardUpdate = emitBoardUpdate;
     this.delay = delay;
+    this.inFlight = new Map();
   }
 
   declarations() {
@@ -183,7 +184,30 @@ class MentorToolService {
     this.emitBoardUpdate(conversationId, { ...result, actionId });
   }
 
-  async execute({ conversationId, requestId, assistantMessageId, ordinal, call, signal }) {
+  executionKey(conversationId, requestId, call, ordinal) {
+    const providerCallId = String(call?.id || `${String(call?.name || 'unknown_tool')}-${ordinal}`);
+    return `${conversationId}:${requestId}:${providerCallId}`;
+  }
+
+  execute(options) {
+    const key = this.executionKey(
+      options.conversationId,
+      options.requestId,
+      options.call,
+      options.ordinal
+    );
+    const existing = this.inFlight.get(key);
+    if (existing) return existing;
+
+    const execution = this.executeOnce(options);
+    this.inFlight.set(key, execution);
+    execution.finally(() => {
+      if (this.inFlight.get(key) === execution) this.inFlight.delete(key);
+    }).catch(() => {});
+    return execution;
+  }
+
+  async executeOnce({ conversationId, requestId, assistantMessageId, ordinal, call, signal }) {
     const name = String(call?.name || 'unknown_tool');
     const args = call?.args && typeof call.args === 'object' ? call.args : {};
     const providerCallId = String(call?.id || `${name}-${ordinal}`);

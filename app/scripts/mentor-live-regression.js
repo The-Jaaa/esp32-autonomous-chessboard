@@ -30,6 +30,38 @@ function emitWithAck(socket, event, payload) {
   return new Promise((resolve) => socket.emit(event, payload, resolve));
 }
 
+function waitForCondition(predicate, message, timeoutMs = 3000) {
+  const started = Date.now();
+  return new Promise((resolve, reject) => {
+    const check = () => {
+      if (predicate()) {
+        resolve();
+        return;
+      }
+      if (Date.now() - started >= timeoutMs) {
+        reject(new Error(message));
+        return;
+      }
+      setTimeout(check, 10);
+    };
+    check();
+  });
+}
+
+function delayWithSignal(milliseconds, signal) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, milliseconds);
+    const abort = () => {
+      clearTimeout(timer);
+      const error = new Error('Synthetic analysis cancelled.');
+      error.name = 'AbortError';
+      reject(error);
+    };
+    if (signal?.aborted) abort();
+    else signal?.addEventListener('abort', abort, { once: true });
+  });
+}
+
 async function storeAndTranscriptRegressions() {
   assert.strictEqual(mergeTranscript('', 'Can you'), 'Can you');
   assert.strictEqual(mergeTranscript('Can you', 'Can you explain this?'), 'Can you explain this?');
@@ -85,6 +117,7 @@ async function socketRegressions() {
   const first = await createConversation();
   const second = await createConversation();
   const textBusy = await createConversation();
+  const toolConversation = await createConversation();
   const client = createClient(baseUrl, { transports: ['websocket'] });
   const competingClient = createClient(baseUrl, { transports: ['websocket'] });
   await Promise.all([
@@ -205,6 +238,259 @@ async function socketRegressions() {
   assert.strictEqual(liveDuringText.code, 'mentor_text_active');
   releaseHeldText();
   await waitForEvent(client, 'mentor-message-complete', (payload) => payload.requestId === 'held-text');
+
+  feature.toolService.delay = (milliseconds, signal) => delayWithSignal(Math.min(milliseconds, 80), signal);
+  feature.toolService.analysisService = {
+    async analyzePosition(conversationId, { mode = 'quick', signal } = {}) {
+      await delayWithSignal(60, signal);
+      const state = feature.chessService.getState(conversationId);
+      return {
+        kind: 'position_analysis',
+        analyzedFen: state.fen,
+        analyzedRevision: state.revision,
+        mode,
+        score: { type: 'cp', value: 24 },
+        wdl: { white: 410, draw: 390, black: 200 },
+        bestMove: { uci: state.legalMoves[0], san: state.legalMoves[0] },
+        lines: [],
+        telemetry: { depth: 10, elapsedMs: 60 }
+      };
+    },
+    async analyzeMove(conversationId, { uci, mode = 'quick', signal, onProgress = () => {} } = {}) {
+      onProgress(1, 2);
+      await delayWithSignal(30, signal);
+      onProgress(2, 2);
+      const state = feature.chessService.getState(conversationId);
+      return {
+        kind: 'move_analysis',
+        source: 'candidate',
+        analyzedFen: state.fen,
+        analyzedRevision: state.revision,
+        mode,
+        move: { uci, san: uci },
+        classification: 'good',
+        centipawnLoss: 20,
+        before: { score: { type: 'cp', value: 24 }, lines: [] },
+        after: { score: { type: 'cp', value: 4 }, lines: [] },
+        score: { type: 'cp', value: 24 },
+        wdl: { white: 410, draw: 390, black: 200 },
+        bestAlternative: null
+      };
+    }
+  };
+
+  await emitWithAck(client, 'mentor-subscribe', { conversationId: toolConversation.id });
+  const toolStart = await emitWithAck(client, 'mentor-live-start', { conversationId: toolConversation.id });
+  assert.strictEqual(toolStart.success, true);
+  const toolSession = connector.sessions.at(-1);
+  const declarationNames = connector.connectCalls.at(-1).config.tools[0].functionDeclarations
+    .map((declaration) => declaration.name);
+  const expectedToolNames = [
+    'get_board_state',
+    'analyze_position',
+    'analyze_move',
+    'play_move',
+    'play_line',
+    'load_position',
+    'reset_board',
+    'set_orientation',
+    'annotate_board'
+  ];
+  assert.deepStrictEqual([...declarationNames].sort(), [...expectedToolNames].sort());
+
+  const earlyToolStarted = waitForEvent(client, 'mentor-tool-started', (payload) =>
+    payload.conversationId === toolConversation.id && payload.toolCall.providerCallId === 'live-early-analysis');
+  const earlyFinal = waitForEvent(client, 'mentor-live-assistant-transcript', (payload) =>
+    payload.conversationId === toolConversation.id && payload.isFinal);
+  toolSession.emitToolCall([{
+    id: 'live-early-analysis',
+    name: 'analyze_position',
+    args: { mode: 'quick' }
+  }], 'I analyzed the position after hearing your full question.', { turnComplete: true });
+  await earlyToolStarted;
+  const earlyMessages = feature.store.listMessages(toolConversation.id);
+  assert.strictEqual(earlyMessages.length, 2, 'A durable voice pair was not created before the tool ran.');
+  assert.strictEqual(earlyMessages[0].content, 'Voice request in progress.');
+  toolSession.callbacks.onmessage({
+    serverContent: { inputTranscription: { text: 'Analyze this position before explaining it.' } }
+  });
+  const earlyResult = await earlyFinal;
+  assert.strictEqual(
+    earlyResult.message.content,
+    'I analyzed the position after hearing your full question.',
+    'A tool-call turnComplete closed the voice response before the tool explanation.'
+  );
+  const earlyRequestId = earlyResult.message.requestId;
+  assert.strictEqual(
+    feature.store.getRequestMessages(toolConversation.id, earlyRequestId)[0].content,
+    'Analyze this position before explaining it.'
+  );
+  assert.strictEqual(
+    feature.store.getConversation(toolConversation.id).title,
+    'Analyze this position before explaining it.'
+  );
+  assert.strictEqual(feature.store.listToolCalls(toolConversation.id)[0].assistantMessageId, earlyResult.message.id);
+
+  const allToolsFinal = waitForEvent(client, 'mentor-live-assistant-transcript', (payload) =>
+    payload.conversationId === toolConversation.id
+      && payload.isFinal
+      && payload.message?.requestId !== earlyRequestId,
+  5000);
+  toolSession.callbacks.onmessage({
+    serverContent: { inputTranscription: { text: 'Use every available mentor tool in order.' } }
+  });
+  toolSession.emitToolCall([
+    { id: 'live-all-1', name: 'get_board_state', args: {} },
+    { id: 'live-all-2', name: 'play_move', args: { uci: 'e2e4' } },
+    { id: 'live-all-3', name: 'play_line', args: { moves: ['e7e5', 'g1f3'] } },
+    { id: 'live-all-4', name: 'set_orientation', args: { orientation: 'black' } },
+    {
+      id: 'live-all-5',
+      name: 'annotate_board',
+      args: {
+        highlights: [{ square: 'f7', role: 'danger' }],
+        arrows: [{ from: 'f3', to: 'e5', role: 'idea' }]
+      }
+    },
+    { id: 'live-all-6', name: 'analyze_position', args: { mode: 'quick' } },
+    { id: 'live-all-7', name: 'analyze_move', args: { uci: 'b8c6', mode: 'quick' } },
+    { id: 'live-all-8', name: 'load_position', args: { fen: '7k/8/8/8/8/8/8/K7 w - - 0 1' } },
+    { id: 'live-all-9', name: 'reset_board', args: {} }
+  ], 'All nine shared mentor tools completed in order.');
+  const allToolsResult = await allToolsFinal;
+  const allToolsResponse = toolSession.toolResponses.at(-1).functionResponses;
+  assert.deepStrictEqual(allToolsResponse.map((response) => response.id), [
+    'live-all-1', 'live-all-2', 'live-all-3', 'live-all-4', 'live-all-5',
+    'live-all-6', 'live-all-7', 'live-all-8', 'live-all-9'
+  ]);
+  assert.deepStrictEqual(allToolsResponse.map((response) => response.name), [
+    'get_board_state', 'play_move', 'play_line', 'set_orientation', 'annotate_board',
+    'analyze_position', 'analyze_move', 'load_position', 'reset_board'
+  ]);
+  assert.ok(allToolsResponse.every((response) => response.response.output));
+  const allToolsRecords = feature.store.listToolCalls(toolConversation.id)
+    .filter((toolCall) => toolCall.requestId === allToolsResult.message.requestId);
+  assert.strictEqual(allToolsRecords.length, 9);
+  assert.ok(allToolsRecords.every((toolCall) => toolCall.status === 'complete'));
+  assert.strictEqual(feature.chessService.getState(toolConversation.id).history.length, 0);
+
+  const invalidFinal = waitForEvent(client, 'mentor-live-assistant-transcript', (payload) =>
+    payload.conversationId === toolConversation.id
+      && payload.isFinal
+      && payload.message?.requestId !== allToolsResult.message.requestId);
+  toolSession.callbacks.onmessage({
+    serverContent: { inputTranscription: { text: 'Try invalid tools without changing the board.' } }
+  });
+  toolSession.emitToolCall([
+    { id: 'live-invalid-move', name: 'play_move', args: { uci: 'e2e5' } },
+    { id: 'live-invalid-fen', name: 'load_position', args: { fen: 'not-a-fen' } },
+    { id: 'live-unknown-tool', name: 'invent_board_state', args: {} }
+  ], 'The invalid actions were rejected safely.');
+  const invalidResult = await invalidFinal;
+  const invalidResponses = toolSession.toolResponses.at(-1).functionResponses;
+  assert.ok(invalidResponses.every((response) => response.response.error));
+  assert.strictEqual(feature.chessService.getState(toolConversation.id).history.length, 0);
+
+  const callLimitFinal = waitForEvent(client, 'mentor-live-assistant-transcript', (payload) =>
+      payload.conversationId === toolConversation.id
+      && payload.isFinal
+      && payload.message?.requestId !== invalidResult.message.requestId);
+  toolSession.callbacks.onmessage({
+    serverContent: { inputTranscription: { text: 'Exceed the per-turn tool-call limit safely.' } }
+  });
+  toolSession.emitToolCall(Array.from({ length: 13 }, (_, index) => ({
+    id: `live-limit-${index + 1}`,
+    name: 'get_board_state',
+    args: {}
+  })), 'The tool-call limit protected this turn.');
+  await callLimitFinal;
+  const limitResponses = toolSession.toolResponses.at(-1).functionResponses;
+  assert.strictEqual(limitResponses.length, 13);
+  assert.ok(limitResponses.every((response) =>
+    response.response.error?.code === 'live_tool_call_limit'));
+
+  const duplicateFinal = waitForEvent(client, 'mentor-live-assistant-transcript', (payload) =>
+    payload.conversationId === toolConversation.id
+      && payload.isFinal
+      && payload.message?.requestId !== allToolsResult.message.requestId);
+  toolSession.callbacks.onmessage({
+    serverContent: { inputTranscription: { text: 'Play one move, even if the provider repeats its call.' } }
+  });
+  const duplicateCall = [{ id: 'live-duplicate-move', name: 'play_move', args: { uci: 'e2e4' } }];
+  toolSession.emitToolCall(duplicateCall, 'The move was applied once.');
+  toolSession.callbacks.onmessage({ toolCall: { functionCalls: duplicateCall } });
+  await duplicateFinal;
+  await waitForCondition(
+    () => toolSession.toolResponses.filter((payload) =>
+      payload.functionResponses.some((response) => response.id === 'live-duplicate-move')).length === 2,
+    'The duplicate provider call did not reuse its original result.'
+  );
+  const duplicateRecords = feature.store.listToolCalls(toolConversation.id)
+    .filter((toolCall) => toolCall.providerCallId === 'live-duplicate-move');
+  assert.strictEqual(duplicateRecords.length, 1);
+  assert.strictEqual(feature.chessService.getState(toolConversation.id).history.length, 1);
+
+  const lineStarted = waitForEvent(client, 'mentor-tool-progress', (payload) =>
+    payload.conversationId === toolConversation.id
+      && payload.toolCall.providerCallId === 'live-cancel-line'
+      && payload.toolCall.progressCurrent === 1);
+  toolSession.callbacks.onmessage({
+    serverContent: { inputTranscription: { text: 'Start a line that I will interrupt.' } }
+  });
+  toolSession.emitToolCall([{
+    id: 'live-cancel-line',
+    name: 'play_line',
+    args: { moves: ['e7e5', 'g1f3', 'b8c6', 'f1c4', 'g8f6'] }
+  }], 'This response must not be spoken after cancellation.');
+  await lineStarted;
+  const busySubmission = await emitWithAck(client, 'mentor-live-text-input', {
+    conversationId: toolConversation.id,
+    sessionId: toolStart.sessionId,
+    requestId: 'live-during-tool',
+    text: 'Do not queue this typed message.'
+  });
+  assert.strictEqual(busySubmission.success, false);
+  assert.strictEqual(busySubmission.code, 'mentor_live_tool_busy');
+  toolSession.cancelToolCalls(['live-cancel-line']);
+  const cancelledTool = await waitForEvent(client, 'mentor-tool-cancelled', (payload) =>
+    payload.conversationId === toolConversation.id
+      && payload.toolCall.providerCallId === 'live-cancel-line');
+  assert.strictEqual(cancelledTool.toolCall.progressCurrent, 1);
+  const toolInterruptedFinal = waitForEvent(client, 'mentor-live-assistant-transcript', (payload) =>
+    payload.conversationId === toolConversation.id
+      && payload.isFinal
+      && payload.message?.status === 'cancelled');
+  toolSession.interrupt();
+  await toolInterruptedFinal;
+  assert.strictEqual(feature.chessService.getState(toolConversation.id).history.length, 2);
+
+  const analysisStarted = waitForEvent(client, 'mentor-tool-started', (payload) =>
+    payload.conversationId === toolConversation.id
+      && payload.toolCall.providerCallId === 'live-cancel-analysis');
+  toolSession.callbacks.onmessage({
+    serverContent: { inputTranscription: { text: 'Start an analysis that I will interrupt.' } }
+  });
+  toolSession.emitToolCall([{
+    id: 'live-cancel-analysis',
+    name: 'analyze_position',
+    args: { mode: 'deep' }
+  }], 'This analysis response must not be spoken after cancellation.');
+  await analysisStarted;
+  toolSession.cancelToolCalls(['live-cancel-analysis']);
+  await waitForEvent(client, 'mentor-tool-cancelled', (payload) =>
+    payload.conversationId === toolConversation.id
+      && payload.toolCall.providerCallId === 'live-cancel-analysis');
+  const analysisInterruptedFinal = waitForEvent(client, 'mentor-live-assistant-transcript', (payload) =>
+    payload.conversationId === toolConversation.id
+      && payload.isFinal
+      && payload.message?.status === 'cancelled');
+  toolSession.interrupt();
+  await analysisInterruptedFinal;
+
+  await emitWithAck(client, 'mentor-live-stop', {
+    conversationId: toolConversation.id,
+    sessionId: toolStart.sessionId
+  });
 
   await emitWithAck(client, 'mentor-subscribe', { conversationId: second.id });
   const secondStart = await emitWithAck(client, 'mentor-live-start', { conversationId: second.id });

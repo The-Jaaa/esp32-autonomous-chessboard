@@ -37,13 +37,29 @@ async function waitForServer(url, process, timeoutMs = 30000) {
 }
 
 async function dragSquare(page, from, to) {
-  const sourceBox = await page.locator(`[data-square="${from}"]`).boundingBox();
-  const targetBox = await page.locator(`[data-square="${to}"]`).boundingBox();
+  const sourceSquare = page.locator(`[data-square="${from}"]`);
+  const targetSquare = page.locator(`[data-square="${to}"]`);
+  const sourceBefore = await sourceSquare.innerHTML();
+  const sourceBox = await sourceSquare.boundingBox();
+  const targetBox = await targetSquare.boundingBox();
   if (!sourceBox || !targetBox) throw new Error(`Unable to locate ${from} or ${to}.`);
-  await page.mouse.move(sourceBox.x + sourceBox.width / 2, sourceBox.y + sourceBox.height / 2);
+  const source = { x: sourceBox.x + sourceBox.width / 2, y: sourceBox.y + sourceBox.height / 2 };
+  const target = { x: targetBox.x + targetBox.width / 2, y: targetBox.y + targetBox.height / 2 };
+  await page.mouse.move(source.x, source.y);
   await page.mouse.down();
-  await page.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + targetBox.height / 2, { steps: 8 });
+  await page.waitForTimeout(75);
+  await page.mouse.move(source.x + 6, source.y, { steps: 2 });
+  await page.mouse.move(target.x, target.y, { steps: 18 });
+  await page.waitForTimeout(75);
   await page.mouse.up();
+  await page.waitForTimeout(150);
+  if (await sourceSquare.innerHTML() === sourceBefore) {
+    await sourceSquare.locator(':scope > div').first().dragTo(targetSquare, {
+      force: true,
+      sourcePosition: { x: sourceBox.width / 2, y: sourceBox.height / 2 },
+      targetPosition: { x: targetBox.width / 2, y: targetBox.height / 2 }
+    });
+  }
 }
 
 async function expectText(locator, text) {
@@ -112,7 +128,33 @@ async function runViewport(browser, viewport) {
   await page.getByRole('button', { name: /Analyze a game/ }).click();
   await expectText(page.locator('.mentor-message.is-model'), 'Let us examine the position together.');
   await dragSquare(page, 'e2', 'e4');
-  await expectText(page.locator('.mentor-move-list'), 'e4');
+  try {
+    await expectText(page.locator('.mentor-move-list'), 'e4');
+  } catch (error) {
+    const diagnostics = await page.evaluate(async () => {
+      const id = location.pathname.split('/').at(-1);
+      const detail = await fetch(`/api/mentor/conversations/${id}`).then((response) => response.json());
+      const source = document.querySelector('[data-square="e2"]');
+      const target = document.querySelector('[data-square="e4"]');
+      const sourceRect = source?.getBoundingClientRect();
+      const targetRect = target?.getBoundingClientRect();
+      const hit = sourceRect
+        ? document.elementFromPoint(sourceRect.x + sourceRect.width / 2, sourceRect.y + sourceRect.height / 2)
+        : null;
+      return {
+        url: location.href,
+        boardFen: detail.conversation?.chess?.fen,
+        history: detail.conversation?.chess?.history,
+        resetDisabled: document.querySelector('button[aria-label="Reset board"]')?.disabled,
+        liveStatus: document.querySelector('.mentor-live-status')?.textContent,
+        error: document.querySelector('.mentor-error')?.textContent,
+        sourceRect: sourceRect && { x: sourceRect.x, y: sourceRect.y, width: sourceRect.width, height: sourceRect.height },
+        targetRect: targetRect && { x: targetRect.x, y: targetRect.y, width: targetRect.width, height: targetRect.height },
+        hit: hit && { tag: hit.tagName, className: hit.className, square: hit.closest('[data-square]')?.dataset.square }
+      };
+    });
+    throw new Error(`Mentor board drag failed. ${JSON.stringify(diagnostics)}`, { cause: error });
+  }
   await expectText(page.locator('.mentor-board-summary'), 'Black');
   const firstUrl = page.url();
   const firstConversationId = firstUrl.split('/').at(-1);
@@ -329,6 +371,38 @@ async function runViewport(browser, viewport) {
   await expectText(page.locator('.mentor-message.is-model.is-voice'), 'I heard your typed question');
   assert.ok(Math.abs((await page.locator('.mentor-board-frame').boundingBox()).y - boardTopBeforeVoice) < 1);
 
+  await page.getByPlaceholder('Speak or type to your chess mentor').fill('Run the Live board tool demo.');
+  const liveDemoStarted = Date.now();
+  await page.getByRole('button', { name: 'Send message' }).click();
+  const liveLineCard = page.locator('.mentor-tool-card[data-tool-name="play_line"]').last();
+  await expectText(liveLineCard, '1 of 4 moves');
+  await expectText(page.locator('.mentor-live-status'), 'Demonstrating line');
+  assert.strictEqual(await page.getByRole('button', { name: 'Reset board' }).isDisabled(), true);
+  assert.strictEqual(await page.getByRole('button', { name: 'Mute microphone' }).isDisabled(), false);
+  assert.strictEqual(await page.getByRole('button', { name: 'Stop Live voice' }).isVisible(), true);
+  assert.strictEqual(await page.getByRole('button', { name: 'Send message' }).isDisabled(), true);
+  await expectText(page.locator('.mentor-message.is-model.is-voice'), 'Live board demonstration is complete.');
+  assert.ok(Date.now() - liveDemoStarted >= 2500, 'The Live move demonstration advanced too quickly.');
+  await expectText(page.locator('.mentor-move-list'), 'Nc6');
+  assert.strictEqual(await page.getByRole('button', { name: 'Reset board' }).isDisabled(), false);
+
+  await page.getByPlaceholder('Speak or type to your chess mentor').fill('Run the Live analysis tool demo.');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  const liveAnalysisCard = page.locator('.mentor-tool-card[data-tool-name="analyze_position"]').last();
+  await expectText(page.locator('.mentor-live-status'), 'Analyzing position');
+  await expectText(liveAnalysisCard, 'Best:');
+  await page.locator('.mentor-eval-bar.has-analysis').waitFor({ state: 'visible', timeout: 5000 });
+
+  await page.getByPlaceholder('Speak or type to your chess mentor').fill('Run the Live annotation tool demo.');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  const liveAnnotationCard = page.locator('.mentor-tool-card[data-tool-name="annotate_board"]').last();
+  await expectText(liveAnnotationCard, 'Annotate board');
+  await expectText(page.locator('.mentor-message.is-model.is-voice'), 'teaching marks are now on the board');
+  assert.notStrictEqual(
+    await page.locator('[data-square="f7"] > div').first().evaluate((element) => getComputedStyle(element).boxShadow),
+    'none'
+  );
+
   await page.getByRole('button', { name: 'Mute microphone' }).click();
   await expectText(page.locator('.mentor-live-status'), 'Live voice muted');
   await expectText(page.locator('.mentor-message.is-user.is-voice'), 'Can you explain this position?');
@@ -343,6 +417,37 @@ async function runViewport(browser, viewport) {
   await page.reload();
   await expectText(page.locator('.mentor-message.is-user.is-voice'), 'Explain the center by voice.');
   await expectText(page.locator('.mentor-message.is-model.is-voice'), 'I heard your typed question');
+  await expectText(page.locator('.mentor-tool-card[data-tool-name="play_line"]'), 'Demonstrate 4 moves');
+  await expectText(page.locator('.mentor-tool-card[data-tool-name="analyze_position"]'), 'Best:');
+  await page.locator('.mentor-eval-bar.has-analysis').waitFor({ state: 'visible' });
+  assert.notStrictEqual(
+    await page.locator('[data-square="f7"] > div').first().evaluate((element) => getComputedStyle(element).boxShadow),
+    'none'
+  );
+
+  await page.getByRole('button', { name: 'Reset board' }).click();
+  await expectText(page.locator('.mentor-move-list-header'), '0 plies');
+  await page.getByRole('button', { name: 'Start Live voice' }).click();
+  await expectText(page.locator('.mentor-live-status'), 'Live voice listening');
+  await page.getByPlaceholder('Speak or type to your chess mentor').fill('Run the Live board tool demo.');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  const cancelledLiveLine = page.locator('.mentor-tool-card[data-tool-name="play_line"]').last();
+  await expectText(cancelledLiveLine, '1 of 4 moves');
+  await page.getByRole('button', { name: 'Stop Live voice' }).click();
+  await expectText(cancelledLiveLine, 'cancelled');
+  const stoppedLiveDetail = await page.evaluate(async () => {
+    const id = location.pathname.split('/').at(-1);
+    return fetch(`/api/mentor/conversations/${id}`).then((response) => response.json());
+  });
+  assert.ok(stoppedLiveDetail.conversation.chess.history.length >= 1);
+  assert.ok(stoppedLiveDetail.conversation.chess.history.length < 4);
+  assert.strictEqual(stoppedLiveDetail.conversation.messages.at(-1).status, 'cancelled');
+  await page.reload();
+  await expectText(page.locator('.mentor-tool-card[data-tool-name="play_line"]').last(), 'cancelled');
+  assert.strictEqual(
+    (await page.evaluate(() => fetch(`/api/mentor/conversations/${location.pathname.split('/').at(-1)}`).then((response) => response.json()))).conversation.chess.history.length,
+    stoppedLiveDetail.conversation.chess.history.length
+  );
 
   await page.goto('http://127.0.0.1:3010/mentor-live');
   await page.waitForURL(/\/mentor(?:\/[^/]+)?$/);
@@ -353,31 +458,39 @@ async function runViewport(browser, viewport) {
 
 async function main() {
   const { chromium } = loadPlaywright();
-  const serverProcess = spawn(process.execPath, ['scripts/mentor-browser-server.js'], {
-    cwd: path.join(__dirname, '..'),
-    stdio: ['ignore', 'pipe', 'pipe']
-  });
-  let serverOutput = '';
-  serverProcess.stdout.on('data', (chunk) => { serverOutput += chunk; });
-  serverProcess.stderr.on('data', (chunk) => { serverOutput += chunk; });
-  let browser;
-  try {
-    await waitForServer('http://127.0.0.1:3010/api/mentor/conversations', serverProcess);
-    browser = await chromium.launch({
-      executablePath: 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-      headless: true,
-      args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream']
+  const viewports = process.env.MENTOR_BROWSER_VIEWPORT === '1920'
+    ? [{ width: 1920, height: 1080 }]
+    : [{ width: 1440, height: 900 }, { width: 1920, height: 1080 }];
+  for (const viewport of viewports) {
+    const serverProcess = spawn(process.execPath, ['scripts/mentor-browser-server.js'], {
+      cwd: path.join(__dirname, '..'),
+      stdio: ['ignore', 'pipe', 'pipe']
     });
-    await runViewport(browser, { width: 1440, height: 900 });
-    await runViewport(browser, { width: 1920, height: 1080 });
-    console.log('Mentor Playwright desktop regressions passed.');
-  } catch (error) {
-    if (serverOutput) console.error(serverOutput);
-    throw error;
-  } finally {
-    if (browser) await browser.close();
-    serverProcess.kill();
+    let serverOutput = '';
+    serverProcess.stdout.on('data', (chunk) => { serverOutput += chunk; });
+    serverProcess.stderr.on('data', (chunk) => { serverOutput += chunk; });
+    let browser;
+    try {
+      await waitForServer('http://127.0.0.1:3010/api/mentor/conversations', serverProcess);
+      browser = await chromium.launch({
+        executablePath: 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+        headless: true,
+        args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream']
+      });
+      await runViewport(browser, viewport);
+    } catch (error) {
+      if (serverOutput) console.error(serverOutput);
+      throw error;
+    } finally {
+      if (browser) await browser.close();
+      serverProcess.kill();
+      await Promise.race([
+        new Promise((resolve) => serverProcess.once('exit', resolve)),
+        new Promise((resolve) => setTimeout(resolve, 2000))
+      ]);
+    }
   }
+  console.log('Mentor Playwright desktop regressions passed.');
 }
 
 main().catch((error) => {

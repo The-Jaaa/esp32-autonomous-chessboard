@@ -5,14 +5,26 @@ import {
   pcm16ToAudioBuffer
 } from './mentor-live-audio';
 
-const ACTIVE_STATUSES = new Set(['connecting', 'listening', 'muted', 'thinking', 'speaking', 'interrupted']);
+const ACTIVE_STATUSES = new Set([
+  'connecting',
+  'listening',
+  'muted',
+  'thinking',
+  'speaking',
+  'interrupted',
+  'tool_running'
+]);
 
 function initialState() {
   return {
     sessionId: null,
     status: 'inactive',
     muted: false,
-    turnActive: false
+    turnActive: false,
+    toolBusy: false,
+    toolName: null,
+    toolLabel: null,
+    toolCallIds: []
   };
 }
 
@@ -212,6 +224,10 @@ export function useMentorLive({ socket, conversationId, onMessage, onError, onCo
       reject(new Error('Live mentor is not active.'));
       return;
     }
+    if (statusRef.current === 'tool_running') {
+      reject(new Error('Wait for the current Live mentor tool to finish, or stop the Live session.'));
+      return;
+    }
     socket.emit('mentor-live-text-input', {
       conversationId,
       sessionId,
@@ -239,21 +255,44 @@ export function useMentorLive({ socket, conversationId, onMessage, onError, onCo
       if (!matches(payload)) return;
       if (!sessionRef.current && payload.sessionId) sessionRef.current = payload.sessionId;
       const status = mutedRef.current && payload.status === 'listening' ? 'muted' : payload.status;
-      updateState({ sessionId: payload.sessionId, status });
+      const toolBusy = payload.status === 'tool_running';
+      updateState({
+        sessionId: payload.sessionId,
+        status,
+        toolBusy,
+        toolName: toolBusy ? payload.toolName || null : null,
+        toolLabel: toolBusy ? payload.toolLabel || 'Using mentor tool' : null,
+        toolCallIds: toolBusy && Array.isArray(payload.toolCallIds) ? payload.toolCallIds : []
+      });
     };
     const onUserTranscript = (payload) => {
-      if (!matches(payload)) return;
+      if (!matches(payload)) {
+        if (payload?.conversationId === conversationId && payload.isFinal && payload.message) {
+          callbacksRef.current.onMessage?.(payload.message);
+          callbacksRef.current.onConversationChanged?.();
+        }
+        return;
+      }
       if (payload.isFinal) {
         setPartialUser(null);
         if (payload.message) callbacksRef.current.onMessage?.(payload.message);
         callbacksRef.current.onConversationChanged?.();
+      } else if (payload.message) {
+        setPartialUser(null);
+        callbacksRef.current.onMessage?.(payload.message);
       } else {
         setPartialUser({ id: payload.turnId, text: payload.text });
         updateState({ turnActive: true });
       }
     };
     const onAssistantTranscript = (payload) => {
-      if (!matches(payload)) return;
+      if (!matches(payload)) {
+        if (payload?.conversationId === conversationId && payload.isFinal && payload.message) {
+          callbacksRef.current.onMessage?.(payload.message);
+          callbacksRef.current.onConversationChanged?.();
+        }
+        return;
+      }
       if (payload.isFinal) {
         assistantMessageByTurnRef.current.delete(payload.turnId);
         setPartialAssistant(null);
@@ -280,7 +319,12 @@ export function useMentorLive({ socket, conversationId, onMessage, onError, onCo
             setPartialAssistant({ id: payload.turnId, text: payload.text });
           }
         }
-        updateState({ turnActive: true, status: payload.text ? 'speaking' : 'thinking' });
+        updateState({
+          turnActive: true,
+          status: payload.status === 'tool_running'
+            ? 'tool_running'
+            : payload.text ? 'speaking' : 'thinking'
+        });
       }
     };
     const onInterrupted = (payload) => {

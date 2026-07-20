@@ -627,7 +627,8 @@
   background: var(--mentor-accent);
 }
 .mentor-live-status.is-listening .mentor-live-status-dot,
-.mentor-live-status.is-speaking .mentor-live-status-dot { animation: mentor-live-pulse 1s ease-in-out infinite; }
+.mentor-live-status.is-speaking .mentor-live-status-dot,
+.mentor-live-status.is-tool_running .mentor-live-status-dot { animation: mentor-live-pulse 1s ease-in-out infinite; }
 .mentor-live-status.is-muted .mentor-live-status-dot { background: var(--warning-color); }
 .mentor-live-status.is-failed .mentor-live-status-dot { background: var(--danger-color); }
 @keyframes mentor-live-pulse { 50% { opacity: .25; } }

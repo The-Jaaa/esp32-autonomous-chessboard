@@ -1,18 +1,36 @@
 const { randomUUID } = require('crypto');
-const { validateMessageText, validateRequestId } = require('./service');
+const { MAX_TOOL_CALLS, validateMessageText, validateRequestId } = require('./service');
+const { titleFromMessage } = require('./store');
 
 const DEFAULT_LIVE_MODEL = 'gemini-3.1-flash-live-preview';
 const DEFAULT_LIVE_VOICE = 'Aoede';
 const LIVE_CONTEXT_CHARACTER_LIMIT = 12000;
 const AUDIO_INPUT_MIME_TYPE = 'audio/pcm;rate=16000';
 const AUDIO_OUTPUT_SAMPLE_RATE = 24000;
+const MAX_LIVE_TOOL_BATCHES = 8;
+const VOICE_TRANSCRIPT_PLACEHOLDER = 'Voice request in progress.';
+
+const LIVE_TOOL_LABELS = {
+  get_board_state: 'Reading board',
+  analyze_position: 'Analyzing position',
+  analyze_move: 'Analyzing move',
+  play_move: 'Updating board',
+  play_line: 'Demonstrating line',
+  load_position: 'Loading position',
+  reset_board: 'Resetting board',
+  set_orientation: 'Flipping board',
+  annotate_board: 'Annotating board'
+};
 
 const LIVE_SYSTEM_INSTRUCTION = [
   'You are a patient, practical chess mentor in a live voice conversation.',
   'Keep spoken replies concise, natural, and free of markdown.',
   'Use the supplied conversation and chess workspace context to continue the same lesson.',
   'The user may speak or type and may interrupt you while you are speaking.',
-  'Do not claim that you moved pieces, used Stockfish, or changed the board because live tools are not enabled yet.',
+  'Use the available virtual-board tools proactively when a visual example will improve the lesson.',
+  'Use Stockfish analysis tools before making objective claims about evaluations, best moves, tactics, or move quality.',
+  'Never claim that a tool succeeded until its function response confirms success.',
+  'These tools affect only the conversation workspace. Never imply that they control the physical chessboard.',
   'Messages beginning with [BOARD_CONTEXT_UPDATE] are silent internal state updates. Absorb them without replying unless the user is already discussing that board change.'
 ].join(' ');
 
@@ -25,6 +43,28 @@ function liveError(message, code = 'mentor_live_error', statusCode = 400) {
 
 function providerErrorMessage(error) {
   return error?.error?.message || error?.message || String(error || 'Gemini Live failed.');
+}
+
+function isAbortError(error) {
+  return error?.name === 'AbortError';
+}
+
+function toolLabel(name) {
+  return LIVE_TOOL_LABELS[name] || 'Using mentor tool';
+}
+
+function limitToolResponse(call, message, code) {
+  return {
+    id: call.id,
+    name: call.name,
+    response: { error: { message, code } }
+  };
+}
+
+function toolBoardRevision(result) {
+  const output = result?.response?.output;
+  const revision = output?.board?.revision ?? output?.revision ?? output?.analyzedRevision;
+  return Number.isInteger(revision) ? revision : null;
 }
 
 function mergeTranscript(current, incoming) {
@@ -104,6 +144,8 @@ class DeterministicMentorLiveSession {
     this.generation = 0;
     this.clientContent = [];
     this.realtimeInputs = [];
+    this.toolResponses = [];
+    this.pendingToolReply = null;
   }
 
   sendClientContent(payload) {
@@ -113,11 +155,54 @@ class DeterministicMentorLiveSession {
   sendRealtimeInput(payload) {
     if (this.closed) throw new Error('Deterministic Live session is closed.');
     this.realtimeInputs.push(payload);
-    if (payload.text && !payload.text.startsWith('[BOARD_CONTEXT_UPDATE]')) {
+    if (payload.text === 'Run the Live board tool demo.') {
+      this.emitToolCall([{
+        id: 'live-browser-line',
+        name: 'play_line',
+        args: { moves: ['e2e4', 'e7e5', 'g1f3', 'b8c6'] }
+      }], 'The Live board demonstration is complete.');
+    } else if (payload.text === 'Run the Live annotation tool demo.') {
+      this.emitToolCall([{
+        id: 'live-browser-annotation',
+        name: 'annotate_board',
+        args: {
+          highlights: [{ square: 'f7', role: 'danger' }],
+          arrows: [{ from: 'f3', to: 'e5', role: 'idea' }]
+        }
+      }], 'The teaching marks are now on the board.');
+    } else if (payload.text === 'Run the Live analysis tool demo.') {
+      this.emitToolCall([{
+        id: 'live-browser-analysis',
+        name: 'analyze_position',
+        args: { mode: 'quick' }
+      }], 'The Stockfish analysis is ready.');
+    } else if (payload.text && !payload.text.startsWith('[BOARD_CONTEXT_UPDATE]')) {
       this.respond(`I heard your typed question: ${payload.text}`);
     } else if (payload.audioStreamEnd) {
       this.emitAudioTurn();
     }
+  }
+
+  sendToolResponse(payload) {
+    if (this.closed) throw new Error('Deterministic Live session is closed.');
+    this.toolResponses.push(payload);
+    const reply = this.pendingToolReply;
+    this.pendingToolReply = null;
+    if (reply) this.respond(reply);
+  }
+
+  emitToolCall(functionCalls, afterResponseText = 'The requested tool completed.', { turnComplete = false } = {}) {
+    if (this.closed) return;
+    this.generation += 1;
+    this.pendingToolReply = afterResponseText;
+    this.callbacks.onmessage?.({
+      toolCall: { functionCalls },
+      ...(turnComplete ? { serverContent: { turnComplete: true } } : {})
+    });
+  }
+
+  cancelToolCalls(ids) {
+    if (!this.closed) this.callbacks.onmessage?.({ toolCallCancellation: { ids } });
   }
 
   respond(text) {
@@ -202,6 +287,7 @@ class MentorLiveService {
     store,
     chessService,
     textService,
+    toolService,
     connector,
     emit = () => {},
     model = DEFAULT_LIVE_MODEL,
@@ -212,6 +298,7 @@ class MentorLiveService {
     this.store = store;
     this.chessService = chessService;
     this.textService = textService;
+    this.toolService = toolService;
     this.connector = connector;
     this.emit = emit;
     this.model = model;
@@ -264,6 +351,10 @@ class MentorLiveService {
     }
   }
 
+  hasActiveTools(record) {
+    return record.activeToolCalls.size > 0 || record.turn?.toolBusy === true;
+  }
+
   async start(socket, { conversationId } = {}) {
     if (!conversationId || !this.store.getConversation(conversationId)) {
       throw liveError('Conversation not found.', 'mentor_live_conversation_not_found', 404);
@@ -294,6 +385,8 @@ class MentorLiveService {
       turn: null,
       pendingBoardState: null,
       contextPending: false,
+      activeToolCalls: new Map(),
+      toolQueue: Promise.resolve(),
       ready: false,
       closing: false,
       closedEmitted: false
@@ -318,7 +411,10 @@ class MentorLiveService {
           },
           systemInstruction: {
             parts: [{ text: LIVE_SYSTEM_INSTRUCTION }]
-          }
+          },
+          tools: this.toolService?.declarations()?.length
+            ? [{ functionDeclarations: this.toolService.declarations() }]
+            : undefined
         },
         callbacks: {
           onopen: () => this.logger.log?.(`[MENTOR_LIVE_OPEN] ${record.sessionId}`),
@@ -364,6 +460,13 @@ class MentorLiveService {
 
   sendText(socket, payload = {}) {
     const record = this.assertRecord(socket, payload);
+    if (this.hasActiveTools(record)) {
+      throw liveError(
+        'Wait for the current Live mentor tool to finish, or stop the Live session.',
+        'mentor_live_tool_busy',
+        409
+      );
+    }
     if (!validateRequestId(payload.requestId)) {
       throw liveError('A valid requestId is required.', 'mentor_live_invalid_request');
     }
@@ -386,14 +489,14 @@ class MentorLiveService {
       kind: 'voice'
     });
     record.contextPending = false;
-    record.turn = {
+    record.turn = this.createTurn(record, {
       turnId: this.createId(),
       requestId: payload.requestId,
       source: 'text',
       userText: payload.text.trim(),
       assistantText: '',
       pair
-    };
+    });
     this.emit(record.conversationId, 'mentor-live-user-transcript', {
       ...this.statusPayload(record, 'listening'),
       turnId: record.turn.turnId,
@@ -408,78 +511,362 @@ class MentorLiveService {
       isFinal: false,
       message: pair.assistantMessage
     });
+    record.turn.shellEmitted = true;
     record.providerSession.sendRealtimeInput({ text: record.turn.userText });
     this.emitStatus(record, 'thinking');
     return { duplicate: false, ...pair };
   }
 
+  createTurn(record, values) {
+    return {
+      turnId: values.turnId || this.createId(),
+      requestId: values.requestId,
+      source: values.source,
+      userText: values.userText || '',
+      assistantText: values.assistantText || '',
+      pair: values.pair || null,
+      toolBatchCount: 0,
+      toolCallCount: 0,
+      toolOrdinal: 0,
+      pendingToolBatches: 0,
+      hadTools: false,
+      toolBusy: false,
+      activeToolName: null,
+      activeToolIds: [],
+      pendingFinalStatus: null,
+      cancelledToolIds: new Set(),
+      cancelled: false,
+      placeholderTitle: null,
+      shellEmitted: values.shellEmitted === true,
+      record
+    };
+  }
+
   createAudioTurn(record) {
     record.turnOrdinal += 1;
     record.contextPending = false;
-    return {
-      turnId: this.createId(),
+    return this.createTurn(record, {
       requestId: `voice:${record.sessionId}:${record.turnOrdinal}`,
       source: 'audio',
-      userText: '',
-      assistantText: '',
-      pair: null
-    };
+      userText: ''
+    });
   }
 
   currentTurn(record, source = 'audio') {
     if (!record.turn) {
       record.turn = source === 'context'
-        ? {
-          turnId: this.createId(),
+        ? this.createTurn(record, {
           requestId: `context:${record.sessionId}:${record.turnOrdinal}`,
           source: 'context',
-          userText: '',
-          assistantText: '',
-          pair: null
-        }
+          userText: ''
+        })
         : this.createAudioTurn(record);
     }
     return record.turn;
   }
 
+  refreshTurnPair(turn) {
+    if (!turn.pair) return null;
+    turn.pair = {
+      ...turn.pair,
+      userMessage: this.store.getMessage(turn.pair.userMessage.id),
+      assistantMessage: this.store.getMessage(turn.pair.assistantMessage.id)
+    };
+    return turn.pair;
+  }
+
+  ensureTurnPair(record, turn) {
+    if (turn.source === 'context') return null;
+    if (!turn.pair) {
+      const userText = turn.userText || VOICE_TRANSCRIPT_PLACEHOLDER;
+      turn.pair = this.store.createMessagePair(record.conversationId, {
+        requestId: turn.requestId,
+        text: userText,
+        kind: 'voice',
+        assistantContent: turn.assistantText,
+        assistantStatus: 'streaming'
+      });
+      if (!turn.userText) turn.placeholderTitle = titleFromMessage(userText);
+    } else {
+      if (turn.userText) this.store.replaceMessageContent(turn.pair.userMessage.id, turn.userText);
+      this.store.replaceMessageContent(turn.pair.assistantMessage.id, turn.assistantText);
+      const assistant = this.store.getMessage(turn.pair.assistantMessage.id);
+      if (!['complete', 'failed', 'cancelled'].includes(assistant.status)) {
+        this.store.setMessageStatus(assistant.id, 'streaming');
+      }
+      this.refreshTurnPair(turn);
+    }
+
+    if (!turn.shellEmitted) {
+      this.emit(record.conversationId, 'mentor-live-user-transcript', {
+        ...this.statusPayload(record, 'listening'),
+        turnId: turn.turnId,
+        text: turn.userText,
+        isFinal: false,
+        message: turn.pair.userMessage
+      });
+      this.emit(record.conversationId, 'mentor-live-assistant-transcript', {
+        ...this.statusPayload(record, 'thinking'),
+        turnId: turn.turnId,
+        text: turn.assistantText,
+        isFinal: false,
+        message: turn.pair.assistantMessage
+      });
+      turn.shellEmitted = true;
+    }
+    return turn.pair;
+  }
+
+  updateTurnUserMessage(record, turn) {
+    if (!turn.pair || !turn.userText) return null;
+    this.store.replaceMessageContent(turn.pair.userMessage.id, turn.userText);
+    if (turn.placeholderTitle) {
+      const conversation = this.store.getConversation(record.conversationId);
+      if (conversation?.messageCount === 2 && conversation.title === turn.placeholderTitle) {
+        this.store.updateConversation(record.conversationId, { title: titleFromMessage(turn.userText) });
+      }
+      turn.placeholderTitle = null;
+    }
+    this.refreshTurnPair(turn);
+    return turn.pair.userMessage;
+  }
+
+  updateTurnAssistantMessage(turn) {
+    if (!turn.pair) return null;
+    this.store.replaceMessageContent(turn.pair.assistantMessage.id, turn.assistantText);
+    this.refreshTurnPair(turn);
+    return turn.pair.assistantMessage;
+  }
+
   handleInputTranscript(record, text) {
     if (record.closing) return;
-    if (record.turn?.source === 'text' || record.turn?.source === 'context' || record.turn?.assistantText) {
+    if (record.turn && !record.turn.toolBusy
+      && !(record.turn.source === 'audio' && record.turn.hadTools)
+      && (record.turn.source === 'text' || record.turn.source === 'context' || record.turn.assistantText)) {
       this.finalizeTurn(record, 'cancelled');
     }
     const turn = this.currentTurn(record);
     turn.userText = mergeTranscript(turn.userText, text);
+    const message = this.updateTurnUserMessage(record, turn);
     this.emit(record.conversationId, 'mentor-live-user-transcript', {
-      ...this.statusPayload(record, 'listening'),
+      ...this.statusPayload(record, turn.toolBusy ? 'tool_running' : 'listening'),
       turnId: turn.turnId,
       text: turn.userText,
-      isFinal: false
+      isFinal: false,
+      message
     });
-    this.emitStatus(record, 'listening');
+    if (!turn.toolBusy) this.emitStatus(record, 'listening');
   }
 
   handleOutputTranscript(record, text) {
     if (record.closing) return;
     const turn = this.currentTurn(record, record.contextPending ? 'context' : 'audio');
+    turn.hadTools = true;
     turn.assistantText = mergeTranscript(turn.assistantText, text);
+    const message = this.updateTurnAssistantMessage(turn);
+    const status = turn.toolBusy ? 'tool_running' : 'speaking';
     this.emit(record.conversationId, 'mentor-live-assistant-transcript', {
-      ...this.statusPayload(record, 'speaking'),
+      ...this.statusPayload(record, status),
       turnId: turn.turnId,
       text: turn.assistantText,
-      isFinal: false
+      isFinal: false,
+      message
     });
-    this.emitStatus(record, 'speaking');
+    if (!turn.toolBusy) this.emitStatus(record, 'speaking');
+  }
+
+  abortToolCalls(record, ids = null) {
+    const selected = ids ? new Set(ids.map(String)) : null;
+    let aborted = 0;
+    for (const [id, execution] of record.activeToolCalls.entries()) {
+      if (selected && !selected.has(id)) continue;
+      execution.cancelled = true;
+      execution.turn.cancelledToolIds.add(id);
+      execution.controller.abort();
+      aborted += 1;
+    }
+    if (selected && record.turn) {
+      for (const id of selected) record.turn.cancelledToolIds.add(id);
+    }
+    return aborted;
+  }
+
+  handleToolCancellation(record, cancellation = {}) {
+    const ids = Array.isArray(cancellation.ids) ? cancellation.ids.map(String) : [];
+    if (!ids.length) return;
+    this.abortToolCalls(record, ids);
+    record.socket.emit('mentor-live-interrupted', {
+      ...this.statusPayload(record, 'interrupted'),
+      turnId: record.turn?.turnId || null,
+      toolCallIds: ids
+    });
+  }
+
+  queueToolBatch(record, calls) {
+    const functionCalls = Array.isArray(calls) ? calls.filter((call) => call?.name) : [];
+    if (!functionCalls.length) return;
+    const turn = this.currentTurn(record, record.contextPending ? 'context' : 'audio');
+    turn.pendingToolBatches += 1;
+    turn.toolBusy = true;
+    const execution = record.toolQueue.then(async () => {
+      try {
+        await this.executeToolBatch(record, turn, functionCalls);
+      } finally {
+        this.finishToolBatch(record, turn);
+      }
+    });
+    record.toolQueue = execution.catch((error) => {
+      if (!isAbortError(error) && !record.closing) {
+        this.logger.error?.('[MENTOR_LIVE_TOOL_BATCH_FAILED]', JSON.stringify({
+          conversationId: record.conversationId,
+          sessionId: record.sessionId,
+          error: providerErrorMessage(error)
+        }));
+        this.handleProviderError(record, error);
+      }
+    });
+  }
+
+  finishToolBatch(record, turn) {
+    turn.pendingToolBatches = Math.max(0, turn.pendingToolBatches - 1);
+    if (turn.pendingToolBatches > 0 || record.activeToolCalls.size > 0) return;
+    turn.toolBusy = false;
+    turn.activeToolName = null;
+    turn.activeToolIds = [];
+    if (record.turn !== turn || record.closing || turn.cancelled) return;
+    if (turn.pendingFinalStatus) {
+      const status = turn.pendingFinalStatus;
+      turn.pendingFinalStatus = null;
+      this.finalizeTurn(record, status);
+      this.emitStatus(record, 'listening');
+    } else if (turn.cancelledToolIds.size > 0) {
+      this.emitStatus(record, 'thinking');
+    }
+  }
+
+  sendToolResponses(record, responses) {
+    if (!responses.length || record.closing || !record.ready) return false;
+    record.providerSession.sendToolResponse({ functionResponses: responses });
+    return true;
+  }
+
+  clearDeliveredBoardContext(record, result) {
+    const revision = toolBoardRevision(result);
+    if (revision === null) return;
+    const toolCallId = result?.toolCall?.id;
+    const actionId = record.pendingBoardState?.actionId;
+    const belongsToTool = toolCallId && actionId?.startsWith(`mentor:${toolCallId}:`);
+    if (belongsToTool && record.pendingBoardState?.state?.revision === revision) {
+      record.pendingBoardState = null;
+    }
+  }
+
+  async executeToolBatch(record, turn, calls) {
+    if (record.closing || turn.cancelled) return;
+    this.ensureTurnPair(record, turn);
+    turn.toolBatchCount += 1;
+    const providerCalls = calls.map((call, index) => ({
+      ...call,
+      id: String(call.id || `live:${turn.turnId}:${turn.toolCallCount + index + 1}`),
+      args: call.args && typeof call.args === 'object' ? call.args : {}
+    }));
+
+    if (turn.source === 'context') {
+      this.sendToolResponses(record, providerCalls.map((call) => limitToolResponse(
+        call,
+        'Tools cannot run from a silent board-context update.',
+        'live_context_tool_rejected'
+      )));
+      this.emitStatus(record, 'thinking');
+      return;
+    }
+    if (turn.toolBatchCount > MAX_LIVE_TOOL_BATCHES) {
+      this.sendToolResponses(record, providerCalls.map((call) => limitToolResponse(
+        call,
+        `Live mentor exceeded the ${MAX_LIVE_TOOL_BATCHES}-batch tool limit.`,
+        'live_tool_batch_limit'
+      )));
+      this.emitStatus(record, 'thinking');
+      return;
+    }
+    if (turn.toolCallCount + providerCalls.length > MAX_TOOL_CALLS) {
+      this.sendToolResponses(record, providerCalls.map((call) => limitToolResponse(
+        call,
+        `Live mentor exceeded the ${MAX_TOOL_CALLS}-tool-call limit.`,
+        'live_tool_call_limit'
+      )));
+      this.emitStatus(record, 'thinking');
+      return;
+    }
+
+    turn.toolCallCount += providerCalls.length;
+    turn.activeToolIds = providerCalls.map((call) => call.id);
+    const responses = [];
+
+    for (const call of providerCalls) {
+      if (record.closing || turn.cancelled || turn.cancelledToolIds.has(call.id)) continue;
+      turn.toolOrdinal += 1;
+      turn.activeToolName = call.name;
+      const controller = new AbortController();
+      const execution = { controller, turn, cancelled: false };
+      record.activeToolCalls.set(call.id, execution);
+      this.emitStatus(record, 'tool_running', {
+        toolName: call.name,
+        toolLabel: toolLabel(call.name),
+        toolCallIds: turn.activeToolIds
+      });
+
+      try {
+        const result = await this.toolService.execute({
+          conversationId: record.conversationId,
+          requestId: turn.requestId,
+          assistantMessageId: turn.pair.assistantMessage.id,
+          ordinal: turn.toolOrdinal,
+          call,
+          signal: controller.signal
+        });
+        this.clearDeliveredBoardContext(record, result);
+        if (!execution.cancelled && !turn.cancelled && !turn.cancelledToolIds.has(call.id)) {
+          responses.push({ id: call.id, name: call.name, response: result.response });
+        }
+      } catch (error) {
+        if (!isAbortError(error) && !execution.cancelled && !turn.cancelled) {
+          responses.push({
+            id: call.id,
+            name: call.name,
+            response: { error: { message: providerErrorMessage(error), code: error.code || 'tool_failed' } }
+          });
+        }
+      } finally {
+        if (record.activeToolCalls.get(call.id) === execution) record.activeToolCalls.delete(call.id);
+      }
+    }
+
+    if (!record.closing && !turn.cancelled && this.sendToolResponses(record, responses)) {
+      this.emitStatus(record, 'thinking');
+    }
   }
 
   handleProviderMessage(record, message) {
     if (this.bySocket.get(record.socket.id) !== record || record.closing) return;
+    if (message?.toolCallCancellation) {
+      this.handleToolCancellation(record, message.toolCallCancellation);
+    }
     const content = message?.serverContent;
-    if (content?.interrupted) {
+    const interrupted = content?.interrupted === true;
+    if (interrupted) {
+      const interruptedTurn = record.turn;
+      if (interruptedTurn) {
+        interruptedTurn.cancelled = true;
+        this.abortToolCalls(record);
+      }
       record.socket.emit('mentor-live-interrupted', {
         ...this.statusPayload(record, 'interrupted'),
-        turnId: record.turn?.turnId || null
+        turnId: interruptedTurn?.turnId || null
       });
-      if (record.turn && (record.turn.assistantText || record.turn.source !== 'audio')) {
+      if (interruptedTurn && (interruptedTurn.assistantText
+        || interruptedTurn.source !== 'audio'
+        || interruptedTurn.pair)) {
         this.finalizeTurn(record, 'cancelled');
       }
       this.emitStatus(record, 'listening');
@@ -502,18 +889,34 @@ class MentorLiveService {
           mimeType,
           sampleRate: match ? Number(match[1]) : AUDIO_OUTPUT_SAMPLE_RATE
         });
-        this.emitStatus(record, 'speaking');
+        if (!record.turn?.toolBusy) this.emitStatus(record, 'speaking');
       }
     }
-    if (content?.turnComplete && record.turn) {
-      this.finalizeTurn(record, 'complete');
-      this.emitStatus(record, 'listening');
+    const hasToolCalls = message?.toolCall?.functionCalls?.length > 0;
+    if (hasToolCalls) {
+      this.queueToolBatch(record, message.toolCall.functionCalls);
+    }
+    if (content?.turnComplete && record.turn && !interrupted && !hasToolCalls) {
+      if (record.turn.toolBusy) {
+        record.turn.pendingFinalStatus = 'complete';
+      } else {
+        this.finalizeTurn(record, 'complete');
+        this.emitStatus(record, 'listening');
+      }
     }
   }
 
   finalizeTurn(record, status) {
     const turn = record.turn;
     if (!turn) return null;
+    if (status === 'complete' && turn.toolBusy) {
+      turn.pendingFinalStatus = status;
+      return null;
+    }
+    if (status !== 'complete') {
+      turn.cancelled = true;
+      this.abortToolCalls(record);
+    }
     record.turn = null;
     record.contextPending = false;
 
@@ -534,6 +937,7 @@ class MentorLiveService {
         assistantStatus
       });
     } else {
+      this.store.replaceMessageContent(pair.userMessage.id, userText);
       this.store.replaceMessageContent(pair.assistantMessage.id, turn.assistantText);
       this.store.setMessageStatus(pair.assistantMessage.id, assistantStatus);
       pair = {
@@ -563,17 +967,17 @@ class MentorLiveService {
     return pair;
   }
 
-  notifyBoardUpdated(conversationId, state) {
+  notifyBoardUpdated(conversationId, state, { actionId = null } = {}) {
     const record = this.byConversation.get(conversationId);
     if (!record || record.closing || !record.ready) return false;
-    record.pendingBoardState = state;
+    record.pendingBoardState = { state, actionId };
     if (!record.turn) this.flushBoardContext(record);
     return true;
   }
 
   flushBoardContext(record) {
     if (!record.pendingBoardState || record.turn || record.closing || !record.ready) return false;
-    const state = record.pendingBoardState;
+    const { state } = record.pendingBoardState;
     record.pendingBoardState = null;
     record.contextPending = true;
     record.providerSession.sendRealtimeInput({
@@ -585,6 +989,9 @@ class MentorLiveService {
   handleProviderError(record, error) {
     if (this.bySocket.get(record.socket.id) !== record) return;
     const message = providerErrorMessage(error);
+    record.ready = false;
+    record.pendingBoardState = null;
+    this.abortToolCalls(record);
     if (record.turn) this.finalizeTurn(record, 'failed');
     record.socket.emit('mentor-live-error', {
       ...this.statusPayload(record, 'failed'),
@@ -604,6 +1011,9 @@ class MentorLiveService {
 
   handleProviderClose(record) {
     if (this.bySocket.get(record.socket.id) !== record && record.closedEmitted) return;
+    record.ready = false;
+    record.pendingBoardState = null;
+    this.abortToolCalls(record);
     if (record.turn) this.finalizeTurn(record, 'cancelled');
     this.release(record);
     if (!record.closedEmitted) {
@@ -621,7 +1031,9 @@ class MentorLiveService {
   async closeRecord(record, reason) {
     if (record.closing) return;
     record.closing = true;
+    this.abortToolCalls(record);
     if (record.turn) this.finalizeTurn(record, 'cancelled');
+    await record.toolQueue.catch(() => {});
     try {
       record.providerSession?.sendRealtimeInput({ audioStreamEnd: true });
     } catch (error) {
@@ -729,7 +1141,9 @@ module.exports = {
   DeterministicMentorLiveConnector,
   GeminiMentorLiveConnector,
   LIVE_CONTEXT_CHARACTER_LIMIT,
+  LIVE_TOOL_LABELS,
   LIVE_SYSTEM_INSTRUCTION,
+  MAX_LIVE_TOOL_BATCHES,
   MentorLiveService,
   boardContextFromState,
   initialHistoryTurns,

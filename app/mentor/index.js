@@ -56,7 +56,9 @@ function createMentorFeature({
       duplicate: result.duplicate,
       state: result.state
     });
-    liveService?.notifyBoardUpdated(conversationId, result.state);
+    liveService?.notifyBoardUpdated(conversationId, result.state, {
+      actionId: result.actionId
+    });
   };
   const toolService = new MentorToolService({
     store,
@@ -79,6 +81,7 @@ function createMentorFeature({
     store,
     chessService,
     textService: service,
+    toolService,
     connector,
     emit,
     model: liveModel,

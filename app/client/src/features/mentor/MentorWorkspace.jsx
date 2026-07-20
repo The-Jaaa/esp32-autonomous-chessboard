@@ -166,6 +166,20 @@ function formatClassification(value) {
   return value.replaceAll('_', ' ').replace(/^./, (character) => character.toUpperCase());
 }
 
+function liveStatusText(live) {
+  if (live.status === 'failed') return 'Live voice failed';
+  if (live.status === 'tool_running') return live.toolLabel || 'Using mentor tool';
+  const labels = {
+    connecting: 'Live voice connecting',
+    listening: 'Live voice listening',
+    muted: 'Live voice muted',
+    thinking: 'Live voice thinking',
+    speaking: 'Live voice speaking',
+    interrupted: 'Live voice interrupted'
+  };
+  return labels[live.status] || 'Live voice';
+}
+
 function AnalysisResult({ result }) {
   if (!result || !['position_analysis', 'move_analysis'].includes(result.kind)) return null;
   if (result.kind === 'move_analysis') {
@@ -316,6 +330,8 @@ export default function MentorWorkspace() {
     onError: onLiveError,
     onConversationChanged: onLiveConversationChanged
   });
+  const mentorRequestBusy = Boolean(activeRequestId || live.toolBusy);
+  const boardInteractionLocked = Boolean(mentorRequestBusy || pendingBoardAction);
 
   const createConversation = useCallback(async () => {
     const result = await mentorApi.createConversation();
@@ -482,7 +498,7 @@ export default function MentorWorkspace() {
 
   const sendMessage = async (text = draft) => {
     const trimmed = text.trim();
-    if (!trimmed || !conversationId || activeRequestId || !socketReady) return;
+    if (!trimmed || !conversationId || mentorRequestBusy || !socketReady) return;
     const requestId = crypto.randomUUID();
     stickToBottomRef.current = true;
     setShowJumpToLatest(false);
@@ -561,7 +577,7 @@ export default function MentorWorkspace() {
   }, []);
 
   const onBoardMove = useCallback((args) => {
-    if (!boardState || activeRequestId || pendingBoardAction || boardState.gameStatus.isGameOver) return false;
+    if (!boardState || boardInteractionLocked || boardState.gameStatus.isGameOver) return false;
     const { sourceSquare, targetSquare } = args;
     const preview = new Chess(boardState.fen);
     let move;
@@ -582,10 +598,10 @@ export default function MentorWorkspace() {
       actionId
     ));
     return true;
-  }, [activeRequestId, boardState, commitBoardAction, conversationId, pendingBoardAction]);
+  }, [boardInteractionLocked, boardState, commitBoardAction, conversationId]);
 
   const flipBoard = () => {
-    if (!boardState || activeRequestId || pendingBoardAction) return;
+    if (!boardState || boardInteractionLocked) return;
     const actionId = crypto.randomUUID();
     const orientation = boardState.orientation === 'white' ? 'black' : 'white';
     commitBoardAction(actionId, () => mentorApi.setOrientation(
@@ -597,7 +613,7 @@ export default function MentorWorkspace() {
   };
 
   const resetBoard = () => {
-    if (!boardState || activeRequestId || pendingBoardAction) return;
+    if (!boardState || boardInteractionLocked) return;
     const actionId = crypto.randomUUID();
     commitBoardAction(actionId, () => mentorApi.resetBoard(
       conversationId,
@@ -608,7 +624,7 @@ export default function MentorWorkspace() {
 
   const loadFen = async (event) => {
     event.preventDefault();
-    if (!boardState || activeRequestId || pendingBoardAction) return;
+    if (!boardState || boardInteractionLocked) return;
     const actionId = crypto.randomUUID();
     const success = await commitBoardAction(actionId, () => mentorApi.loadPosition(
       conversationId,
@@ -689,7 +705,7 @@ export default function MentorWorkspace() {
                 <p>Choose a starting point or ask your own chess question.</p>
                 <div className="mentor-suggestions">
                   {SUGGESTIONS.map((suggestion) => (
-                    <button key={suggestion.title} disabled={!socketReady || !!activeRequestId} onClick={() => sendMessage(suggestion.prompt)}>
+                    <button key={suggestion.title} disabled={!socketReady || mentorRequestBusy} onClick={() => sendMessage(suggestion.prompt)}>
                       <strong>{suggestion.title}</strong>
                       <span>{suggestion.prompt}</span>
                     </button>
@@ -733,8 +749,8 @@ export default function MentorWorkspace() {
           {(live.isActive || live.status === 'failed') && (
             <div className={`mentor-live-status is-${live.status}`}>
               <span className="mentor-live-status-dot" />
-              <strong>{live.status === 'failed' ? 'Live voice failed' : `Live voice ${live.status}`}</strong>
-              {live.isActive && <span>Speak naturally or type below</span>}
+              <strong>{liveStatusText(live)}</strong>
+              {live.isActive && <span>{live.toolBusy ? 'Microphone and Stop remain available' : 'Speak naturally or type below'}</span>}
             </div>
           )}
           <div className="mentor-composer">
@@ -774,7 +790,7 @@ export default function MentorWorkspace() {
               {activeRequestId ? (
                 <button className="mentor-send-button" onClick={stopStreaming} title="Stop response" aria-label="Stop response"><Square size={15} fill="currentColor" /></button>
               ) : (
-                <button className="mentor-send-button" onClick={() => sendMessage()} disabled={!draft.trim() || !socketReady || live.status === 'connecting'} title="Send message" aria-label="Send message"><ArrowUp size={19} /></button>
+                <button className="mentor-send-button" onClick={() => sendMessage()} disabled={!draft.trim() || !socketReady || live.status === 'connecting' || live.toolBusy} title="Send message" aria-label="Send message"><ArrowUp size={19} /></button>
               )}
             </div>
           </div>
@@ -786,9 +802,9 @@ export default function MentorWorkspace() {
         <header>
           <div><span>WORKSPACE</span><h2>Position board</h2></div>
           <div className="mentor-board-tools">
-            <button onClick={flipBoard} disabled={!boardState || !!activeRequestId || !!pendingBoardAction} title="Flip board" aria-label="Flip board"><Repeat2 size={17} /></button>
-            <button onClick={() => { setFenDraft(boardState?.fen || ''); setFenDialogOpen(true); }} disabled={!boardState || !!activeRequestId || !!pendingBoardAction} title="Load FEN" aria-label="Load FEN"><Pencil size={16} /></button>
-            <button onClick={resetBoard} disabled={!boardState || !!activeRequestId || !!pendingBoardAction} title="Reset board" aria-label="Reset board"><RefreshCcw size={16} /></button>
+            <button onClick={flipBoard} disabled={!boardState || boardInteractionLocked} title="Flip board" aria-label="Flip board"><Repeat2 size={17} /></button>
+            <button onClick={() => { setFenDraft(boardState?.fen || ''); setFenDialogOpen(true); }} disabled={!boardState || boardInteractionLocked} title="Load FEN" aria-label="Load FEN"><Pencil size={16} /></button>
+            <button onClick={resetBoard} disabled={!boardState || boardInteractionLocked} title="Reset board" aria-label="Reset board"><RefreshCcw size={16} /></button>
           </div>
         </header>
         <div className="mentor-board-stage">
@@ -809,7 +825,7 @@ export default function MentorWorkspace() {
               squareStyles: annotationSquareStyles,
               allowDrawingArrows: false,
               onPieceDrop: onBoardMove,
-              allowDragging: !!boardState && !activeRequestId && !pendingBoardAction && !boardState.gameStatus.isGameOver,
+              allowDragging: !!boardState && !boardInteractionLocked && !boardState.gameStatus.isGameOver,
               darkSquareStyle: { backgroundColor: '#1e293b' },
               lightSquareStyle: { backgroundColor: '#e2e8f0' }
             }} />
@@ -817,7 +833,7 @@ export default function MentorWorkspace() {
         </div>
         <div className="mentor-board-summary">
           <div><span>Turn</span><strong>{boardState?.turnName || 'White'}</strong></div>
-          <div><span>Status</span><strong>{pendingBoardAction ? 'Saving move...' : boardState?.gameStatus.resultText || 'Ready'}</strong></div>
+          <div><span>Status</span><strong>{live.toolBusy ? live.toolLabel : pendingBoardAction ? 'Saving move...' : boardState?.gameStatus.resultText || 'Ready'}</strong></div>
         </div>
         <div className="mentor-move-list">
           <div className="mentor-move-list-header"><span>MOVE LIST</span><strong>{boardState?.history.length || 0} plies</strong></div>
