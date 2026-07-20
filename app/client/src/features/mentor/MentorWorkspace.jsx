@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Chessboard } from 'react-chessboard';
 import { Chess } from 'chess.js';
 import {
+  ArrowDown,
   ArrowUp,
   Bot,
   Check,
@@ -271,8 +272,26 @@ export default function MentorWorkspace() {
   const [pendingBoardAction, setPendingBoardAction] = useState(null);
   const [fenDialogOpen, setFenDialogOpen] = useState(false);
   const [fenDraft, setFenDraft] = useState('');
-  const messageEndRef = useRef(null);
+  const messageScrollRef = useRef(null);
+  const stickToBottomRef = useRef(true);
   const streamPollRef = useRef(null);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+
+  const scrollToLatest = useCallback((behavior = 'auto') => {
+    const scrollArea = messageScrollRef.current;
+    if (!scrollArea) return;
+    stickToBottomRef.current = true;
+    setShowJumpToLatest(false);
+    scrollArea.scrollTo({ top: scrollArea.scrollHeight, behavior });
+  }, []);
+
+  const onMessageScroll = useCallback((event) => {
+    const scrollArea = event.currentTarget;
+    const distanceFromBottom = scrollArea.scrollHeight - scrollArea.clientHeight - scrollArea.scrollTop;
+    const isNearBottom = distanceFromBottom <= 72;
+    stickToBottomRef.current = isNearBottom;
+    setShowJumpToLatest(!isNearBottom);
+  }, []);
 
   const refreshList = useCallback(async (search = '') => {
     const result = await mentorApi.listConversations(search);
@@ -310,6 +329,8 @@ export default function MentorWorkspace() {
   useEffect(() => {
     if (!conversationId) return;
     let cancelled = false;
+    stickToBottomRef.current = true;
+    setShowJumpToLatest(false);
     setLoading(true);
     mentorApi.getConversation(conversationId)
       .then(({ conversation: nextConversation }) => {
@@ -427,8 +448,10 @@ export default function MentorWorkspace() {
   }, [refreshList]);
 
   useEffect(() => {
-    messageEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  }, [messages]);
+    if (!stickToBottomRef.current) return undefined;
+    const frame = requestAnimationFrame(() => scrollToLatest('auto'));
+    return () => cancelAnimationFrame(frame);
+  }, [messages, scrollToLatest]);
 
   useEffect(() => {
     const timeout = setTimeout(() => {
@@ -441,6 +464,8 @@ export default function MentorWorkspace() {
     const trimmed = text.trim();
     if (!trimmed || !conversationId || activeRequestId || !socketReady) return;
     const requestId = crypto.randomUUID();
+    stickToBottomRef.current = true;
+    setShowJumpToLatest(false);
     setDraft('');
     setError('');
     setActiveRequestId(requestId);
@@ -626,23 +651,35 @@ export default function MentorWorkspace() {
           <div><span>MENTOR</span><h1>{conversation?.title || 'New chat'}</h1></div>
           <span className="mentor-model-label">Gemini 3.5 Flash</span>
         </header>
-        <div className="mentor-message-scroll">
-          {!loading && messages.length === 0 ? (
-            <div className="mentor-empty-state">
-              <div className="mentor-empty-mark"><Bot size={28} /></div>
-              <h2>What would you like to work on?</h2>
-              <p>Choose a starting point or ask your own chess question.</p>
-              <div className="mentor-suggestions">
-                {SUGGESTIONS.map((suggestion) => (
-                  <button key={suggestion.title} disabled={!socketReady || !!activeRequestId} onClick={() => sendMessage(suggestion.prompt)}>
-                    <strong>{suggestion.title}</strong>
-                    <span>{suggestion.prompt}</span>
-                  </button>
-                ))}
+        <div className="mentor-message-scroll-wrap">
+          <div className="mentor-message-scroll" ref={messageScrollRef} onScroll={onMessageScroll}>
+            {!loading && messages.length === 0 ? (
+              <div className="mentor-empty-state">
+                <div className="mentor-empty-mark"><Bot size={28} /></div>
+                <h2>What would you like to work on?</h2>
+                <p>Choose a starting point or ask your own chess question.</p>
+                <div className="mentor-suggestions">
+                  {SUGGESTIONS.map((suggestion) => (
+                    <button key={suggestion.title} disabled={!socketReady || !!activeRequestId} onClick={() => sendMessage(suggestion.prompt)}>
+                      <strong>{suggestion.title}</strong>
+                      <span>{suggestion.prompt}</span>
+                    </button>
+                  ))}
+                </div>
               </div>
-            </div>
-          ) : messages.map((message) => <Message key={message.id} message={message} />)}
-          <div ref={messageEndRef} />
+            ) : messages.map((message) => <Message key={message.id} message={message} />)}
+          </div>
+          {showJumpToLatest && (
+            <button
+              className="mentor-jump-latest"
+              type="button"
+              onClick={() => scrollToLatest()}
+              title="Jump to latest message"
+              aria-label="Jump to latest message"
+            >
+              <ArrowDown size={18} />
+            </button>
+          )}
         </div>
         <div className="mentor-composer-wrap">
           {error && <div className="mentor-error"><span>{error}</span><button onClick={() => setError('')} title="Dismiss error"><X size={15} /></button></div>}

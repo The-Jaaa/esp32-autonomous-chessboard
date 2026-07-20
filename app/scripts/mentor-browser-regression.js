@@ -133,6 +133,35 @@ async function runViewport(browser, viewport) {
   await expectText(page.locator('.mentor-move-list'), 'e4');
 
   await createNewConversation(page);
+  const boardTopBeforeStreaming = (await page.locator('.mentor-board-frame').boundingBox()).y;
+  await page.getByPlaceholder('Ask your chess mentor').fill('Run the browser scrolling demo.');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expectText(page.locator('.mentor-message.is-model'), 'Streaming line 50');
+  const scrollArea = page.locator('.mentor-message-scroll');
+  const overflowing = await scrollArea.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    overflowY: getComputedStyle(element).overflowY,
+    scrollHeight: element.scrollHeight
+  }));
+  assert.strictEqual(overflowing.overflowY, 'auto');
+  assert.ok(overflowing.scrollHeight > overflowing.clientHeight, 'The long mentor chat did not create a scrollable area.');
+  await scrollArea.evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event('scroll'));
+  });
+  await page.getByRole('button', { name: 'Jump to latest message' }).waitFor({ state: 'visible' });
+  await expectText(page.locator('.mentor-message.is-model'), 'Streaming line 80');
+  assert.ok(await scrollArea.evaluate((element) => element.scrollTop) < 5, 'Streaming forced the chat back to the bottom.');
+  const boardTopDuringStreaming = (await page.locator('.mentor-board-frame').boundingBox()).y;
+  assert.ok(Math.abs(boardTopDuringStreaming - boardTopBeforeStreaming) < 1, 'The chess board moved while the chat grew.');
+  await page.getByRole('button', { name: 'Jump to latest message' }).click();
+  await page.waitForFunction(() => {
+    const element = document.querySelector('.mentor-message-scroll');
+    return element && element.scrollHeight - element.clientHeight - element.scrollTop < 5;
+  });
+  await expectText(page.locator('.mentor-message.is-model'), 'Streaming line 90');
+
+  await createNewConversation(page);
   await expectText(page.locator('.mentor-move-list-header'), '0 plies');
   await page.goto(firstUrl);
   await expectText(page.locator('.mentor-move-list'), 'e4');

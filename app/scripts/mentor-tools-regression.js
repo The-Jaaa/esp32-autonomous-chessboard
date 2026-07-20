@@ -5,7 +5,7 @@ const path = require('path');
 const { MentorStore } = require('../mentor/store');
 const { MentorChessService } = require('../mentor/chess-service');
 const { MentorService } = require('../mentor/service');
-const { GeminiMentorTextProvider } = require('../mentor/text-provider');
+const { GeminiMentorTextProvider, MAX_TOOL_ROUNDS } = require('../mentor/text-provider');
 const { MentorToolService } = require('../mentor/tool-service');
 
 function temporaryDatabase(name) {
@@ -194,11 +194,50 @@ async function providerRoundTripRegression() {
   assert.deepStrictEqual(sent[1][0].functionResponse.response, { output: { uci: 'e2e4' } });
 }
 
+async function providerToolLimitFinalReplyRegression() {
+  let round = 0;
+  let executions = 0;
+  const chat = {
+    async sendMessageStream() {
+      const currentRound = round++;
+      const chunks = currentRound < MAX_TOOL_ROUNDS
+        ? [{ functionCalls: [{ id: `round-${currentRound}`, name: 'get_board_state', args: {} }] }]
+        : [{ text: 'Final explanation.' }];
+      return (async function* streamChunks() {
+        for (const chunk of chunks) yield chunk;
+      }());
+    }
+  };
+  const provider = new GeminiMentorTextProvider({
+    ai: { chats: { create: () => chat } }
+  });
+  const previousKey = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = 'test-key';
+  const output = [];
+  try {
+    for await (const delta of provider.stream({
+      messages: [{ role: 'user', content: 'Use every tool round.' }],
+      toolDeclarations: [{ name: 'get_board_state' }],
+      executeTool: async () => {
+        executions += 1;
+        return { response: { output: { ok: true } } };
+      }
+    })) output.push(delta);
+  } finally {
+    if (previousKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = previousKey;
+  }
+  assert.strictEqual(executions, MAX_TOOL_ROUNDS);
+  assert.strictEqual(round, MAX_TOOL_ROUNDS + 1);
+  assert.deepStrictEqual(output, ['Final explanation.']);
+}
+
 async function serviceToolLoopRegressions() {
   const store = new MentorStore({ dbPath: ':memory:' });
   const chess = new MentorChessService({ store });
   const conversation = store.createConversation();
   let executions = 0;
+  const loggedErrors = [];
   const toolService = new MentorToolService({ store, chessService: chess, delay: async () => {} });
   const provider = {
     async *stream({ executeTool }) {
@@ -208,7 +247,12 @@ async function serviceToolLoopRegressions() {
       yield 'Done.';
     }
   };
-  const service = new MentorService({ store, provider, toolService });
+  const service = new MentorService({
+    store,
+    provider,
+    toolService,
+    logger: { error: (...args) => loggedErrors.push(args) }
+  });
   service.submitMessage(conversation.id, { requestId: 'service-loop', text: 'Show e4.' });
   const completed = await waitForTerminal(store, conversation.id, 'service-loop');
   assert.strictEqual(completed.status, 'complete');
@@ -235,6 +279,9 @@ async function serviceToolLoopRegressions() {
   assert.strictEqual(failed.status, 'failed');
   assert.strictEqual(store.listToolCalls(limited.id).length, 12);
   assert.strictEqual(chess.getState(limited.id).revision, 0);
+  assert.strictEqual(loggedErrors.length, 1);
+  assert.match(loggedErrors[0].join(' '), /MENTOR_RESPONSE_FAILED/);
+  assert.match(loggedErrors[0].join(' '), /12-tool-call limit/);
   store.close();
 }
 
@@ -242,6 +289,7 @@ async function main() {
   await storeAndRestartRegressions();
   await executorRegressions();
   await providerRoundTripRegression();
+  await providerToolLimitFinalReplyRegression();
   await serviceToolLoopRegressions();
   console.log('Mentor board-control tool regressions passed.');
 }

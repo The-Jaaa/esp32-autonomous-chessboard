@@ -240,7 +240,10 @@
 .mentor-conversation {
   display: grid;
   grid-template-rows: 66px minmax(0, 1fr) auto;
+  height: 100vh;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   border-right: 1px solid var(--mentor-border);
 }
 
@@ -283,10 +286,61 @@
   background: var(--surface-panel);
 }
 
-.mentor-message-scroll {
+.mentor-message-scroll-wrap {
+  position: relative;
   min-height: 0;
+  overflow: hidden;
+}
+
+.mentor-message-scroll {
+  height: 100%;
   overflow-y: auto;
   padding: 30px clamp(28px, 6vw, 82px) 24px;
+  scrollbar-color: var(--mentor-border) transparent;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+
+.mentor-message-scroll::-webkit-scrollbar,
+.mentor-history::-webkit-scrollbar,
+.mentor-move-list ol::-webkit-scrollbar {
+  width: 9px;
+}
+
+.mentor-message-scroll::-webkit-scrollbar-track,
+.mentor-history::-webkit-scrollbar-track,
+.mentor-move-list ol::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.mentor-message-scroll::-webkit-scrollbar-thumb,
+.mentor-history::-webkit-scrollbar-thumb,
+.mentor-move-list ol::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 8px;
+  background: var(--mentor-border);
+  background-clip: padding-box;
+}
+
+.mentor-jump-latest {
+  position: absolute;
+  right: 22px;
+  bottom: 14px;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--mentor-border);
+  border-radius: 50%;
+  color: var(--mentor-text);
+  background: var(--surface-panel-strong);
+  box-shadow: 0 7px 20px rgba(0, 0, 0, .32);
+  cursor: pointer;
+}
+
+.mentor-jump-latest:hover {
+  border-color: var(--mentor-accent);
+  background: var(--mentor-accent);
 }
 
 .mentor-message {
@@ -573,9 +627,13 @@
 .mentor-board-panel {
   display: flex;
   flex-direction: column;
+  height: 100vh;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   padding-bottom: 22px;
   background: rgba(15, 23, 42, .72);
+  box-sizing: border-box;
 }
 .mentor-board-panel > header { min-height: 66px; }
 .mentor-board-tools { display: flex; gap: 4px; }
@@ -596,6 +654,7 @@
 .mentor-board-stage {
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr);
+  flex: 0 0 auto;
   gap: 7px;
   width: calc(100% - 44px);
   margin: 26px 22px 18px;
@@ -643,6 +702,7 @@
 .mentor-board-summary {
   display: grid;
   grid-template-columns: 1fr 1fr;
+  flex: 0 0 auto;
   gap: 1px;
   margin: 0 22px;
   border: 1px solid var(--mentor-border);
@@ -657,6 +717,7 @@
   flex-direction: column;
   min-height: 0;
   flex: 1;
+  overflow: hidden;
   margin: 14px 22px 0;
   border: 1px solid var(--mentor-border);
   background: var(--surface-panel);
@@ -670,7 +731,15 @@
   font-size: 10px;
 }
 .mentor-move-list-header strong { color: var(--mentor-muted); font-weight: 600; }
-.mentor-move-list ol { min-height: 0; overflow-y: auto; padding: 6px 0; list-style: none; }
+.mentor-move-list ol {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px 0;
+  list-style: none;
+  scrollbar-color: var(--mentor-border) transparent;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
 .mentor-move-list li { display: grid; grid-template-columns: 30px 1fr 1fr; min-height: 30px; align-items: center; }
 .mentor-move-list li:hover { background: rgba(59, 130, 246, .12); }
 .mentor-move-list li > span { padding-left: 10px; color: var(--mentor-muted); font-size: 11px; }

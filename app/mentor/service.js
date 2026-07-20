@@ -12,12 +12,13 @@ function validateMessageText(text) {
 const MAX_TOOL_CALLS = 12;
 
 class MentorService {
-  constructor({ store, provider, toolService = null, contextProvider = null, emit = () => {} }) {
+  constructor({ store, provider, toolService = null, contextProvider = null, emit = () => {}, logger = console }) {
     this.store = store;
     this.provider = provider;
     this.toolService = toolService;
     this.contextProvider = contextProvider;
     this.emit = emit;
+    this.logger = logger;
     this.active = new Map();
   }
 
@@ -125,6 +126,13 @@ class MentorService {
         if (!active.cancellationEmitted) this.emitCancellation(conversationId, requestId, active);
       } else {
         const message = this.store.setMessageStatus(assistantMessage.id, 'failed');
+        this.logger.error('[MENTOR_RESPONSE_FAILED]', JSON.stringify({
+          conversationId,
+          requestId,
+          assistantMessageId: assistantMessage.id,
+          error: error.message,
+          stack: error.stack
+        }));
         this.emit(conversationId, 'mentor-message-failed', {
           conversationId,
           requestId,

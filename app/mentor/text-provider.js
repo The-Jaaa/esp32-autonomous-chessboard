@@ -8,6 +8,7 @@ const DEFAULT_SYSTEM_INSTRUCTION = [
   'Treat Stockfish output as engine evidence and distinguish it from your own pedagogical explanation.',
   'Use quick analysis by default and deep analysis only when the learner asks for detailed calculation or verification.',
   'Never invent an engine result or claim analysis completed until its tool result confirms success.',
+  'When creating a puzzle or example, choose one position, validate or analyze it, and present it. Do not replace the position repeatedly in one response unless a tool reports that the chosen position is invalid.',
   'Use plain text and concise paragraphs. Avoid markdown tables.'
 ].join(' ');
 
@@ -59,7 +60,9 @@ class GeminiMentorTextProvider {
     });
 
     let message = latest.content;
-    for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
+    // A tool result needs one additional model turn so Gemini can explain it.
+    // MAX_TOOL_ROUNDS limits rounds that may execute tools, not that final reply.
+    for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
       if (signal?.aborted) return;
       const response = await chat.sendMessageStream({ message });
       const calls = [];
@@ -78,6 +81,9 @@ class GeminiMentorTextProvider {
       }
 
       if (!calls.length) return;
+      if (round === MAX_TOOL_ROUNDS) {
+        throw new Error(`Mentor exceeded the ${MAX_TOOL_ROUNDS}-round tool limit.`);
+      }
       if (typeof executeTool !== 'function') throw new Error('Mentor tool execution is unavailable.');
       const responses = [];
       for (const call of calls) {
@@ -93,7 +99,6 @@ class GeminiMentorTextProvider {
       }
       message = responses;
     }
-    throw new Error(`Mentor exceeded the ${MAX_TOOL_ROUNDS}-round tool limit.`);
   }
 }
 
@@ -160,6 +165,15 @@ class DeterministicMentorTextProvider {
         args: { mode: 'quick' }
       });
       yield 'The move assessment is ready.';
+      return;
+    }
+    if (prompt === 'Run the browser scrolling demo.') {
+      for (let index = 1; index <= 90; index += 1) {
+        if (signal?.aborted) return;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        if (signal?.aborted) return;
+        yield `Streaming line ${index}\n`;
+      }
       return;
     }
     for (const chunk of this.chunks) {
