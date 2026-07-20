@@ -1056,8 +1056,8 @@ export default function GameBoard() {
 
           <div className="mode-toggle">
             <div className="mode-info" style={{ width: '100%' }}>
-              <h3>Live Mentor Mode</h3>
-              <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '10px' }}>Real-time voice &amp; move assistant.</p>
+              <h3>Chess Mentor</h3>
+              <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '10px' }}>Interactive lessons, analysis, and board demonstrations.</p>
               <Link to="/mentor" className="btn btn-secondary" style={{ display: 'block', textAlign: 'center', textDecoration: 'none' }}>
                 Open Mentor Page
               </Link>

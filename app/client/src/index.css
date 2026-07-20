@@ -10,6 +10,12 @@
   --success-color: #10b981;
   --warning-color: #f59e0b;
   --danger-color: #ef4444;
+  --surface-page: #0f172a;
+  --surface-panel: #1e293b;
+  --surface-panel-strong: #334155;
+  --surface-input: #0f172a;
+  --surface-hover: #475569;
+  --special-color: #8b5cf6;
 }
 
 * {

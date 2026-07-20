@@ -52,17 +52,55 @@ async function expectText(locator, text) {
   });
 }
 
+async function createNewConversation(page) {
+  const previousUrl = page.url();
+  await page.locator('.mentor-new-chat').click();
+  await page.waitForURL((url) => url.toString() !== previousUrl);
+  await page.waitForFunction(() => {
+    const composer = document.querySelector('textarea[placeholder="Ask your chess mentor"]');
+    return composer && !composer.disabled;
+  });
+}
+
 async function runViewport(browser, viewport) {
   const context = await browser.newContext({ viewport });
   const page = await context.newPage();
-  await page.goto('http://127.0.0.1:3010/mentor-v2');
+  await page.goto('http://127.0.0.1:3010/');
+  await expectText(page.locator('.logo-container'), 'Companion Board');
+  await expectText(page.locator('.mode-info'), 'Interactive lessons, analysis, and board demonstrations.');
+  await page.locator('[data-square="a1"] > div').waitFor({ state: 'visible' });
+  const normalBoardColors = await page.evaluate(() => ({
+    dark: getComputedStyle(document.querySelector('[data-square="a1"] > div')).backgroundColor,
+    light: getComputedStyle(document.querySelector('[data-square="b1"] > div')).backgroundColor
+  }));
+  await page.getByRole('link', { name: 'Open Mentor Page' }).click();
   await page.locator('.mentor-shell').waitFor({ state: 'visible' });
   await page.locator('[data-square="e2"]').waitFor({ state: 'visible' });
-  await page.waitForURL(/\/mentor-v2\/[^/]+$/);
+  await page.waitForURL(/\/mentor\/[^/]+$/);
 
-  const initialConversationUrl = page.url();
-  await page.locator('.mentor-new-chat').click();
-  await page.waitForURL((url) => url.toString() !== initialConversationUrl);
+  const mentorTheme = await page.evaluate(() => {
+    const root = getComputedStyle(document.documentElement);
+    const shell = getComputedStyle(document.querySelector('.mentor-shell'));
+    return {
+      accent: root.getPropertyValue('--accent-color').trim(),
+      mentorAccent: shell.getPropertyValue('--mentor-accent').trim(),
+      text: root.getPropertyValue('--text-primary').trim(),
+      mentorText: shell.getPropertyValue('--mentor-text').trim(),
+      fontFamily: shell.fontFamily,
+      dark: getComputedStyle(document.querySelector('[data-square="a1"] > div')).backgroundColor,
+      light: getComputedStyle(document.querySelector('[data-square="b1"] > div')).backgroundColor
+    };
+  });
+  assert.strictEqual(mentorTheme.mentorAccent, mentorTheme.accent);
+  assert.strictEqual(mentorTheme.mentorText, mentorTheme.text);
+  assert.match(mentorTheme.fontFamily, /Outfit/i);
+  assert.deepStrictEqual(
+    { dark: mentorTheme.dark, light: mentorTheme.light },
+    normalBoardColors,
+    'Mentor and normal boards should use the same square colors.'
+  );
+
+  await createNewConversation(page);
   await page.getByRole('button', { name: /Analyze a game/ }).waitFor({ state: 'visible' });
 
   const sidebar = await page.locator('.mentor-sidebar').boundingBox();
@@ -77,18 +115,29 @@ async function runViewport(browser, viewport) {
   await expectText(page.locator('.mentor-move-list'), 'e4');
   await expectText(page.locator('.mentor-board-summary'), 'Black');
   const firstUrl = page.url();
+  const firstConversationId = firstUrl.split('/').at(-1);
+
+  await page.goto(`http://127.0.0.1:3010/mentor-v2/${firstConversationId}`);
+  await page.waitForURL(`http://127.0.0.1:3010/mentor/${firstConversationId}`);
+  await expectText(page.locator('.mentor-move-list'), 'e4');
+
+  const conversationCountBeforeRedirect = await page.evaluate(() => fetch('/api/mentor/conversations').then((response) => response.json()).then((payload) => payload.conversations.length));
+  await page.goto('http://127.0.0.1:3010/mentor-v2');
+  await page.waitForURL(/\/mentor(?:\/[^/]+)?$/);
+  const conversationCountAfterRedirect = await page.evaluate(() => fetch('/api/mentor/conversations').then((response) => response.json()).then((payload) => payload.conversations.length));
+  assert.strictEqual(conversationCountAfterRedirect, conversationCountBeforeRedirect, 'Legacy base redirect created a duplicate conversation.');
+  await page.goto(firstUrl);
 
   await page.reload();
   await expectText(page.locator('.mentor-message.is-model'), 'Let us examine the position together.');
   await expectText(page.locator('.mentor-move-list'), 'e4');
 
-  await page.locator('.mentor-new-chat').click();
-  await page.waitForURL((url) => url.toString() !== firstUrl);
+  await createNewConversation(page);
   await expectText(page.locator('.mentor-move-list-header'), '0 plies');
   await page.goto(firstUrl);
   await expectText(page.locator('.mentor-move-list'), 'e4');
 
-  await page.locator('.mentor-new-chat').click();
+  await createNewConversation(page);
   await page.getByPlaceholder('Ask your chess mentor').fill('Run the browser tool demo.');
   const demoStarted = Date.now();
   await page.getByRole('button', { name: 'Send message' }).click();
@@ -110,11 +159,11 @@ async function runViewport(browser, viewport) {
   await expectText(page.locator('.mentor-tool-card[data-tool-name="play_line"]'), 'Demonstrate 4 moves');
   assert.notStrictEqual(await page.locator('[data-square="f7"] > div').first().evaluate((element) => getComputedStyle(element).boxShadow), 'none');
   await page.screenshot({
-    path: path.join(__dirname, '..', 'tmp', `mentor-v2-tools-${viewport.width}x${viewport.height}.png`),
+    path: path.join(__dirname, '..', 'tmp', `mentor-tools-${viewport.width}x${viewport.height}.png`),
     fullPage: true
   });
 
-  await page.locator('.mentor-new-chat').click();
+  await createNewConversation(page);
   await page.getByPlaceholder('Ask your chess mentor').fill('Run the cancellable browser demo.');
   await page.getByRole('button', { name: 'Send message' }).click();
   await expectText(page.locator('.mentor-tool-card[data-tool-name="play_line"]'), '1 of 6 moves');
@@ -128,7 +177,7 @@ async function runViewport(browser, viewport) {
   assert.ok(cancelledDetail.conversation.chess.history.length < 6);
   assert.strictEqual(cancelledDetail.conversation.messages.at(-1).toolCalls[0].status, 'cancelled');
 
-  await page.locator('.mentor-new-chat').click();
+  await createNewConversation(page);
   await page.getByPlaceholder('Ask your chess mentor').fill('Help me understand isolated pawns.');
   await page.getByRole('button', { name: 'Send message' }).click();
   await expectText(page.locator('.mentor-message.is-model'), 'Let us examine the position together.');
@@ -149,9 +198,7 @@ async function runViewport(browser, viewport) {
   await page.getByRole('button', { name: 'Reset board' }).click();
   await expectText(page.locator('.mentor-board-summary'), 'Game in progress');
 
-  const beforeRollbackChat = page.url();
-  await page.locator('.mentor-new-chat').click();
-  await page.waitForURL((url) => url.toString() !== beforeRollbackChat);
+  await createNewConversation(page);
   await expectText(page.locator('.mentor-move-list-header'), '0 plies');
   await expectText(page.locator('.mentor-board-summary'), 'Game in progress');
   await page.reload();
@@ -186,7 +233,7 @@ async function runViewport(browser, viewport) {
   );
 
   await page.screenshot({
-    path: path.join(__dirname, '..', 'tmp', `mentor-v2-${viewport.width}x${viewport.height}.png`),
+    path: path.join(__dirname, '..', 'tmp', `mentor-${viewport.width}x${viewport.height}.png`),
     fullPage: true
   });
 
@@ -196,9 +243,13 @@ async function runViewport(browser, viewport) {
   await page.getByRole('button', { name: 'Delete' }).click();
   await page.waitForURL((url) => url.toString() !== rollbackUrl);
 
-  await page.goto('http://127.0.0.1:3010/');
+  await page.getByRole('link', { name: 'Companion board' }).click();
+  await page.waitForURL('http://127.0.0.1:3010/');
   await expectText(page.locator('.logo-container'), 'Companion Board');
-  await page.goto('http://127.0.0.1:3010/mentor');
+  await page.getByRole('link', { name: 'Open Mentor Page' }).click();
+  await page.locator('.mentor-shell').waitFor({ state: 'visible' });
+  await page.getByRole('link', { name: 'Live voice mentor' }).click();
+  await page.waitForURL('http://127.0.0.1:3010/mentor-live');
   await expectText(page.locator('body'), 'Live Multimodal Mentor');
   await page.getByRole('button', { name: 'Start Mentor' }).waitFor({ state: 'visible' });
   await context.close();
@@ -222,7 +273,7 @@ async function main() {
     });
     await runViewport(browser, { width: 1440, height: 900 });
     await runViewport(browser, { width: 1920, height: 1080 });
-    console.log('Mentor v2 Playwright desktop regressions passed.');
+    console.log('Mentor Playwright desktop regressions passed.');
   } catch (error) {
     if (serverOutput) console.error(serverOutput);
     throw error;

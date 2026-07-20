@@ -219,7 +219,7 @@ export default function MentorWorkspace() {
   const createConversation = useCallback(async () => {
     const result = await mentorApi.createConversation();
     await refreshList('');
-    navigate(`/mentor-v2/${result.conversation.id}`);
+    navigate(`/mentor/${result.conversation.id}`);
     return result.conversation;
   }, [navigate, refreshList]);
 
@@ -230,7 +230,7 @@ export default function MentorWorkspace() {
         const list = await refreshList('');
         if (cancelled) return;
         if (!conversationId) {
-          if (list.length) navigate(`/mentor-v2/${list[0].id}`, { replace: true });
+          if (list.length) navigate(`/mentor/${list[0].id}`, { replace: true });
           else await createConversation();
         }
       } catch (loadError) {
@@ -410,7 +410,7 @@ export default function MentorWorkspace() {
       await mentorApi.deleteConversation(id);
       const list = await refreshList(query);
       if (id === conversationId) {
-        if (list.length) navigate(`/mentor-v2/${list[0].id}`);
+        if (list.length) navigate(`/mentor/${list[0].id}`);
         else await createConversation();
       }
     } catch (deleteError) {
@@ -531,7 +531,7 @@ export default function MentorWorkspace() {
                   key={item.id}
                   conversation={item}
                   active={item.id === conversationId}
-                  onOpen={(id) => navigate(`/mentor-v2/${id}`)}
+                  onOpen={(id) => navigate(`/mentor/${id}`)}
                   onRename={renameConversation}
                   onDelete={deleteConversation}
                 />
@@ -541,7 +541,7 @@ export default function MentorWorkspace() {
         </nav>
         <div className="mentor-sidebar-footer">
           <Link to="/"><ChevronLeft size={17} /> Companion board</Link>
-          <Link to="/mentor"><Mic size={17} /> Live voice mentor</Link>
+          <Link to="/mentor-live"><Mic size={17} /> Live voice mentor</Link>
         </div>
       </aside>
 
@@ -613,8 +613,8 @@ export default function MentorWorkspace() {
             allowDrawingArrows: false,
             onPieceDrop: onBoardMove,
             allowDragging: !!boardState && !activeRequestId && !pendingBoardAction && !boardState.gameStatus.isGameOver,
-            darkSquareStyle: { backgroundColor: '#63714f' },
-            lightSquareStyle: { backgroundColor: '#e5e1d5' }
+            darkSquareStyle: { backgroundColor: '#1e293b' },
+            lightSquareStyle: { backgroundColor: '#e2e8f0' }
           }} />
         </div>
         <div className="mentor-board-summary">
