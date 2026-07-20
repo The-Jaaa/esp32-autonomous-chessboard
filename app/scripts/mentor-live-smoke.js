@@ -1,6 +1,7 @@
 require('dotenv').config();
 const { GoogleGenAI } = require('@google/genai');
 const { TOOL_DECLARATIONS } = require('../mentor/tool-service');
+const { initialHistoryTurns } = require('../mentor/live-service');
 
 const SMOKE_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 
@@ -104,6 +105,25 @@ async function main() {
       }
     }).then((connected) => {
       session = connected;
+      session.sendClientContent({
+        turns: initialHistoryTurns([{
+          role: 'user',
+          content: 'Help me understand weak opening squares.'
+        }, {
+          role: 'model',
+          content: 'We can inspect the board together.'
+        }], {
+          fen: SMOKE_FEN,
+          pgn: '',
+          turnName: 'White',
+          gameStatus: { resultText: 'Game in progress' },
+          history: [],
+          orientation: 'white',
+          revision: 0,
+          annotations: { highlights: [], arrows: [] }
+        }),
+        turnComplete: false
+      });
       session.sendRealtimeInput({
         text: 'Run the requested board-state and safe annotation smoke test, then explain the result aloud.'
       });

@@ -7,6 +7,7 @@ const { createMentorFeature } = require('../mentor');
 const { MentorStore } = require('../mentor/store');
 const {
   DeterministicMentorLiveConnector,
+  initialHistoryTurns,
   mergeTranscript
 } = require('../mentor/live-service');
 
@@ -67,6 +68,28 @@ async function storeAndTranscriptRegressions() {
   assert.strictEqual(mergeTranscript('Can you', 'Can you explain this?'), 'Can you explain this?');
   assert.strictEqual(mergeTranscript('Can you explain', 'explain this?'), 'Can you explain this?');
   assert.strictEqual(mergeTranscript('Complete sentence', 'sentence'), 'Complete sentence');
+
+  const initialTurns = initialHistoryTurns([{
+    role: 'user',
+    content: 'Show me a fork.'
+  }, {
+    role: 'model',
+    content: 'Let us use the board.'
+  }], {
+    fen: '8/8/8/8/8/8/8/8 w - - 0 1',
+    pgn: '',
+    turnName: 'White',
+    gameStatus: { resultText: 'Game in progress' },
+    history: [],
+    orientation: 'white',
+    revision: 0,
+    annotations: { highlights: [], arrows: [] }
+  });
+  assert.strictEqual(initialTurns.length, 1);
+  assert.strictEqual(initialTurns[0].role, 'user');
+  assert.match(initialTurns[0].parts[0].text, /Learner: Show me a fork\./);
+  assert.match(initialTurns[0].parts[0].text, /Mentor: Let us use the board\./);
+  assert.match(initialTurns[0].parts[0].text, /INITIAL_CHESS_WORKSPACE/);
 
   const store = new MentorStore({ dbPath: ':memory:' });
   const conversation = store.createConversation();
@@ -495,6 +518,15 @@ async function socketRegressions() {
   await emitWithAck(client, 'mentor-subscribe', { conversationId: second.id });
   const secondStart = await emitWithAck(client, 'mentor-live-start', { conversationId: second.id });
   assert.strictEqual(secondStart.success, true);
+  const unexpectedClose = waitForEvent(client, 'mentor-live-error', (payload) =>
+    payload.conversationId === second.id && payload.code === 'mentor_live_provider_closed');
+  connector.sessions.at(-1).callbacks.onclose({
+    code: 1007,
+    reason: 'Request contains an invalid argument.',
+    wasClean: true
+  });
+  assert.match((await unexpectedClose).error, /invalid argument/);
+  assert.strictEqual(feature.liveService.isConversationActive(second.id), false);
   client.disconnect();
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.strictEqual(feature.liveService.isConversationActive(second.id), false);

@@ -339,7 +339,7 @@ export function useMentorLive({ socket, conversationId, onMessage, onError, onCo
     };
     const onClosed = (payload) => {
       if (!matches(payload)) return;
-      cleanupLocal('inactive');
+      cleanupLocal(payload?.failed ? 'failed' : 'inactive');
     };
     const onDisconnect = () => cleanupLocal('failed');
 

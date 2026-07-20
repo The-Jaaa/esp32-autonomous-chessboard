@@ -100,23 +100,23 @@ function boardContextFromState(state) {
 }
 
 function initialHistoryTurns(messages, chessState) {
-  const turns = messages
+  const transcript = messages
     .filter((message) => message.content && ['user', 'model'].includes(message.role))
-    .map((message) => ({
-      role: message.role === 'model' ? 'model' : 'user',
-      parts: [{ text: message.content }]
-    }));
-  turns.push({
+    .map((message) => `${message.role === 'model' ? 'Mentor' : 'Learner'}: ${message.content}`)
+    .join('\n\n');
+  return [{
     role: 'user',
     parts: [{
       text: [
+        '[INITIAL_CONVERSATION_CONTEXT]',
+        transcript || '(no prior messages)',
         '[INITIAL_CHESS_WORKSPACE]',
         boardContextFromState(chessState),
+        'The labelled transcript above is prior conversation context, not a new request.',
         'Use this as context only. Do not respond until the learner speaks or types.'
       ].join('\n')
     }]
-  });
-  return turns;
+  }];
 }
 
 function audioParts(message) {
@@ -420,7 +420,7 @@ class MentorLiveService {
           onopen: () => this.logger.log?.(`[MENTOR_LIVE_OPEN] ${record.sessionId}`),
           onmessage: (message) => this.handleProviderMessage(record, message),
           onerror: (error) => this.handleProviderError(record, error),
-          onclose: () => this.handleProviderClose(record)
+          onclose: (event) => this.handleProviderClose(record, event)
         }
       });
 
@@ -1009,16 +1009,37 @@ class MentorLiveService {
     });
   }
 
-  handleProviderClose(record) {
+  handleProviderClose(record, event = {}) {
     if (this.bySocket.get(record.socket.id) !== record && record.closedEmitted) return;
+    const unexpected = !record.closing;
+    const closeMessage = event?.reason || 'Gemini Live closed unexpectedly.';
+    this.logger.log?.('[MENTOR_LIVE_PROVIDER_CLOSED]', JSON.stringify({
+      conversationId: record.conversationId,
+      sessionId: record.sessionId,
+      code: event?.code ?? null,
+      reason: event?.reason || null,
+      wasClean: event?.wasClean ?? null
+    }));
     record.ready = false;
     record.pendingBoardState = null;
     this.abortToolCalls(record);
-    if (record.turn) this.finalizeTurn(record, 'cancelled');
+    if (record.turn) this.finalizeTurn(record, unexpected ? 'failed' : 'cancelled');
     this.release(record);
+    if (unexpected) {
+      record.socket.emit('mentor-live-error', {
+        ...this.statusPayload(record, 'failed'),
+        error: closeMessage,
+        code: 'mentor_live_provider_closed'
+      });
+      this.emitStatus(record, 'failed', { error: closeMessage });
+    }
     if (!record.closedEmitted) {
       record.closedEmitted = true;
-      this.emit(record.conversationId, 'mentor-live-closed', this.statusPayload(record, 'closed'));
+      this.emit(record.conversationId, 'mentor-live-closed', {
+        ...this.statusPayload(record, unexpected ? 'failed' : 'closed'),
+        reason: unexpected ? closeMessage : 'provider_closed',
+        failed: unexpected
+      });
     }
   }
 
@@ -1031,6 +1052,11 @@ class MentorLiveService {
   async closeRecord(record, reason) {
     if (record.closing) return;
     record.closing = true;
+    this.logger.log?.('[MENTOR_LIVE_CLOSING]', JSON.stringify({
+      conversationId: record.conversationId,
+      sessionId: record.sessionId,
+      reason
+    }));
     this.abortToolCalls(record);
     if (record.turn) this.finalizeTurn(record, 'cancelled');
     await record.toolQueue.catch(() => {});
