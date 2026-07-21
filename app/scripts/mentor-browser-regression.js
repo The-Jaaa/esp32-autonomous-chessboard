@@ -414,6 +414,16 @@ async function runViewport(browser, viewport) {
   await expectText(page.locator('.logo-container'), 'Companion Board');
   await page.getByRole('link', { name: 'Open Mentor Page' }).click();
   await page.locator('.mentor-shell').waitFor({ state: 'visible' });
+  await expectText(page.locator('.mentor-audio-output'), 'Voice output');
+  assert.strictEqual(
+    await page.locator('.mentor-audio-segments button.is-selected').textContent(),
+    'Auto'
+  );
+  await page.getByRole('button', { name: 'Browser', exact: true }).click();
+  assert.strictEqual(
+    await page.locator('.mentor-audio-segments button.is-selected').textContent(),
+    'Browser'
+  );
   await page.getByRole('button', { name: 'Start Live voice' }).click();
   await expectText(page.locator('.mentor-live-status'), 'Live voice listening');
   await expectText(page.locator('.mentor-model-label'), 'Gemini 3.1 Flash Live');

@@ -41,6 +41,9 @@ finally {
 }
 
 if (-not $SkipFirmware) {
+    Invoke-Checked 'ESP32 mentor speaker production firmware build' {
+        & (Join-Path $PSScriptRoot 'verify-mentor-speaker.ps1')
+    }
     Invoke-Checked 'ESP32 USB-only and offline resource diagnostic firmware builds' {
         & (Join-Path $PSScriptRoot 'verify-offline-embedded.ps1')
     }

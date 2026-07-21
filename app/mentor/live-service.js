@@ -292,6 +292,7 @@ class MentorLiveService {
     textService,
     toolService,
     activityService = null,
+    speakerService = null,
     connector,
     emit = () => {},
     model = DEFAULT_LIVE_MODEL,
@@ -304,6 +305,7 @@ class MentorLiveService {
     this.textService = textService;
     this.toolService = toolService;
     this.activityService = activityService;
+    this.speakerService = speakerService;
     this.connector = connector;
     this.emit = emit;
     this.model = model;
@@ -327,6 +329,10 @@ class MentorLiveService {
       conversationId: record.conversationId,
       sessionId: record.sessionId,
       status,
+      outputMode: record.speaker?.outputMode || 'auto',
+      resolvedOutput: record.speaker?.resolvedOutput || 'browser',
+      deviceId: record.speaker?.deviceId || 'main-board',
+      boardVolume: record.speaker?.boardVolume ?? 50,
       ...extra
     };
   }
@@ -360,7 +366,12 @@ class MentorLiveService {
     return record.activeToolCalls.size > 0 || record.turn?.toolBusy === true;
   }
 
-  async start(socket, { conversationId } = {}) {
+  async start(socket, {
+    conversationId,
+    outputMode = 'auto',
+    deviceId = 'main-board',
+    boardVolume = 50
+  } = {}) {
     if (!conversationId || !this.store.getConversation(conversationId)) {
       throw liveError('Conversation not found.', 'mentor_live_conversation_not_found', 404);
     }
@@ -390,6 +401,8 @@ class MentorLiveService {
       turn: null,
       pendingBoardState: null,
       contextPending: false,
+      suppressAudioUntilTurnComplete: false,
+      speaker: null,
       activeToolCalls: new Map(),
       toolQueue: Promise.resolve(),
       ready: false,
@@ -397,9 +410,24 @@ class MentorLiveService {
       closedEmitted: false
     };
     this.reserve(record);
-    this.emitStatus(record, 'connecting');
 
     try {
+      record.speaker = this.speakerService
+        ? this.speakerService.bindSession({
+          conversationId,
+          sessionId: record.sessionId,
+          outputMode,
+          deviceId,
+          volume: boardVolume
+        })
+        : {
+          outputMode,
+          resolvedOutput: 'browser',
+          deviceId,
+          boardVolume,
+          speakerStatus: outputMode === 'auto' ? 'fallback' : 'browser'
+        };
+      this.emitStatus(record, 'connecting');
       record.providerSession = await this.connector.connect({
         model: this.model,
         config: {
@@ -437,9 +465,11 @@ class MentorLiveService {
       });
       record.ready = true;
       this.emitStatus(record, 'listening');
-      return { duplicate: false, sessionId: record.sessionId };
+      return { duplicate: false, sessionId: record.sessionId, ...record.speaker };
     } catch (error) {
+      this.speakerService?.releaseSession(conversationId, record.sessionId, 'start_failed');
       this.release(record);
+      if (error?.code?.startsWith('mentor_speaker_')) throw error;
       throw liveError(providerErrorMessage(error), 'mentor_live_connect_failed', 502);
     }
   }
@@ -495,6 +525,7 @@ class MentorLiveService {
       kind: 'voice'
     });
     record.contextPending = false;
+    record.suppressAudioUntilTurnComplete = false;
     record.turn = this.createTurn(record, {
       turnId: this.createId(),
       requestId: payload.requestId,
@@ -876,6 +907,8 @@ class MentorLiveService {
         ...this.statusPayload(record, 'interrupted'),
         turnId: interruptedTurn?.turnId || null
       });
+      this.speakerService?.clearOutput(record.conversationId, record.sessionId, 'provider_interrupted');
+      record.suppressAudioUntilTurnComplete = false;
       if (interruptedTurn && (interruptedTurn.assistantText
         || interruptedTurn.source !== 'audio'
         || interruptedTurn.pair)) {
@@ -894,13 +927,33 @@ class MentorLiveService {
       if (part.inlineData?.data) {
         const mimeType = part.inlineData.mimeType || 'audio/pcm;rate=24000';
         const match = /rate=(\d+)/i.exec(mimeType);
-        record.socket.emit('mentor-live-audio', {
-          conversationId: record.conversationId,
-          sessionId: record.sessionId,
-          data: part.inlineData.data,
-          mimeType,
-          sampleRate: match ? Number(match[1]) : AUDIO_OUTPUT_SAMPLE_RATE
-        });
+        const sampleRate = match ? Number(match[1]) : AUDIO_OUTPUT_SAMPLE_RATE;
+        let destination = record.speaker?.resolvedOutput === 'board' ? 'board' : 'browser';
+        if (!record.suppressAudioUntilTurnComplete && this.speakerService) {
+          const routed = this.speakerService.routeAudio({
+            conversationId: record.conversationId,
+            sessionId: record.sessionId,
+            pcm: Buffer.from(part.inlineData.data, 'base64'),
+            sampleRate
+          });
+          destination = routed.destination;
+          if (destination === 'browser' && record.speaker?.outputMode === 'auto') {
+            record.speaker = {
+              ...record.speaker,
+              resolvedOutput: 'browser',
+              speakerStatus: 'fallback'
+            };
+          }
+        }
+        if (!record.suppressAudioUntilTurnComplete && destination === 'browser') {
+          record.socket.emit('mentor-live-audio', {
+            conversationId: record.conversationId,
+            sessionId: record.sessionId,
+            data: part.inlineData.data,
+            mimeType,
+            sampleRate
+          });
+        }
         if (!record.turn?.toolBusy) this.emitStatus(record, 'speaking');
       }
     }
@@ -909,6 +962,8 @@ class MentorLiveService {
       this.queueToolBatch(record, message.toolCall.functionCalls);
     }
     if (content?.turnComplete && record.turn && !interrupted && !hasToolCalls) {
+      this.speakerService?.endSpeech(record.conversationId, record.sessionId);
+      record.suppressAudioUntilTurnComplete = false;
       if (record.turn.toolBusy) {
         record.turn.pendingFinalStatus = 'complete';
       } else {
@@ -1078,6 +1133,7 @@ class MentorLiveService {
       wasClean: event?.wasClean ?? null
     }));
     record.ready = false;
+    this.speakerService?.releaseSession(record.conversationId, record.sessionId, 'provider_closed');
     record.pendingBoardState = null;
     this.abortToolCalls(record);
     if (record.turn) this.finalizeTurn(record, unexpected ? 'failed' : 'cancelled');
@@ -1122,6 +1178,7 @@ class MentorLiveService {
     } catch (error) {
       this.logger.warn?.('[MENTOR_LIVE_AUDIO_END_FAILED]', providerErrorMessage(error));
     }
+    this.speakerService?.releaseSession(record.conversationId, record.sessionId, reason);
     this.release(record);
     try {
       await Promise.resolve(record.providerSession?.close());
@@ -1149,6 +1206,19 @@ class MentorLiveService {
 
   async closeAll() {
     await Promise.all([...this.bySocket.values()].map((record) => this.closeRecord(record, 'shutdown')));
+  }
+
+  interruptOutput(socket, payload = {}) {
+    const record = this.assertRecord(socket, payload);
+    record.suppressAudioUntilTurnComplete = true;
+    this.speakerService?.clearOutput(record.conversationId, record.sessionId, 'client_interrupt');
+    record.socket.emit('mentor-live-interrupted', {
+      ...this.statusPayload(record, 'interrupted'),
+      turnId: record.turn?.turnId || null,
+      outputOnly: true
+    });
+    this.emitStatus(record, record.turn?.toolBusy ? 'tool_running' : 'listening');
+    return true;
   }
 
   registerSocket(socket) {
@@ -1204,6 +1274,14 @@ class MentorLiveService {
       try {
         await this.stop(socket, payload);
         reply(acknowledge, { success: true });
+      } catch (error) {
+        fail(socket, payload, acknowledge, error);
+      }
+    });
+    socket.on('mentor-live-interrupt-output', (payload = {}, acknowledge) => {
+      try {
+        const success = this.interruptOutput(socket, payload);
+        reply(acknowledge, { success });
       } catch (error) {
         fail(socket, payload, acknowledge, error);
       }

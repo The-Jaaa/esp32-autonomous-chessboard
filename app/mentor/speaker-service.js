@@ -1,0 +1,808 @@
+const net = require('net');
+const { EventEmitter } = require('events');
+
+const SPEAKER_PROTOCOL_VERSION = 1;
+const SPEAKER_MAGIC = Buffer.from('CMSP');
+const SPEAKER_HEADER_BYTES = 16;
+const SPEAKER_SAMPLE_RATE = 24000;
+const SPEAKER_BYTES_PER_SECOND = SPEAKER_SAMPLE_RATE * 2;
+const MAX_SPEAKER_QUEUE_BYTES = SPEAKER_BYTES_PER_SECOND * 42;
+const MAX_BUFFERED_RESPONSE_BYTES = SPEAKER_BYTES_PER_SECOND * 40;
+const SPEAKER_START_BUFFER_MS = 3000;
+const SPEAKER_FEED_AHEAD_MS = 2500;
+const SPEAKER_DEGRADED_BUFFER_MS = 41000;
+const SPEAKER_IDLE_END_MS = 2000;
+const SPEAKER_END_RESEND_MS = 250;
+const SPEAKER_PUMP_INTERVAL_MS = 20;
+const SPEAKER_PCM_FRAME_MS = 40;
+const SPEAKER_FEED_AHEAD_BYTES = Math.floor(
+  SPEAKER_BYTES_PER_SECOND * SPEAKER_FEED_AHEAD_MS / 1000
+);
+const SPEAKER_PCM_FRAME_BYTES = Math.floor(
+  SPEAKER_BYTES_PER_SECOND * SPEAKER_PCM_FRAME_MS / 1000
+);
+const SPEAKER_START_BUFFER_BYTES = Math.floor(
+  SPEAKER_BYTES_PER_SECOND * SPEAKER_START_BUFFER_MS / 1000
+);
+const MAX_HANDSHAKE_BYTES = 4096;
+const DEFAULT_DEVICE_ID = 'main-board';
+const DEFAULT_VOLUME = 50;
+
+const FRAME_TYPES = Object.freeze({
+  START: 1,
+  PCM: 2,
+  CLEAR: 3,
+  END: 4,
+  PING: 5
+});
+
+function speakerError(message, code = 'mentor_speaker_error', statusCode = 400) {
+  const error = new Error(message);
+  error.code = code;
+  error.statusCode = statusCode;
+  return error;
+}
+
+function normalizeOutputMode(value) {
+  const mode = String(value || 'auto').toLowerCase();
+  if (!['auto', 'board', 'browser'].includes(mode)) {
+    throw speakerError('Audio output must be auto, board, or browser.', 'mentor_speaker_invalid_output');
+  }
+  return mode;
+}
+
+function normalizeVolume(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return DEFAULT_VOLUME;
+  return Math.max(0, Math.min(100, Math.round(number)));
+}
+
+function createSpeakerFrame(type, payload = Buffer.alloc(0), sequence = 0, flags = 0) {
+  const body = Buffer.isBuffer(payload) ? payload : Buffer.from(JSON.stringify(payload), 'utf8');
+  const frame = Buffer.allocUnsafe(SPEAKER_HEADER_BYTES + body.length);
+  SPEAKER_MAGIC.copy(frame, 0);
+  frame.writeUInt8(SPEAKER_PROTOCOL_VERSION, 4);
+  frame.writeUInt8(type, 5);
+  frame.writeUInt16BE(flags, 6);
+  frame.writeUInt32BE(sequence >>> 0, 8);
+  frame.writeUInt32BE(body.length >>> 0, 12);
+  body.copy(frame, SPEAKER_HEADER_BYTES);
+  return frame;
+}
+
+function parseSpeakerFrame(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < SPEAKER_HEADER_BYTES) {
+    throw speakerError('Speaker frame is incomplete.', 'mentor_speaker_frame_incomplete');
+  }
+  if (!buffer.subarray(0, 4).equals(SPEAKER_MAGIC)) {
+    throw speakerError('Speaker frame has invalid magic.', 'mentor_speaker_frame_magic');
+  }
+  if (buffer.readUInt8(4) !== SPEAKER_PROTOCOL_VERSION) {
+    throw speakerError('Speaker frame uses an unsupported version.', 'mentor_speaker_frame_version');
+  }
+  const payloadLength = buffer.readUInt32BE(12);
+  if (buffer.length !== SPEAKER_HEADER_BYTES + payloadLength) {
+    throw speakerError('Speaker frame length does not match its payload.', 'mentor_speaker_frame_length');
+  }
+  return {
+    version: buffer.readUInt8(4),
+    type: buffer.readUInt8(5),
+    flags: buffer.readUInt16BE(6),
+    sequence: buffer.readUInt32BE(8),
+    payload: buffer.subarray(SPEAKER_HEADER_BYTES)
+  };
+}
+
+class MentorSpeakerService extends EventEmitter {
+  constructor({
+    token = process.env.ESP32_AUDIO_TOKEN || '',
+    defaultDeviceId = DEFAULT_DEVICE_ID,
+    emitStatus = () => {},
+    logger = console,
+    createServer = net.createServer,
+    maxQueueBytes = MAX_SPEAKER_QUEUE_BYTES,
+    maxResponseBytes = MAX_BUFFERED_RESPONSE_BYTES,
+    startBufferBytes = SPEAKER_START_BUFFER_BYTES,
+    idleEndMs = SPEAKER_IDLE_END_MS,
+    now = () => Date.now()
+  } = {}) {
+    super();
+    this.token = String(token || '');
+    this.defaultDeviceId = defaultDeviceId;
+    this.emitStatus = emitStatus;
+    this.logger = logger;
+    this.maxQueueBytes = maxQueueBytes;
+    this.maxResponseBytes = maxResponseBytes;
+    this.startBufferBytes = startBufferBytes;
+    this.idleEndMs = idleEndMs;
+    this.now = now;
+    this.devices = new Map();
+    this.bindings = new Map();
+    this.sockets = new Set();
+    this.server = createServer((socket) => this.accept(socket));
+    this.pingTimer = null;
+  }
+
+  listen(port = 3001, host) {
+    if (this.server.listening) return this.server;
+    this.server.listen(port, host, () => {
+      this.logger.log?.(`[Mentor Speaker] TCP server listening on ${host || '0.0.0.0'}:${port}`);
+    });
+    this.pingTimer = setInterval(() => this.pingDevices(), 10000);
+    this.pingTimer.unref?.();
+    return this.server;
+  }
+
+  accept(socket) {
+    this.sockets.add(socket);
+    socket.setNoDelay(true);
+    socket.setKeepAlive(true, 10000);
+    const connection = { socket, buffer: '', device: null, closed: false };
+    socket.on('data', (chunk) => this.handleDeviceData(connection, chunk));
+    socket.on('close', () => this.removeConnection(connection, 'disconnected'));
+    socket.on('error', (error) => {
+      this.logger.warn?.('[Mentor Speaker] socket error:', error.message);
+      this.removeConnection(connection, 'error');
+    });
+  }
+
+  handleDeviceData(connection, chunk) {
+    if (connection.closed) return;
+    connection.buffer += chunk.toString('utf8');
+    if (connection.buffer.length > MAX_HANDSHAKE_BYTES * 4) {
+      connection.socket.destroy(new Error('Speaker telemetry exceeded the input limit.'));
+      return;
+    }
+    while (true) {
+      const newline = connection.buffer.indexOf('\n');
+      if (newline < 0) break;
+      const line = connection.buffer.slice(0, newline).trim();
+      connection.buffer = connection.buffer.slice(newline + 1);
+      if (!line) continue;
+      let message;
+      try {
+        message = JSON.parse(line);
+      } catch {
+        connection.socket.destroy(new Error('Invalid speaker JSON.'));
+        return;
+      }
+      if (!connection.device) this.registerDevice(connection, message);
+      else this.handleTelemetry(connection.device, message);
+    }
+  }
+
+  registerDevice(connection, message) {
+    const boardId = String(message?.boardId || '').trim();
+    const suppliedToken = String(message?.token || '');
+    const capabilities = message?.capabilities || {};
+    const validCapabilities = capabilities.encoding === 'pcm_s16le'
+      && Number(capabilities.sampleRate) === SPEAKER_SAMPLE_RATE
+      && Number(capabilities.channels) === 1;
+    if (message?.type !== 'hello'
+      || Number(message?.protocolVersion) !== SPEAKER_PROTOCOL_VERSION
+      || !boardId
+      || boardId.length > 64
+      || !this.token
+      || suppliedToken !== this.token
+      || !validCapabilities) {
+      connection.socket.write(`${JSON.stringify({ type: 'rejected', reason: 'authentication_or_capability_mismatch' })}\n`);
+      connection.socket.end();
+      return;
+    }
+
+    const existing = this.devices.get(boardId);
+    if (existing && existing.socket !== connection.socket) {
+      existing.socket.destroy();
+      this.removeDevice(existing, 'replaced');
+    }
+    const device = {
+      id: boardId,
+      socket: connection.socket,
+      connectedAt: this.now(),
+      lastSeenAt: this.now(),
+      capabilities,
+      state: 'ready',
+      activeSessionId: null,
+      bufferedMs: 0,
+      underruns: 0,
+      freeHeap: null,
+      freePsram: null,
+      sensorMaxGapMs: null,
+      i2sBytesPerSecond: null,
+      i2sTimeoutsPerSecond: null
+    };
+    connection.device = device;
+    this.devices.set(boardId, device);
+    connection.socket.write(`${JSON.stringify({
+      type: 'accepted',
+      protocolVersion: SPEAKER_PROTOCOL_VERSION,
+      boardId,
+      sampleRate: SPEAKER_SAMPLE_RATE
+    })}\n`);
+    this.emit('devices-changed', this.listDevices());
+    this.logger.log?.(`[Mentor Speaker] ${boardId} connected`);
+  }
+
+  handleTelemetry(device, message) {
+    if (!message || typeof message.type !== 'string') return;
+    device.lastSeenAt = this.now();
+    if (Number.isFinite(Number(message.bufferedMs))) device.bufferedMs = Math.max(0, Number(message.bufferedMs));
+    if (message.type === 'underrun') device.underruns += 1;
+    for (const field of [
+      'freeHeap',
+      'freePsram',
+      'sensorMaxGapMs',
+      'i2sBytesPerSecond',
+      'i2sTimeoutsPerSecond'
+    ]) {
+      if (Number.isFinite(Number(message[field]))) device[field] = Number(message[field]);
+    }
+    if (message.type === 'error' || device.bufferedMs > SPEAKER_DEGRADED_BUFFER_MS) {
+      device.state = 'degraded';
+      if (message.type === 'error') {
+        this.logger.warn?.(
+          `[Mentor Speaker] ${device.id} reported ${message.error || 'unknown speaker error'}`
+        );
+      }
+    }
+    else if (message.type === 'started' || message.type === 'playing') device.state = 'playing';
+    else if (message.type === 'ready' || message.type === 'cleared' || message.type === 'ended') {
+      device.state = 'ready';
+    }
+
+    const binding = device.activeSessionId ? this.bindings.get(device.activeSessionId) : null;
+    if (binding && (!message.sessionId || message.sessionId === binding.sessionId)) {
+      if (Number.isFinite(Number(message.bufferedMs))) {
+        binding.bufferedBytes = Math.max(
+          0,
+          Math.floor(Number(message.bufferedMs) * SPEAKER_BYTES_PER_SECOND / 1000)
+        );
+        binding.bufferUpdatedAt = this.now();
+      }
+      if (binding.speaking && binding.endSent && message.type === 'playing'
+          && device.bufferedMs <= 250
+          && this.now() - binding.lastEndSentAt >= SPEAKER_END_RESEND_MS) {
+        const resent = this.write(device, createSpeakerFrame(FRAME_TYPES.END, {
+          sessionId: binding.sessionId,
+          finalSequence: binding.sequence
+        }, binding.sequence));
+        if (resent) binding.lastEndSentAt = this.now();
+      }
+      if (message.type === 'ended' || message.type === 'cleared') {
+        binding.speaking = false;
+        this.resetAudioQueue(binding);
+      } else if (binding.speaking) {
+        this.pumpAudio(binding);
+        if (message.type === 'underrun') this.scheduleIdleGuard(binding);
+      }
+      if (message.type !== 'pong') {
+        this.publish(binding, message.type, {
+          bufferedMs: device.bufferedMs,
+          underruns: device.underruns,
+          queuedMs: Math.round(binding.queuedBytes * 1000 / SPEAKER_BYTES_PER_SECOND),
+          providerChunkCount: binding.providerChunkCount,
+          maxProviderGapMs: binding.maxProviderGapMs,
+          error: message.error || null,
+          freeHeap: device.freeHeap,
+          freePsram: device.freePsram,
+          sensorMaxGapMs: device.sensorMaxGapMs,
+          i2sBytesPerSecond: device.i2sBytesPerSecond,
+          i2sTimeoutsPerSecond: device.i2sTimeoutsPerSecond
+        });
+      }
+      if (message.type === 'underrun') {
+        this.logger.warn?.(
+          `[Mentor Speaker] ${device.id} underrun #${device.underruns}; `
+          + `queued=${Math.round(binding.queuedBytes * 1000 / SPEAKER_BYTES_PER_SECOND)}ms, `
+          + `largest provider gap=${binding.maxProviderGapMs}ms`
+        );
+      }
+    }
+    this.emit('telemetry', { deviceId: device.id, ...message });
+  }
+
+  removeConnection(connection, reason) {
+    if (connection.closed) return;
+    connection.closed = true;
+    this.sockets.delete(connection.socket);
+    if (connection.device) this.removeDevice(connection.device, reason);
+  }
+
+  removeDevice(device, reason) {
+    if (this.devices.get(device.id) !== device) return;
+    this.devices.delete(device.id);
+    const binding = device.activeSessionId ? this.bindings.get(device.activeSessionId) : null;
+    if (binding) {
+      binding.speaking = false;
+      binding.degraded = true;
+      if (binding.requestedMode === 'auto') {
+        binding.resolvedOutput = 'browser';
+        binding.fallback = true;
+        this.publish(binding, 'fallback', { reason });
+      } else {
+        this.publish(binding, 'disconnected', { reason });
+      }
+    }
+    device.activeSessionId = null;
+    this.emit('devices-changed', this.listDevices());
+    this.logger.log?.(`[Mentor Speaker] ${device.id} ${reason}`);
+  }
+
+  listDevices() {
+    return [...this.devices.values()]
+      .map((device) => ({
+        id: device.id,
+        status: device.state,
+        connectedAt: device.connectedAt,
+        lastSeenAt: device.lastSeenAt,
+        bufferedMs: device.bufferedMs,
+        underruns: device.underruns,
+        freeHeap: device.freeHeap,
+        freePsram: device.freePsram,
+        sensorMaxGapMs: device.sensorMaxGapMs,
+        i2sBytesPerSecond: device.i2sBytesPerSecond,
+        i2sTimeoutsPerSecond: device.i2sTimeoutsPerSecond,
+        capabilities: {
+          encoding: device.capabilities.encoding,
+          sampleRate: Number(device.capabilities.sampleRate),
+          channels: Number(device.capabilities.channels),
+          bufferBytes: Number(device.capabilities.bufferBytes) || null
+        }
+      }))
+      .sort((left, right) => left.id.localeCompare(right.id));
+  }
+
+  bindSession({ conversationId, sessionId, outputMode = 'auto', deviceId, volume = DEFAULT_VOLUME }) {
+    const requestedMode = normalizeOutputMode(outputMode);
+    const selectedDeviceId = String(deviceId || this.defaultDeviceId);
+    const device = this.devices.get(selectedDeviceId);
+    const available = device && !device.socket.destroyed && device.state !== 'degraded'
+      && (!device.activeSessionId || device.activeSessionId === sessionId);
+    if (requestedMode === 'board' && !available) {
+      throw speakerError(
+        `Board speaker ${selectedDeviceId} is not available.`,
+        'mentor_speaker_unavailable',
+        409
+      );
+    }
+    const binding = {
+      conversationId,
+      sessionId,
+      requestedMode,
+      resolvedOutput: requestedMode === 'browser' || !available ? 'browser' : 'board',
+      deviceId: selectedDeviceId,
+      volume: normalizeVolume(volume),
+      sequence: 0,
+      speaking: false,
+      speechBytes: 0,
+      audioQueue: [],
+      queuedBytes: 0,
+      responseQueue: [],
+      responseBytes: 0,
+      collectingResponse: false,
+      responseRejected: false,
+      bufferedBytes: 0,
+      bufferUpdatedAt: this.now(),
+      pumpTimer: null,
+      idleTimer: null,
+      endRequested: false,
+      endSent: false,
+      lastEndSentAt: 0,
+      degraded: false,
+      fallback: requestedMode === 'auto' && !available,
+      providerChunkCount: 0,
+      providerBytes: 0,
+      firstProviderChunkAt: null,
+      lastProviderChunkAt: null,
+      maxProviderGapMs: 0
+    };
+    this.bindings.set(sessionId, binding);
+    if (binding.resolvedOutput === 'board') device.activeSessionId = sessionId;
+    this.publish(binding, binding.fallback ? 'fallback' : 'ready', {
+      reason: binding.fallback ? 'board_unavailable' : null
+    });
+    return this.publicBinding(binding);
+  }
+
+  publicBinding(binding) {
+    return {
+      outputMode: binding.requestedMode,
+      resolvedOutput: binding.resolvedOutput,
+      deviceId: binding.deviceId,
+      boardVolume: binding.volume,
+      speakerStatus: binding.fallback ? 'fallback' : binding.resolvedOutput === 'board' ? 'ready' : 'browser'
+    };
+  }
+
+  publish(binding, status, extra = {}) {
+    const payload = {
+      conversationId: binding.conversationId,
+      sessionId: binding.sessionId,
+      deviceId: binding.deviceId,
+      outputMode: binding.requestedMode,
+      resolvedOutput: binding.resolvedOutput,
+      status,
+      ...extra
+    };
+    this.emitStatus(binding.conversationId, payload);
+    this.emit('status', payload);
+  }
+
+  write(device, frame) {
+    if (!device || device.socket.destroyed) return false;
+    if (device.socket.writableLength + frame.length > this.maxQueueBytes) return false;
+    device.socket.write(frame);
+    return true;
+  }
+
+  estimatedBufferedBytes(binding) {
+    const elapsedMs = Math.max(0, this.now() - binding.bufferUpdatedAt);
+    const drainedBytes = Math.floor(elapsedMs * SPEAKER_BYTES_PER_SECOND / 1000);
+    return Math.max(0, binding.bufferedBytes - drainedBytes);
+  }
+
+  updateBufferedEstimate(binding, addedBytes = 0) {
+    binding.bufferedBytes = this.estimatedBufferedBytes(binding) + addedBytes;
+    binding.bufferUpdatedAt = this.now();
+  }
+
+  cancelPump(binding) {
+    if (binding.pumpTimer) clearTimeout(binding.pumpTimer);
+    binding.pumpTimer = null;
+  }
+
+  cancelIdleGuard(binding) {
+    if (binding.idleTimer) clearTimeout(binding.idleTimer);
+    binding.idleTimer = null;
+  }
+
+  scheduleIdleGuard(binding) {
+    this.cancelIdleGuard(binding);
+    if (!binding.speaking || binding.lastProviderChunkAt === null) return;
+    const bufferedMs = Math.ceil(
+      this.estimatedBufferedBytes(binding) * 1000 / SPEAKER_BYTES_PER_SECOND
+    );
+    const silentMs = Math.max(0, this.now() - binding.lastProviderChunkAt);
+    const delayMs = Math.max(50, bufferedMs + Math.max(0, this.idleEndMs - silentMs));
+    binding.idleTimer = setTimeout(() => {
+      binding.idleTimer = null;
+      if (!binding.speaking) return;
+      const remainingBytes = binding.queuedBytes + this.estimatedBufferedBytes(binding);
+      const idleMs = Math.max(0, this.now() - binding.lastProviderChunkAt);
+      if (remainingBytes > 0 || idleMs < this.idleEndMs) {
+        this.scheduleIdleGuard(binding);
+        return;
+      }
+      this.logger.warn?.(
+        `[Mentor Speaker] ${binding.deviceId} output ended after ${idleMs}ms without audio`
+      );
+      this.clearOutput(binding.conversationId, binding.sessionId, 'audio_idle_timeout');
+    }, delayMs);
+    binding.idleTimer.unref?.();
+  }
+
+  resetPlaybackQueue(binding) {
+    this.cancelPump(binding);
+    this.cancelIdleGuard(binding);
+    binding.audioQueue = [];
+    binding.queuedBytes = 0;
+    binding.bufferedBytes = 0;
+    binding.bufferUpdatedAt = this.now();
+    binding.endRequested = false;
+    binding.endSent = false;
+    binding.lastEndSentAt = 0;
+  }
+
+  resetAudioQueue(binding) {
+    this.resetPlaybackQueue(binding);
+    binding.responseQueue = [];
+    binding.responseBytes = 0;
+    binding.collectingResponse = false;
+  }
+
+  schedulePump(binding) {
+    if (binding.pumpTimer || !binding.speaking) return;
+    binding.pumpTimer = setTimeout(() => {
+      binding.pumpTimer = null;
+      this.pumpAudio(binding);
+    }, SPEAKER_PUMP_INTERVAL_MS);
+    binding.pumpTimer.unref?.();
+  }
+
+  pumpAudio(binding) {
+    if (!binding.speaking || binding.resolvedOutput !== 'board') return;
+    const device = this.devices.get(binding.deviceId);
+    if (!device || device.activeSessionId !== binding.sessionId || device.state === 'degraded') {
+      this.degradeBinding(binding, 'device_unavailable_while_pumping');
+      return;
+    }
+
+    const advertisedBufferBytes = Number(device.capabilities.bufferBytes) || 0;
+    const deviceFeedAheadBytes = advertisedBufferBytes > SPEAKER_PCM_FRAME_BYTES
+      ? Math.max(
+        SPEAKER_FEED_AHEAD_BYTES,
+        Math.min(this.maxResponseBytes, advertisedBufferBytes - SPEAKER_PCM_FRAME_BYTES)
+      )
+      : SPEAKER_FEED_AHEAD_BYTES;
+    let availableBytes = Math.max(
+      0,
+      deviceFeedAheadBytes - this.estimatedBufferedBytes(binding)
+    );
+    while (availableBytes >= 2 && binding.audioQueue.length > 0) {
+      const queued = binding.audioQueue[0];
+      const frameBytes = Math.min(queued.length, SPEAKER_PCM_FRAME_BYTES, availableBytes) & ~1;
+      if (frameBytes <= 0) break;
+      const payload = queued.subarray(0, frameBytes);
+      const sequence = ++binding.sequence;
+      if (!this.write(device, createSpeakerFrame(FRAME_TYPES.PCM, payload, sequence))) {
+        this.degradeBinding(binding, 'audio_backpressure');
+        return;
+      }
+      binding.audioQueue[0] = queued.subarray(frameBytes);
+      if (binding.audioQueue[0].length === 0) binding.audioQueue.shift();
+      binding.queuedBytes -= frameBytes;
+      binding.speechBytes += frameBytes;
+      this.updateBufferedEstimate(binding, frameBytes);
+      availableBytes -= frameBytes;
+    }
+
+    if (binding.queuedBytes === 0 && binding.endRequested && !binding.endSent) {
+      const sent = this.write(device, createSpeakerFrame(FRAME_TYPES.END, {
+        sessionId: binding.sessionId,
+        finalSequence: binding.sequence
+      }, binding.sequence));
+      if (!sent) {
+        this.degradeBinding(binding, 'end_backpressure');
+        return;
+      }
+      binding.endSent = true;
+      binding.lastEndSentAt = this.now();
+    }
+
+    if (binding.queuedBytes > 0 || (binding.endRequested && !binding.endSent)) {
+      this.schedulePump(binding);
+    }
+  }
+
+  startSpeech(binding, device) {
+    this.resetPlaybackQueue(binding);
+    binding.sequence = 0;
+    binding.speechBytes = 0;
+    const frame = createSpeakerFrame(FRAME_TYPES.START, {
+      sessionId: binding.sessionId,
+      conversationId: binding.conversationId,
+      sampleRate: SPEAKER_SAMPLE_RATE,
+      channels: 1,
+      bitsPerSample: 16,
+      volume: binding.volume
+    });
+    if (!this.write(device, frame)) return false;
+    binding.speaking = true;
+    this.publish(binding, 'playing');
+    return true;
+  }
+
+  startBufferedPlayback(binding, device) {
+    if (binding.speaking) return true;
+    if (binding.responseBytes === 0) return false;
+    const responseQueue = binding.responseQueue;
+    const responseBytes = binding.responseBytes;
+    binding.responseQueue = [];
+    binding.responseBytes = 0;
+    if (!this.startSpeech(binding, device)) {
+      binding.responseQueue = responseQueue;
+      binding.responseBytes = responseBytes;
+      return false;
+    }
+    binding.audioQueue = responseQueue;
+    binding.queuedBytes = responseBytes;
+    this.pumpAudio(binding);
+    return true;
+  }
+
+  routeAudio({ conversationId, sessionId, pcm, sampleRate = SPEAKER_SAMPLE_RATE }) {
+    const binding = this.bindings.get(sessionId);
+    if (!binding || binding.conversationId !== conversationId || binding.resolvedOutput !== 'board') {
+      return { destination: 'browser', reason: binding?.fallback ? 'fallback' : 'browser_selected' };
+    }
+    const device = this.devices.get(binding.deviceId);
+    const bytes = Buffer.isBuffer(pcm) ? pcm : Buffer.from(pcm || []);
+    if (binding.responseRejected) {
+      return {
+        destination: binding.requestedMode === 'auto' ? 'browser' : 'none',
+        reason: 'audio_response_limit'
+      };
+    }
+    if (!device || device.activeSessionId !== sessionId || device.state === 'degraded'
+      || sampleRate !== SPEAKER_SAMPLE_RATE || bytes.length === 0 || bytes.length % 2 !== 0) {
+      return this.degradeBinding(binding, 'device_or_pcm_unavailable');
+    }
+    if (!binding.collectingResponse && !binding.speaking && binding.responseBytes === 0) {
+      binding.providerChunkCount = 0;
+      binding.providerBytes = 0;
+      binding.firstProviderChunkAt = null;
+      binding.lastProviderChunkAt = null;
+      binding.maxProviderGapMs = 0;
+      binding.collectingResponse = true;
+      this.publish(binding, 'buffering', { bufferedResponseMs: 0 });
+    }
+    const receivedAt = this.now();
+    if (binding.firstProviderChunkAt === null) binding.firstProviderChunkAt = receivedAt;
+    if (binding.lastProviderChunkAt !== null) {
+      binding.maxProviderGapMs = Math.max(
+        binding.maxProviderGapMs,
+        receivedAt - binding.lastProviderChunkAt
+      );
+    }
+    binding.lastProviderChunkAt = receivedAt;
+    if (binding.providerBytes + bytes.length > this.maxResponseBytes) {
+      return this.rejectOversizedResponse(binding);
+    }
+    binding.providerChunkCount += 1;
+    binding.providerBytes += bytes.length;
+    if (binding.speaking) {
+      binding.audioQueue.push(Buffer.from(bytes));
+      binding.queuedBytes += bytes.length;
+      this.pumpAudio(binding);
+    } else {
+      binding.responseQueue.push(Buffer.from(bytes));
+      binding.responseBytes += bytes.length;
+      if (binding.responseBytes >= this.startBufferBytes
+          && !this.startBufferedPlayback(binding, device)) {
+        return this.degradeBinding(binding, 'start_backpressure');
+      }
+    }
+    return {
+      destination: 'board',
+      sequence: binding.sequence,
+      deviceId: binding.deviceId,
+      bufferedResponseMs: Math.round(
+        (binding.responseBytes + binding.queuedBytes + this.estimatedBufferedBytes(binding))
+        * 1000 / SPEAKER_BYTES_PER_SECOND
+      )
+    };
+  }
+
+  degradeBinding(binding, reason) {
+    this.resetAudioQueue(binding);
+    binding.speaking = false;
+    binding.degraded = true;
+    const device = this.devices.get(binding.deviceId);
+    if (device) device.state = 'degraded';
+    if (binding.requestedMode === 'auto') {
+      binding.resolvedOutput = 'browser';
+      binding.fallback = true;
+      this.publish(binding, 'fallback', { reason });
+      return { destination: 'browser', reason };
+    }
+    this.publish(binding, 'degraded', { reason });
+    return { destination: 'none', reason };
+  }
+
+  rejectOversizedResponse(binding) {
+    const device = this.devices.get(binding.deviceId);
+    if (binding.speaking && device?.activeSessionId === binding.sessionId) {
+      this.write(device, createSpeakerFrame(FRAME_TYPES.CLEAR, {
+        sessionId: binding.sessionId,
+        reason: 'audio_response_limit'
+      }, binding.sequence));
+      if (device.state === 'playing') device.state = 'ready';
+    }
+    this.resetAudioQueue(binding);
+    binding.speaking = false;
+    binding.responseRejected = true;
+    this.publish(binding, 'response_too_long', {
+      reason: 'audio_response_limit',
+      maxResponseMs: Math.round(this.maxResponseBytes * 1000 / SPEAKER_BYTES_PER_SECOND)
+    });
+    return {
+      destination: binding.requestedMode === 'auto' ? 'browser' : 'none',
+      reason: 'audio_response_limit'
+    };
+  }
+
+  endSpeech(conversationId, sessionId) {
+    const binding = this.bindings.get(sessionId);
+    if (!binding || binding.conversationId !== conversationId) return false;
+    const device = this.devices.get(binding.deviceId);
+    if (!device || device.activeSessionId !== sessionId) return false;
+    if (binding.responseRejected) {
+      binding.responseRejected = false;
+      this.publish(binding, 'ready', { reason: 'response_limit_cleared' });
+      return false;
+    }
+    binding.collectingResponse = false;
+    if (!binding.speaking && binding.responseBytes > 0
+        && !this.startBufferedPlayback(binding, device)) {
+      this.degradeBinding(binding, 'start_backpressure');
+      return false;
+    }
+    if (!binding.speaking) return false;
+    binding.endRequested = true;
+    this.cancelIdleGuard(binding);
+    const providerAudioMs = Math.round(binding.providerBytes * 1000 / SPEAKER_BYTES_PER_SECOND);
+    const providerElapsedMs = binding.firstProviderChunkAt === null
+      ? 0
+      : Math.max(0, (binding.lastProviderChunkAt || this.now()) - binding.firstProviderChunkAt);
+    this.logger.log?.(
+      `[Mentor Speaker] ${binding.deviceId} response received `
+      + `${providerAudioMs}ms audio across ${providerElapsedMs}ms; `
+      + `${binding.providerChunkCount} chunks, largest gap ${binding.maxProviderGapMs}ms`
+    );
+    this.pumpAudio(binding);
+    return true;
+  }
+
+  clearOutput(conversationId, sessionId, reason = 'interrupted') {
+    const binding = this.bindings.get(sessionId);
+    if (!binding || binding.conversationId !== conversationId) return false;
+    const device = this.devices.get(binding.deviceId);
+    binding.speaking = false;
+    this.resetAudioQueue(binding);
+    if (device?.activeSessionId === sessionId) {
+      this.write(device, createSpeakerFrame(FRAME_TYPES.CLEAR, { sessionId, reason }, binding.sequence));
+      if (device.state === 'playing') device.state = 'ready';
+    }
+    this.publish(binding, 'cleared', { reason });
+    return true;
+  }
+
+  releaseSession(conversationId, sessionId, reason = 'closed') {
+    const binding = this.bindings.get(sessionId);
+    if (!binding || binding.conversationId !== conversationId) return false;
+    this.clearOutput(conversationId, sessionId, reason);
+    const device = this.devices.get(binding.deviceId);
+    if (device?.activeSessionId === sessionId) {
+      this.write(device, createSpeakerFrame(FRAME_TYPES.END, { sessionId, reason }, binding.sequence));
+      device.activeSessionId = null;
+      if (device.state === 'playing') device.state = 'ready';
+    }
+    this.bindings.delete(sessionId);
+    return true;
+  }
+
+  pingDevices() {
+    for (const device of this.devices.values()) {
+      this.write(device, createSpeakerFrame(FRAME_TYPES.PING, { sentAt: this.now() }));
+    }
+  }
+
+  async close() {
+    if (this.pingTimer) clearInterval(this.pingTimer);
+    this.pingTimer = null;
+    for (const socket of this.sockets) socket.destroy();
+    this.sockets.clear();
+    this.devices.clear();
+    this.bindings.clear();
+    if (this.server.listening) {
+      await new Promise((resolve) => this.server.close(resolve));
+    }
+  }
+}
+
+module.exports = {
+  DEFAULT_DEVICE_ID,
+  DEFAULT_VOLUME,
+  FRAME_TYPES,
+  MAX_SPEAKER_QUEUE_BYTES,
+  MAX_BUFFERED_RESPONSE_BYTES,
+  SPEAKER_DEGRADED_BUFFER_MS,
+  SPEAKER_END_RESEND_MS,
+  SPEAKER_IDLE_END_MS,
+  SPEAKER_FEED_AHEAD_BYTES,
+  SPEAKER_FEED_AHEAD_MS,
+  SPEAKER_PCM_FRAME_BYTES,
+  MentorSpeakerService,
+  SPEAKER_BYTES_PER_SECOND,
+  SPEAKER_HEADER_BYTES,
+  SPEAKER_MAGIC,
+  SPEAKER_PROTOCOL_VERSION,
+  SPEAKER_SAMPLE_RATE,
+  SPEAKER_START_BUFFER_BYTES,
+  SPEAKER_START_BUFFER_MS,
+  createSpeakerFrame,
+  normalizeOutputMode,
+  normalizeVolume,
+  parseSpeakerFrame,
+  speakerError
+};

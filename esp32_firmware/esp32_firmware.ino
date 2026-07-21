@@ -12,6 +12,7 @@
 #include "offline_quiet_motion_hardware.h"
 #include "offline_capture_motion_hardware.h"
 #include "offline_lane_motion_hardware.h"
+#include "mentor_speaker.h"
 
 #if __has_include("firmware_secrets.h")
 #include "firmware_secrets.h"
@@ -19,9 +20,25 @@
 #include "firmware_secrets.example.h"
 #endif
 
+#ifndef CHESS_AUDIO_SERVER_HOST
+#define CHESS_AUDIO_SERVER_HOST "YOUR_SERVER_IP"
+#endif
+#ifndef CHESS_AUDIO_SERVER_PORT
+#define CHESS_AUDIO_SERVER_PORT 3001
+#endif
+#ifndef CHESS_AUDIO_BOARD_ID
+#define CHESS_AUDIO_BOARD_ID "main-board"
+#endif
+#ifndef CHESS_AUDIO_TOKEN
+#define CHESS_AUDIO_TOKEN "GENERATE_A_PRIVATE_AUDIO_TOKEN"
+#endif
+
 const char* WIFI_SSID = CHESS_WIFI_SSID;
 const char* WIFI_PASSWORD = CHESS_WIFI_PASSWORD;
 const char* SERVER_BASE_URL = CHESS_SERVER_BASE_URL;
+const char* AUDIO_SERVER_HOST = CHESS_AUDIO_SERVER_HOST;
+const char* AUDIO_BOARD_ID = CHESS_AUDIO_BOARD_ID;
+const char* AUDIO_TOKEN = CHESS_AUDIO_TOKEN;
 
 // --- CoreXY Pin Definitions ---
 constexpr uint8_t MOTOR_A_STEP_PIN = 42;
@@ -50,7 +67,7 @@ constexpr uint8_t LIMIT_X_PIN      = 48;
 constexpr uint8_t SENSOR_DEBOUNCE_SCANS = 4;
 constexpr uint32_t SNAPSHOT_MIN_INTERVAL_MS = 120;
 constexpr uint32_t POLL_INTERVAL_MS = 180;
-constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 3000;
+constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 10000;
 
 constexpr float FAST_MAX_SPEED = 20000.0f;
 constexpr float FAST_ACCEL = 20000.0f;
@@ -157,6 +174,7 @@ int ledAnimationKingA = -1;
 int ledAnimationKingB = -1;
 
 void scanSensors();
+void handleWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info);
 void markSnapshotDirty();
 bool postSnapshot(bool force);
 bool postJson(const String& endpoint, const String& payload, String* responseOut = nullptr);
@@ -233,6 +251,7 @@ void setup() {
 
   setMotionProfile(false);
 
+  WiFi.onEvent(handleWifiEvent);
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
@@ -242,7 +261,35 @@ void setup() {
   beginOfflineRuntimeDiagnostics();
   beginOfflineOwnershipDiagnostics();
   xTaskCreatePinnedToCore(networkTask, "networkTask", 12288, nullptr, 1, nullptr, 0);
+#if !ENABLE_OFFLINE_EMBEDDED_DIAGNOSTICS && !ENABLE_OFFLINE_OWNERSHIP_DIAGNOSTICS && \
+    !ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS && !ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS && \
+    !ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS && \
+    !ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS && \
+    !ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
+  MentorSpeakerConfig speakerConfig;
+  speakerConfig.host = AUDIO_SERVER_HOST;
+  speakerConfig.port = CHESS_AUDIO_SERVER_PORT;
+  speakerConfig.boardId = AUDIO_BOARD_ID;
+  speakerConfig.token = AUDIO_TOKEN;
+  beginMentorSpeaker(speakerConfig);
+#endif
   beginOfflineEmbeddedDiagnostics();
+}
+
+void handleWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+  if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
+    Serial.printf(
+      "[WIFI] Connected ip=%s rssi=%d\n",
+      WiFi.localIP().toString().c_str(),
+      WiFi.RSSI()
+    );
+  } else if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+    Serial.printf(
+      "[WIFI] Disconnected reason=%u status=%d\n",
+      info.wifi_sta_disconnected.reason,
+      WiFi.status()
+    );
+  }
 }
 
 void loop() {
@@ -313,8 +360,7 @@ void networkTask(void* parameter) {
     if (WiFi.status() != WL_CONNECTED && now - lastWifiAttemptMs >= WIFI_RETRY_INTERVAL_MS) {
       lastWifiAttemptMs = now;
       Serial.println("[WIFI] Connecting...");
-      WiFi.disconnect();
-      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+      WiFi.reconnect();
     }
 
 #if ENABLE_OFFLINE_OWNERSHIP_DIAGNOSTICS || ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || \
@@ -357,6 +403,13 @@ void networkTask(void* parameter) {
 }
 
 void scanSensors() {
+#if !ENABLE_OFFLINE_EMBEDDED_DIAGNOSTICS && !ENABLE_OFFLINE_OWNERSHIP_DIAGNOSTICS && \
+    !ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS && !ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS && \
+    !ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS && \
+    !ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS && \
+    !ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
+  mentorSpeakerRecordSensorScan(millis());
+#endif
 #if ENABLE_OFFLINE_OWNERSHIP_DIAGNOSTICS
   static uint32_t previousOwnershipScanMs = 0;
   const uint32_t ownershipScanStartedMs = millis();

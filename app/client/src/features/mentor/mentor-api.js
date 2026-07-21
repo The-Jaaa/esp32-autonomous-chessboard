@@ -20,6 +20,9 @@ async function request(path, options = {}) {
 }
 
 export const mentorApi = {
+  getAudioDevices() {
+    return request('/audio/devices');
+  },
   listConversations(query = '') {
     return request(`/conversations?query=${encodeURIComponent(query)}`);
   },

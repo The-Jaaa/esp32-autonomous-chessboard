@@ -1252,3 +1252,79 @@ The completed physical map is recorded in `docs/led-layout.md`. Whole-square
 grouping already matches `rawSquareIndex * 4`; future 16x16 rendering must use
 the documented row-specific TL/TR/BL/BR offsets, particularly the distinct C
 and H row orientations.
+
+## 2026-07-21 Production Mentor Speaker Baseline
+
+The production firmware now includes a targeted Gemini Live speaker client.
+This supersedes the earlier `1,042,543` flash / `47,128` RAM baseline recorded
+throughout the historical offline milestones. The current USB-only production
+baseline is exactly `1,078,743` bytes flash and `48,440` bytes static RAM with
+the 16 MB `app3M_fat9M_16MB` partition scheme.
+
+All verification scripts use `CDCOnBoot=default`. This matches the board's
+CH343 UART upload/monitor port on COM11; enabling USB CDC-on-boot redirects
+`Serial` away from that cable and makes guarded telemetry appear blank.
+
+The speaker task is isolated from the offline engine and motion ownership
+state. It runs on core 0, receives authenticated 24 kHz mono PCM over TCP,
+duplicates samples into both I2S channels, and repeats samples for stable
+48 kHz MAX98357A output. A 2 MiB PSRAM ring holds approximately 43.7 seconds
+of source PCM and playback begins after approximately 1.8 seconds is available.
+Existing offline diagnostic builds
+exclude the speaker task, while their compile verifiers compare their embedded
+production image against the new baseline.
+
+MAX98357A wiring is BCLK GPIO 10, LRCLK GPIO 9, and DIN GPIO 11. Both
+amplifiers share these signals. The private `firmware_secrets.h` supplies the
+audio server host, port, board ID, and token; the backend uses the matching
+`ESP32_AUDIO_TOKEN`. The real values remain ignored by Git.
+
+Run the production compile gate from the repository root:
+
+```powershell
+.\tools\verify-mentor-speaker.ps1
+```
+
+For a guarded USB upload and Serial registration check, start the backend and
+run:
+
+```powershell
+.\tools\verify-mentor-speaker.ps1 -UploadPort COM11
+```
+
+The verifier checks the exact production size, uploads over USB, waits for the
+speaker initialization and authenticated `main-board` connection messages,
+and leaves the production image installed.
+
+For an isolated speaker/end-of-stream hardware check, stop the normal backend
+so port 3001 is free and run `npm run test:mentor-speaker-tone` from `app`. It
+plays 440 Hz, a short silence, and 880 Hz, then requires clean `ended` telemetry.
+
+The backend uses progressive response buffering rather than waiting for a
+complete Gemini turn. It gates microphone transmission when the first board
+audio arrives, starts sending after collecting three seconds of PCM, and keeps
+feeding the ESP32 while playback continues. This bounds normal startup delay
+even for long replies. Responses are capped at 40 seconds with a 42-second
+server queue limit. An oversized response reports `response_too_long` without
+changing the physical device to `degraded`; actual device failures retain the
+normal degraded or browser-fallback behavior.
+
+Hardware acceptance used the ignored local network/secrets configuration. The
+board authenticated as `main-board` with a 2 MiB buffer, no audible starvation
+or I2S timeouts, 2-4 ms sensor gaps, and approximately 6.18 MB free PSRAM. Clear 1-10,
+1-20, and conversational Gemini Live playback passed. The earlier full-response
+approach was retired after persisted `cancelled` replies showed that active
+microphone input could interrupt Gemini during the long wait before playback.
+Final telemetry review found that a completed final TCP control frame was not
+processed until another byte arrived. The parser now finalizes frames as soon
+as their payload completes, and cross-task stream-ending/prebuffer flags are
+volatile. A guarded 4.52-second hardware tone test now emits clean `ended`
+telemetry with zero I2S timeouts and no false underrun, so the UI no longer
+depends on the idle guard to clear natural completion.
+
+The production Wi-Fi retry no longer calls `WiFi.disconnect()` every three
+seconds. That loop could cancel association on slower access points with reason
+8 before DHCP completed. Setup still starts Wi-Fi immediately, while the
+network task now issues a non-destructive `WiFi.reconnect()` every ten seconds
+until connected. Connection and disconnect reason telemetry is available over
+Serial.

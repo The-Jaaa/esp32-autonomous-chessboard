@@ -15,6 +15,32 @@ const ACTIVE_STATUSES = new Set([
   'tool_running'
 ]);
 
+const LIVE_AUDIO_PREFERENCES_KEY = 'mentor-live-audio-preferences-v1';
+const DEFAULT_AUDIO_PREFERENCES = Object.freeze({
+  outputMode: 'auto',
+  deviceId: 'main-board',
+  boardVolume: 50
+});
+
+function loadAudioPreferences() {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(LIVE_AUDIO_PREFERENCES_KEY) || '{}');
+    return {
+      outputMode: ['auto', 'board', 'browser'].includes(stored.outputMode)
+        ? stored.outputMode
+        : DEFAULT_AUDIO_PREFERENCES.outputMode,
+      deviceId: typeof stored.deviceId === 'string' && stored.deviceId
+        ? stored.deviceId
+        : DEFAULT_AUDIO_PREFERENCES.deviceId,
+      boardVolume: Number.isFinite(Number(stored.boardVolume))
+        ? Math.max(0, Math.min(100, Math.round(Number(stored.boardVolume))))
+        : DEFAULT_AUDIO_PREFERENCES.boardVolume
+    };
+  } catch {
+    return { ...DEFAULT_AUDIO_PREFERENCES };
+  }
+}
+
 function initialState() {
   return {
     sessionId: null,
@@ -24,7 +50,10 @@ function initialState() {
     toolBusy: false,
     toolName: null,
     toolLabel: null,
-    toolCallIds: []
+    toolCallIds: [],
+    resolvedOutput: 'browser',
+    speakerStatus: 'inactive',
+    micGated: false
   };
 }
 
@@ -32,11 +61,14 @@ export function useMentorLive({ socket, conversationId, onMessage, onError, onCo
   const [liveState, setLiveState] = useState(initialState);
   const [partialUser, setPartialUser] = useState(null);
   const [partialAssistant, setPartialAssistant] = useState(null);
+  const [audioPreferences, setAudioPreferences] = useState(loadAudioPreferences);
+  const [speakerDevices, setSpeakerDevices] = useState([]);
   const sessionRef = useRef(null);
   const startingRef = useRef(false);
   const startAttemptRef = useRef(0);
   const statusRef = useRef('inactive');
   const mutedRef = useRef(false);
+  const speakerPlayingRef = useRef(false);
   const callbacksRef = useRef({ onMessage, onError, onConversationChanged });
   const micStreamRef = useRef(null);
   const micContextRef = useRef(null);
@@ -51,6 +83,30 @@ export function useMentorLive({ socket, conversationId, onMessage, onError, onCo
   useEffect(() => {
     callbacksRef.current = { onMessage, onError, onConversationChanged };
   }, [onConversationChanged, onError, onMessage]);
+
+  useEffect(() => {
+    window.localStorage.setItem(LIVE_AUDIO_PREFERENCES_KEY, JSON.stringify(audioPreferences));
+  }, [audioPreferences]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const response = await fetch('/api/mentor/audio/devices');
+        if (!response.ok) return;
+        const body = await response.json();
+        if (!cancelled) setSpeakerDevices(Array.isArray(body.devices) ? body.devices : []);
+      } catch {
+        // Device discovery is optional; Live browser audio remains available.
+      }
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   const updateState = useCallback((patch) => {
     setLiveState((current) => {
@@ -104,6 +160,7 @@ export function useMentorLive({ socket, conversationId, onMessage, onError, onCo
     sessionRef.current = null;
     startingRef.current = false;
     mutedRef.current = false;
+    speakerPlayingRef.current = false;
     statusRef.current = status;
     setPartialUser(null);
     setPartialAssistant(null);
@@ -125,7 +182,8 @@ export function useMentorLive({ socket, conversationId, onMessage, onError, onCo
     processorRef.current = processor;
     silentGainRef.current = silentGain;
     processor.onaudioprocess = (event) => {
-      if (!sessionRef.current || sessionRef.current !== sessionId || mutedRef.current || !socket?.connected) return;
+      if (!sessionRef.current || sessionRef.current !== sessionId || mutedRef.current
+          || speakerPlayingRef.current || !socket?.connected) return;
       const data = floatAudioToPcmBase64(event.inputBuffer.getChannelData(0), context.sampleRate);
       socket.emit('mentor-live-audio-input', { conversationId, sessionId, data });
     };
@@ -184,7 +242,12 @@ export function useMentorLive({ socket, conversationId, onMessage, onError, onCo
         video: false
       });
       const result = await new Promise((resolve) => {
-        socket.emit('mentor-live-start', { conversationId }, resolve);
+        socket.emit('mentor-live-start', {
+          conversationId,
+          outputMode: audioPreferences.outputMode,
+          deviceId: audioPreferences.deviceId,
+          boardVolume: audioPreferences.boardVolume
+        }, resolve);
       });
       if (!result?.success) throw new Error(result?.error || 'Unable to start Live mentor.');
       if (startAttemptRef.current !== attempt) {
@@ -195,7 +258,14 @@ export function useMentorLive({ socket, conversationId, onMessage, onError, onCo
       sessionRef.current = result.sessionId;
       startingRef.current = false;
       await startMicrophone(stream, result.sessionId);
-      updateState({ sessionId: result.sessionId, status: 'listening', muted: false });
+      updateState({
+        sessionId: result.sessionId,
+        status: 'listening',
+        muted: false,
+        resolvedOutput: result.resolvedOutput || 'browser',
+        speakerStatus: result.speakerStatus || 'inactive',
+        micGated: false
+      });
       return true;
     } catch (error) {
       stream?.getTracks().forEach((track) => track.stop());
@@ -204,7 +274,40 @@ export function useMentorLive({ socket, conversationId, onMessage, onError, onCo
       callbacksRef.current.onError?.(error.message);
       return false;
     }
-  }, [cleanupLocal, conversationId, socket, startMicrophone, updateState]);
+  }, [audioPreferences, cleanupLocal, conversationId, socket, startMicrophone, updateState]);
+
+  const setOutputMode = useCallback((outputMode) => {
+    if (!['auto', 'board', 'browser'].includes(outputMode) || ACTIVE_STATUSES.has(statusRef.current)) return;
+    setAudioPreferences((current) => ({ ...current, outputMode }));
+  }, []);
+
+  const setDeviceId = useCallback((deviceId) => {
+    if (!deviceId || ACTIVE_STATUSES.has(statusRef.current)) return;
+    setAudioPreferences((current) => ({ ...current, deviceId }));
+  }, []);
+
+  const setBoardVolume = useCallback((boardVolume) => {
+    if (ACTIVE_STATUSES.has(statusRef.current)) return;
+    const numeric = Number(boardVolume);
+    if (!Number.isFinite(numeric)) return;
+    const normalized = Math.max(0, Math.min(100, Math.round(numeric)));
+    setAudioPreferences((current) => ({ ...current, boardVolume: normalized }));
+  }, []);
+
+  const interruptOutput = useCallback(() => new Promise((resolve) => {
+    const sessionId = sessionRef.current;
+    clearPlayback(false);
+    speakerPlayingRef.current = false;
+    updateState({ micGated: false, speakerStatus: 'cleared' });
+    if (!socket || !sessionId) {
+      resolve(false);
+      return;
+    }
+    socket.emit('mentor-live-interrupt-output', { conversationId, sessionId }, (result) => {
+      if (!result?.success) callbacksRef.current.onError?.(result?.error || 'Unable to interrupt speaker output.');
+      resolve(Boolean(result?.success));
+    });
+  }), [clearPlayback, conversationId, socket, updateState]);
 
   const toggleMute = useCallback(() => {
     const sessionId = sessionRef.current;
@@ -262,7 +365,8 @@ export function useMentorLive({ socket, conversationId, onMessage, onError, onCo
         toolBusy,
         toolName: toolBusy ? payload.toolName || null : null,
         toolLabel: toolBusy ? payload.toolLabel || 'Using mentor tool' : null,
-        toolCallIds: toolBusy && Array.isArray(payload.toolCallIds) ? payload.toolCallIds : []
+        toolCallIds: toolBusy && Array.isArray(payload.toolCallIds) ? payload.toolCallIds : [],
+        ...(payload.resolvedOutput ? { resolvedOutput: payload.resolvedOutput } : {})
       });
     };
     const onUserTranscript = (payload) => {
@@ -330,7 +434,32 @@ export function useMentorLive({ socket, conversationId, onMessage, onError, onCo
     const onInterrupted = (payload) => {
       if (!matches(payload)) return;
       clearPlayback(false);
+      speakerPlayingRef.current = false;
+      updateState({ micGated: false });
       updateState({ status: 'interrupted' });
+    };
+    const onSpeakerStatus = (payload) => {
+      if (!matches(payload)) return;
+      const playing = ['buffering', 'playing'].includes(payload.status)
+        && payload.resolvedOutput === 'board';
+      const stopped = [
+        'cleared',
+        'ended',
+        'fallback',
+        'degraded',
+        'disconnected',
+        'response_too_long'
+      ].includes(payload.status);
+      if (playing) speakerPlayingRef.current = true;
+      else if (stopped) speakerPlayingRef.current = false;
+      updateState({
+        ...(payload.resolvedOutput ? { resolvedOutput: payload.resolvedOutput } : {}),
+        speakerStatus: payload.status,
+        micGated: speakerPlayingRef.current
+      });
+      if (payload.status === 'fallback') {
+        callbacksRef.current.onError?.('Board speaker disconnected. Future audio will play in this browser.');
+      }
     };
     const onErrorEvent = (payload) => {
       if (payload?.conversationId && payload.conversationId !== conversationId) return;
@@ -347,6 +476,7 @@ export function useMentorLive({ socket, conversationId, onMessage, onError, onCo
     socket.on('mentor-live-user-transcript', onUserTranscript);
     socket.on('mentor-live-assistant-transcript', onAssistantTranscript);
     socket.on('mentor-live-audio', playAudio);
+    socket.on('mentor-speaker-status', onSpeakerStatus);
     socket.on('mentor-live-interrupted', onInterrupted);
     socket.on('mentor-live-error', onErrorEvent);
     socket.on('mentor-live-closed', onClosed);
@@ -356,6 +486,7 @@ export function useMentorLive({ socket, conversationId, onMessage, onError, onCo
       socket.off('mentor-live-user-transcript', onUserTranscript);
       socket.off('mentor-live-assistant-transcript', onAssistantTranscript);
       socket.off('mentor-live-audio', playAudio);
+      socket.off('mentor-speaker-status', onSpeakerStatus);
       socket.off('mentor-live-interrupted', onInterrupted);
       socket.off('mentor-live-error', onErrorEvent);
       socket.off('mentor-live-closed', onClosed);
@@ -379,9 +510,15 @@ export function useMentorLive({ socket, conversationId, onMessage, onError, onCo
     isActive: ACTIVE_STATUSES.has(liveState.status),
     partialUser,
     partialAssistant,
+    ...audioPreferences,
+    speakerDevices,
     start,
     stop,
     toggleMute,
-    sendText
+    sendText,
+    interruptOutput,
+    setOutputMode,
+    setDeviceId,
+    setBoardVolume
   };
 }

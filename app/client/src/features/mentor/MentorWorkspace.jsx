@@ -28,6 +28,7 @@ import {
   Square,
   Swords,
   Trash2,
+  Volume2,
   X
 } from 'lucide-react';
 import { useSocket } from '../../context/useSocket';
@@ -354,6 +355,7 @@ function formatClassification(value) {
 
 function liveStatusText(live) {
   if (live.status === 'failed') return 'Live voice failed';
+  if (live.micGated) return 'Speaking through board';
   if (live.status === 'tool_running') return live.toolLabel || 'Using mentor tool';
   const labels = {
     connecting: 'Live voice connecting',
@@ -364,6 +366,71 @@ function liveStatusText(live) {
     interrupted: 'Live voice interrupted'
   };
   return labels[live.status] || 'Live voice';
+}
+
+function LiveAudioControls({ live }) {
+  const selectedDevice = live.speakerDevices.find((device) => device.id === live.deviceId);
+  const boardStatus = live.speakerStatus === 'fallback'
+    ? 'Browser fallback'
+    : live.speakerStatus === 'playing'
+      ? 'Board playing'
+      : selectedDevice
+        ? `Board ${selectedDevice.status}`
+        : 'Board unavailable';
+  const controlsDisabled = live.isActive || live.status === 'connecting';
+
+  return (
+    <div className="mentor-audio-output" aria-label="Live mentor audio output">
+      <span className="mentor-audio-output-label"><Volume2 size={15} /> Voice output</span>
+      <div className="mentor-audio-segments" role="group" aria-label="Voice output mode">
+        {['auto', 'board', 'browser'].map((mode) => (
+          <button
+            key={mode}
+            type="button"
+            className={live.outputMode === mode ? 'is-selected' : ''}
+            onClick={() => live.setOutputMode(mode)}
+            disabled={controlsDisabled}
+          >{mode[0].toUpperCase() + mode.slice(1)}</button>
+        ))}
+      </div>
+      {live.outputMode !== 'browser' && (
+        <>
+          <select
+            value={live.deviceId}
+            onChange={(event) => live.setDeviceId(event.target.value)}
+            disabled={controlsDisabled || live.speakerDevices.length <= 1}
+            aria-label="Board speaker"
+          >
+            {!selectedDevice && <option value={live.deviceId}>{live.deviceId}</option>}
+            {live.speakerDevices.map((device) => (
+              <option key={device.id} value={device.id}>{device.id}</option>
+            ))}
+          </select>
+          <label className="mentor-board-volume" title="Board speaker volume">
+            <input
+              type="range"
+              min="0"
+              max="100"
+              step="1"
+              value={live.boardVolume}
+              onChange={(event) => live.setBoardVolume(event.target.value)}
+              disabled={controlsDisabled}
+              aria-label="Board speaker volume"
+            />
+            <span>{live.boardVolume}%</span>
+          </label>
+        </>
+      )}
+      <span className={`mentor-speaker-state is-${live.speakerStatus}`}>
+        {live.outputMode === 'browser' ? 'Browser audio' : boardStatus}
+      </span>
+      {live.micGated && (
+        <button className="mentor-interrupt-output" type="button" onClick={live.interruptOutput}>
+          Interrupt response
+        </button>
+      )}
+    </div>
+  );
 }
 
 function AnalysisResult({ result }) {
@@ -1038,11 +1105,12 @@ export default function MentorWorkspace() {
         <div className="mentor-composer-wrap">
           {notice && <div className="mentor-notice"><span>{notice}</span><button onClick={() => setNotice('')} title="Dismiss notice"><X size={15} /></button></div>}
           {error && <div className="mentor-error"><span>{error}</span><button onClick={() => setError('')} title="Dismiss error"><X size={15} /></button></div>}
+          <LiveAudioControls live={live} />
           {(live.isActive || live.status === 'failed') && (
             <div className={`mentor-live-status is-${live.status}`}>
               <span className="mentor-live-status-dot" />
               <strong>{liveStatusText(live)}</strong>
-              {live.isActive && <span>{live.toolBusy ? 'Microphone and Stop remain available' : 'Speak naturally or type below'}</span>}
+              {live.isActive && <span>{live.micGated ? 'Microphone pauses until playback ends or you interrupt' : live.toolBusy ? 'Microphone and Stop remain available' : 'Speak naturally or type below'}</span>}
             </div>
           )}
           <div className="mentor-composer">

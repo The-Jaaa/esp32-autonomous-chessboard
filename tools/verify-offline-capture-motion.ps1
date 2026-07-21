@@ -13,7 +13,7 @@ $offlineCore = Join-Path $root 'offline_core'
 $productionOutput = Join-Path $root 'tmp\offline-capture-production'
 $diagnosticOutput = Join-Path $root 'tmp\offline-capture-enabled'
 
-$fqbn = 'esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,UploadMode=default,UploadSpeed=921600,LoopCore=1,EventsCore=1'
+$fqbn = 'esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=default,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,UploadMode=default,UploadSpeed=921600,LoopCore=1,EventsCore=1'
 $maximumApplicationBytes = 3145728
 $minimumApplicationHeadroomBytes = 512KB
 $minimumInternalHeapBytes = 96KB
@@ -21,8 +21,8 @@ $minimumLargestInternalBlockBytes = 64KB
 $minimumFreePsramBytes = 5MB
 $minimumStackHeadroomBytes = 2KB
 $maximumHeartbeatElapsedMs = 1250
-$expectedProductionFlashBytes = 1042543
-$expectedProductionRamBytes = 47128
+$expectedProductionFlashBytes = 1078743
+$expectedProductionRamBytes = 48440
 $expectedFinalFen = 'k7/8/8/8/4p3/8/8/4K3 w - - 0 2'
 
 function Get-ArduinoCliPath {

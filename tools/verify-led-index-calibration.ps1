@@ -12,9 +12,9 @@ $productionSketch = Join-Path $root 'esp32_firmware'
 $calibrationSketch = Join-Path $root 'tests_and_misc\esp32_led_index_calibration'
 $productionOutput = Join-Path $root 'tmp\led-index-production'
 $calibrationOutput = Join-Path $root 'tmp\led-index-calibration'
-$fqbn = 'esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,UploadMode=default,UploadSpeed=921600,LoopCore=1,EventsCore=1'
-$expectedProductionFlash = 1042543
-$expectedProductionRam = 47128
+$fqbn = 'esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=default,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,UploadMode=default,UploadSpeed=921600,LoopCore=1,EventsCore=1'
+$expectedProductionFlash = 1078743
+$expectedProductionRam = 48440
 
 function Get-ArduinoCliPath {
     $command = Get-Command arduino-cli -ErrorAction SilentlyContinue

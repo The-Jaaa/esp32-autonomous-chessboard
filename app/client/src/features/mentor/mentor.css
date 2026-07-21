@@ -587,6 +587,97 @@
 }
 
 .mentor-composer-wrap { padding: 0 clamp(28px, 6vw, 82px) 18px; }
+.mentor-audio-output {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  max-width: 760px;
+  min-height: 34px;
+  margin: 0 auto 7px;
+  padding: 5px 7px;
+  border: 1px solid var(--mentor-border);
+  border-radius: 6px;
+  color: var(--mentor-muted);
+  background: rgba(15, 23, 42, .78);
+  font-size: 10px;
+}
+
+.mentor-audio-output-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--mentor-text);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.mentor-audio-segments {
+  display: grid;
+  grid-template-columns: repeat(3, 58px);
+  height: 24px;
+  overflow: hidden;
+  border: 1px solid var(--mentor-border);
+  border-radius: 5px;
+}
+
+.mentor-audio-segments button {
+  border: 0;
+  border-right: 1px solid var(--mentor-border);
+  color: var(--mentor-muted);
+  background: var(--surface-panel);
+  cursor: pointer;
+}
+
+.mentor-audio-segments button:last-child { border-right: 0; }
+.mentor-audio-segments button.is-selected { color: white; background: var(--mentor-accent); }
+.mentor-audio-segments button:disabled { cursor: default; opacity: .72; }
+
+.mentor-audio-output select {
+  width: 104px;
+  height: 24px;
+  padding: 0 5px;
+  border: 1px solid var(--mentor-border);
+  border-radius: 5px;
+  color: var(--mentor-text);
+  background: var(--surface-panel);
+}
+
+.mentor-board-volume {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 116px;
+  white-space: nowrap;
+}
+
+.mentor-board-volume input { width: 78px; accent-color: var(--mentor-accent); }
+.mentor-board-volume span { width: 28px; text-align: right; }
+
+.mentor-speaker-state {
+  margin-left: auto;
+  color: var(--mentor-muted);
+  white-space: nowrap;
+}
+
+.mentor-speaker-state.is-playing,
+.mentor-speaker-state.is-ready { color: #86efac; }
+.mentor-speaker-state.is-fallback,
+.mentor-speaker-state.is-degraded,
+.mentor-speaker-state.is-disconnected { color: #fcd34d; }
+
+.mentor-interrupt-output {
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--danger-color);
+  border-radius: 5px;
+  color: #fecaca;
+  background: rgba(127, 29, 29, .3);
+  cursor: pointer;
+}
+
+.mentor-interrupt-output:hover { background: rgba(127, 29, 29, .52); }
+
 .mentor-composer {
   display: flex;
   align-items: flex-end;

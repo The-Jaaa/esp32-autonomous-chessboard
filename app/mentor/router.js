@@ -4,7 +4,15 @@ function asyncRoute(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
 }
 
-function createMentorRouter({ store, service, chessService, activityService, liveService, emitBoardUpdate = () => {} }) {
+function createMentorRouter({
+  store,
+  service,
+  chessService,
+  activityService,
+  liveService,
+  speakerService,
+  emitBoardUpdate = () => {}
+}) {
   const router = express.Router();
   const withToolCalls = (conversation) => {
     const toolCalls = store.listToolCalls(conversation.id);
@@ -24,6 +32,10 @@ function createMentorRouter({ store, service, chessService, activityService, liv
         limit: req.query.limit
       })
     });
+  });
+
+  router.get('/audio/devices', (req, res) => {
+    res.json({ devices: speakerService?.listDevices?.() || [] });
   });
 
   router.post('/conversations', (req, res) => {

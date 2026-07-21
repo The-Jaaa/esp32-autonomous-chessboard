@@ -15,15 +15,15 @@ $offlineCore = Join-Path $root 'offline_core'
 $productionOutput = Join-Path $root 'tmp\offline-lane-production'
 $directOutput = Join-Path $root 'tmp\offline-lane-direct-enabled'
 $laneBoardOutput = Join-Path $root 'tmp\offline-lane-board-enabled'
-$fqbn = 'esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,UploadMode=default,UploadSpeed=921600,LoopCore=1,EventsCore=1'
+$fqbn = 'esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=default,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,UploadMode=default,UploadSpeed=921600,LoopCore=1,EventsCore=1'
 $maximumApplicationBytes = 3145728
 $minimumApplicationHeadroomBytes = 512KB
 $minimumInternalHeapBytes = 96KB
 $minimumLargestInternalBlockBytes = 64KB
 $minimumFreePsramBytes = 5MB
 $minimumStackHeadroomBytes = 2KB
-$expectedProductionFlashBytes = 1042543
-$expectedProductionRamBytes = 47128
+$expectedProductionFlashBytes = 1078743
+$expectedProductionRamBytes = 48440
 $fixtureNumber = if ($Fixture -eq 'LaneBoard') { 1 } else { 0 }
 $expectedRouteMode = if ($Fixture -eq 'LaneBoard') { 'lane-board' } else { 'lane' }
 $expectedRouteCost = if ($Fixture -eq 'LaneBoard') { 1366 } else { 1300 }

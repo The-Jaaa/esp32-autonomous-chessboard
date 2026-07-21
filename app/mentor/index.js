@@ -6,6 +6,7 @@ const { MentorToolService } = require('./tool-service');
 const { MentorEngineService } = require('./engine-service');
 const { MentorAnalysisService } = require('./analysis-service');
 const { MentorActivityService } = require('./activity-service');
+const { MentorSpeakerService } = require('./speaker-service');
 const {
   DEFAULT_LIVE_MODEL,
   DEFAULT_LIVE_VOICE,
@@ -31,6 +32,7 @@ function createMentorFeature({
   engineService,
   analysisService,
   liveConnector,
+  speakerService = null,
   model = 'gemini-3.5-flash',
   liveModel = DEFAULT_LIVE_MODEL,
   liveVoice = DEFAULT_LIVE_VOICE
@@ -96,6 +98,7 @@ function createMentorFeature({
     textService: service,
     toolService,
     activityService,
+    speakerService,
     connector,
     emit,
     model: liveModel,
@@ -115,6 +118,7 @@ function createMentorFeature({
     chessService,
     activityService,
     liveService,
+    speakerService,
     emitBoardUpdate
   }));
 
@@ -156,6 +160,7 @@ function createMentorFeature({
     provider: textProvider,
     async close() {
       await liveService.closeAll();
+      await speakerService?.close?.();
       mentorEngine.close?.();
       store.close();
     }
@@ -164,5 +169,6 @@ function createMentorFeature({
 
 module.exports = {
   createMentorFeature,
+  MentorSpeakerService,
   roomName
 };

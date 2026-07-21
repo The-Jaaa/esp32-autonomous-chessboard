@@ -8,7 +8,7 @@ require('dotenv').config();
 const path = require('path');
 const fs = require('fs');
 const { randomUUID } = require('crypto');
-const { createMentorFeature } = require('./mentor');
+const { createMentorFeature, MentorSpeakerService } = require('./mentor');
 
 const app = express();
 const server = http.createServer(app);
@@ -32,13 +32,21 @@ app.use(express.json());
 // Serve React production build static assets
 app.use(express.static(path.join(__dirname, 'client/dist')));
 
+const mentorSpeakerService = new MentorSpeakerService({
+  token: process.env.ESP32_AUDIO_TOKEN,
+  emitStatus: (conversationId, payload) => {
+    io.to(`mentor:${conversationId}`).emit('mentor-speaker-status', payload);
+  }
+});
+
 const mentorFeature = createMentorFeature({
   app,
   io,
   ai,
   model: GEMINI_TEXT_MODEL,
   liveModel: GEMINI_LIVE_MODEL,
-  liveVoice: GEMINI_VOICE
+  liveVoice: GEMINI_VOICE,
+  speakerService: mentorSpeakerService
 });
 
 // Endpoint: Handle accidental GET requests for easier debugging
@@ -5223,32 +5231,10 @@ app.post('/api/physical/job-result', (req, res) => {
   return res.json({ success: true, state: serializePhysicalState() });
 });
 
-const net = require('net');
-
-// Keep track of connected ESP32 audio clients
-let esp32AudioClients = [];
-
-// TCP Server on port 3001 to stream raw audio bytes over Wi-Fi to the ESP32
-const audioServer = net.createServer((socket) => {
-  console.log('[Audio Server] ESP32 connected for audio streaming');
-  esp32AudioClients.push(socket);
-
-  socket.on('close', () => {
-    console.log('[Audio Server] ESP32 disconnected');
-    esp32AudioClients = esp32AudioClients.filter(c => c !== socket);
-  });
-
-  socket.on('error', (err) => {
-    console.error('[Audio Server] ESP32 socket error:', err.message);
-  });
-});
+const audioServer = mentorSpeakerService.server;
 
 function startAudioServer(port = 3001) {
-  if (audioServer.listening) return audioServer;
-  audioServer.listen(port, () => {
-    console.log(`Audio Server listening on port ${port} (TCP)`);
-  });
-  return audioServer;
+  return mentorSpeakerService.listen(port);
 }
 
 function extractAudioSampleRate(mimeType, fallback = 24000) {
