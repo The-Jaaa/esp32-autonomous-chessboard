@@ -172,6 +172,17 @@ const TOOL_DECLARATIONS = [{
   name: 'end_activity',
   description: 'End the current mentor activity while preserving the current board position.',
   parametersJsonSchema: { type: 'object', properties: {}, additionalProperties: false }
+}, {
+  name: 'resolve_opening_drill',
+  description: 'Resolve a completed or blocked physical opening drill by retrying, repeating, continuing normal play, finishing the lesson, or resuming a finished board.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      action: { type: 'string', enum: ['retry', 'repeat', 'continue', 'finish', 'resume'] }
+    },
+    required: ['action'],
+    additionalProperties: false
+  }
 }];
 
 function makeAbortError(message = 'Mentor tool execution was cancelled.') {
@@ -387,7 +398,7 @@ class MentorToolService {
     if (name === 'start_activity') {
       if (!this.activityService) throw new Error('Mentor activities are unavailable.');
       this.activityService.assertExplicitStartConsent(conversationId, requestId);
-      const state = this.chessService.getState(conversationId);
+      const state = this.workspaceState(conversationId);
       const activity = await this.activityService.startActivity(conversationId, {
         type: args.type,
         learnerColor: args.learnerColor || 'white',
@@ -399,7 +410,7 @@ class MentorToolService {
         signal
       });
       onProgress(1, 1);
-      return { activity, board: compactBoardState(this.chessService.getState(conversationId)) };
+      return { activity, board: compactBoardState(this.workspaceState(conversationId)) };
     }
 
     if (name === 'propose_activity') {
@@ -431,6 +442,13 @@ class MentorToolService {
       const activity = this.activityService.end(conversationId, 'mentor_ended');
       onProgress(1, 1);
       return { activity };
+    }
+
+    if (name === 'resolve_opening_drill') {
+      if (!this.activityService) throw new Error('Mentor activities are unavailable.');
+      const activity = this.activityService.resolvePhysicalOpening(conversationId, args.action);
+      onProgress(1, 1);
+      return { activity, board: compactBoardState(this.workspaceState(conversationId)) };
     }
 
     if (name === 'analyze_position') {

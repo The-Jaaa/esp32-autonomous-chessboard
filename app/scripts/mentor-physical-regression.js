@@ -186,7 +186,18 @@ async function run() {
   });
   assert.deepStrictEqual(
     toolService.declarations(first.id).map((tool) => tool.name),
-    ['get_board_state', 'analyze_position', 'analyze_move', 'set_orientation', 'annotate_board']
+    [
+      'get_board_state',
+      'analyze_position',
+      'analyze_move',
+      'set_orientation',
+      'annotate_board',
+      'get_activity_state',
+      'start_activity',
+      'request_hint',
+      'end_activity',
+      'resolve_opening_drill'
+    ]
   );
   const readResult = await toolService.execute({
     conversationId: first.id,

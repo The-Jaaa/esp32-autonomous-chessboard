@@ -215,15 +215,21 @@ function createMentorRouter({
   });
 
   router.post('/conversations/:id/activities', asyncRoute(async (req, res) => {
-      if (physicalObserver.isAttached(req.params.id)) {
-        const error = new Error('Physical-board activities are not available yet.');
-        error.code = 'physical_board_read_only';
-        error.statusCode = 409;
-        throw error;
-      }
       const activity = await activityService.startActivity(req.params.id, req.body || {});
-      return res.status(201).json({ activity, state: chessService.getState(req.params.id) });
+      const state = physicalObserver.isAttached(req.params.id)
+        ? physicalObserver.getState(req.params.id)
+        : chessService.getState(req.params.id);
+      return res.status(201).json({ activity, state });
   }));
+
+  router.post('/conversations/:id/physical-opening/action', (req, res, next) => {
+    try {
+      const activity = activityService.resolvePhysicalOpening(req.params.id, req.body?.action);
+      return res.json({ activity, physicalBoard: physicalObserver.detail(req.params.id) });
+    } catch (error) {
+      return next(error);
+    }
+  });
 
   router.post('/conversations/:id/activities/:activityId/pause', (req, res, next) => {
     try {

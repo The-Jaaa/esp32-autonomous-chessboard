@@ -1,6 +1,7 @@
 const { createHash } = require('crypto');
 const { Chess } = require('chess.js');
 const { gameStatus, moveToUci, normalizeAnnotations } = require('./chess-service');
+const { STANDARD_FEN } = require('./store');
 
 const PHYSICAL_BOARD_ID = 'main-board';
 const PHYSICAL_READ_TOOLS = new Set([
@@ -8,7 +9,12 @@ const PHYSICAL_READ_TOOLS = new Set([
   'analyze_position',
   'analyze_move',
   'set_orientation',
-  'annotate_board'
+  'annotate_board',
+  'get_activity_state',
+  'start_activity',
+  'request_hint',
+  'end_activity',
+  'resolve_opening_drill'
 ]);
 
 class MentorPhysicalError extends Error {
@@ -92,11 +98,13 @@ function normalizeSnapshot(snapshot, binding) {
       stateRevision: Number(snapshot.stateRevision || 0),
       active: Boolean(snapshot.active),
       phase: snapshot.phase,
+      setupMode: snapshot.setupMode || 'full',
       statusText: snapshot.statusText,
       robotBusy: Boolean(snapshot.robotBusy),
       pendingRobotJob: snapshot.pendingRobotJob || null,
       pendingUndo: snapshot.pendingUndo || null,
       pendingRedo: snapshot.pendingRedo || null,
+      robotGraveyardOccupied: snapshot.robotGraveyardOccupied || [],
       selectedSource: snapshot.selectedSource || null,
       legalTargets: snapshot.legalTargets || [],
       board: snapshot.board || { ready: true, missingSquares: [], extraSquares: [] },
@@ -104,7 +112,8 @@ function normalizeSnapshot(snapshot, binding) {
       lastSnapshotAt: snapshot.lastSnapshotAt || null,
       lastError: snapshot.lastError || null,
       syncWarningReason: snapshot.syncWarningReason || null,
-      lastMove: snapshot.lastMove || null
+      lastMove: snapshot.lastMove || null,
+      openingDrill: snapshot.mentorOpeningDrill || null
     }
   };
 }
@@ -130,9 +139,16 @@ function guidanceFor(snapshot) {
     type = 'sync_warning';
     urgent = true;
     eventText = `Physical board synchronization warning${diff ? `: ${diff}` : ''}.`;
-    reply = diff
-      ? `Please restore or center the indicated pieces. The board reports ${diff}.`
-      : (snapshot.statusText || 'Please restore the physical board to the expected position.');
+    const reason = snapshot.syncWarningReason || {};
+    if (reason.type === 'opening_drill_wrong_source') {
+      reply = `Return the piece to ${reason.sourceSquare}. This opening drill requires ${reason.expectedUci}.`;
+    } else if (reason.type === 'opening_drill_wrong_destination' || reason.type === 'opening_drill_wrong_move') {
+      reply = snapshot.statusText || `Restore the piece, then play the reviewed move ${reason.expectedUci}.`;
+    } else {
+      reply = diff
+        ? `Please restore or center the indicated pieces. The board reports ${diff}.`
+        : (snapshot.statusText || 'Please restore the physical board to the expected position.');
+    }
   } else if (snapshot.phase === 'error' || snapshot.lastError) {
     type = 'error';
     urgent = true;
@@ -217,12 +233,63 @@ class MentorPhysicalObserverService {
     this.textService = textService;
     this.liveService = liveService;
     this.activityService = activityService;
+    this.activityService?.setPhysicalCoordinator?.(this);
   }
 
   setAdapter(adapter) {
     this.adapter = adapter;
     const snapshot = adapter?.getSnapshot?.();
     if (snapshot) this.handleSnapshot(snapshot, 'physical-status');
+  }
+
+  requireCurrentPhysicalState(conversationId) {
+    return this.getState(conversationId);
+  }
+
+  requireOpeningStartState(conversationId, expectedRevision) {
+    const state = this.getState(conversationId);
+    const physical = state.physical;
+    if (Number(expectedRevision) !== state.revision) {
+      throw new MentorPhysicalError('The physical board changed before the drill started.', 'stale_revision', 409, { state });
+    }
+    if (state.fen !== STANDARD_FEN || state.history.length !== 0
+      || physical.setupMode !== 'full' || physical.phase !== 'ready'
+      || !physical.board?.ready || physical.robotBusy
+      || physical.pendingRobotJob || physical.pendingUndo || physical.pendingRedo
+      || physical.robotGraveyardOccupied.length > 0) {
+      throw new MentorPhysicalError(
+        'Physical opening drills require a synchronized full standard position with no pending work.',
+        'physical_opening_setup_required',
+        409,
+        { state }
+      );
+    }
+    return state;
+  }
+
+  syncPhysicalActivity(activity) {
+    if (!activity || activity.config?.boardSource !== 'physical') {
+      this.adapter?.setOpeningDrill?.(null);
+      return null;
+    }
+    const policy = this.activityService?.getPhysicalPolicy?.(activity.conversationId) || null;
+    this.adapter?.setOpeningDrill?.(policy);
+    return policy;
+  }
+
+  retryPhysicalOpening(conversationId) {
+    this.requireCurrentBinding(conversationId);
+    return this.adapter?.retryOpeningDrill?.() || { success: false };
+  }
+
+  resolvePhysicalOpening(conversationId, action) {
+    this.requireCurrentBinding(conversationId);
+    return this.adapter?.resolveOpeningDrill?.(action) || { success: false };
+  }
+
+  resumeNormalPlay(conversationId) {
+    this.requireCurrentBinding(conversationId);
+    return this.adapter?.resolveOpeningDrill?.('resume') || { success: false };
   }
 
   isAttached(conversationId) {
@@ -367,6 +434,17 @@ class MentorPhysicalObserverService {
     const state = this.getState(conversationId);
     const recentMoves = state.history.slice(-12).map((move) => move.san).join(' ');
     const physical = state.physical;
+    const activity = this.activityService?.get?.(conversationId) || null;
+    const openingContext = activity?.config?.boardSource === 'physical'
+      ? [
+          `Active physical opening drill: ${activity.title}`,
+          `Opening goal: ${activity.goal}`,
+          `Opening step: ${Math.min(activity.stepIndex + 1, activity.totalSteps)} of ${activity.totalSteps}`,
+          `Required next move: ${activity.config.line?.[activity.stepIndex] || '(line complete)'}`,
+          `Required actor: ${activity.stepIndex % 2 === 0 ? 'learner' : 'mentor robot'}`,
+          'The opening coordinator, not Gemini, enforces and executes the reviewed line.'
+        ]
+      : [];
     return [
       'Current workspace source: physical chessboard (read-only).',
       `FEN: ${state.fen}`,
@@ -381,7 +459,9 @@ class MentorPhysicalObserverService {
       `Missing or uncentered squares: ${physical.board.missingSquares.join(', ') || '(none)'}`,
       `Unexpected occupied squares: ${physical.board.extraSquares.join(', ') || '(none)'}`,
       `Robot busy: ${physical.robotBusy ? 'yes' : 'no'}`,
+      ...openingContext,
       'You may analyze or annotate this position, but you cannot move, reset, load, demonstrate, or otherwise control the physical board.',
+      'You may start and guide a reviewed physical opening drill only when the board is at the exact standard starting position.',
       'Never say that you played a physical move. The backend robot chooses and executes the opponent moves.'
     ].join('\n');
   }
@@ -428,6 +508,7 @@ class MentorPhysicalObserverService {
       || binding.serverInstanceId !== snapshot.serverInstanceId
       || binding.sessionGeneration !== Number(snapshot.sessionGeneration)) {
       const stale = this.store.detachPhysicalBinding(binding.conversationId, 'stale');
+      this.activityService?.cancelStalePhysicalActivity?.(binding.conversationId, 'physical_session_stale');
       this.emit(binding.conversationId, 'mentor-physical-binding-updated', {
         conversationId: binding.conversationId,
         physicalBoard: { binding: stale, state: null }

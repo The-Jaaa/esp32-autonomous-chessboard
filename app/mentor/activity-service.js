@@ -16,7 +16,8 @@ const ACTIVITY_TOOL_NAMES = new Set([
   'start_activity',
   'request_prediction',
   'request_hint',
-  'end_activity'
+  'end_activity',
+  'resolve_opening_drill'
 ]);
 const READ_ONLY_TOOLS = new Set([
   'get_board_state',
@@ -91,10 +92,19 @@ class MentorActivityService {
       text: null,
       live: null
     };
+    this.physicalCoordinator = null;
   }
 
   setRunners(runners = {}) {
     this.runners = { ...this.runners, ...runners };
+  }
+
+  setPhysicalCoordinator(coordinator) {
+    this.physicalCoordinator = coordinator;
+  }
+
+  isPhysicalActivity(activity) {
+    return activity?.config?.boardSource === 'physical';
   }
 
   get(conversationId) {
@@ -146,6 +156,10 @@ class MentorActivityService {
   reconcile(conversationId, { resumeMentorTurn = false } = {}) {
     const activity = this.store.getActiveActivity(conversationId);
     if (!activity || activity.status === 'paused') return this.get(conversationId);
+    if (this.isPhysicalActivity(activity)) {
+      this.physicalCoordinator?.syncPhysicalActivity?.(activity);
+      return this.get(conversationId);
+    }
     const board = this.chessService.getState(conversationId);
     if (board.gameStatus.isGameOver) {
       const updated = this.store.updateActivity(activity.id, {
@@ -328,6 +342,9 @@ class MentorActivityService {
   }
 
   async startActivity(conversationId, options = {}) {
+    if (this.physicalCoordinator?.isAttached?.(conversationId)) {
+      return this.startPhysicalOpening(conversationId, options);
+    }
     if (options.type === 'practice_game') return this.startPractice(conversationId, options);
     if (options.proposal) {
       const validation = await this.proposeActivity(options.proposal, { signal: options.signal });
@@ -344,6 +361,296 @@ class MentorActivityService {
       });
     }
     return this.startCatalogActivity(conversationId, options);
+  }
+
+  startPhysicalOpening(conversationId, {
+    type,
+    sourceId,
+    expectedRevision,
+    learnerColor = 'white',
+    requestId = null,
+    proposal = null
+  } = {}) {
+    if (type !== 'opening_drill' || proposal) {
+      throw new MentorActivityError(
+        'The physical board currently supports reviewed opening drills only.',
+        'physical_activity_unsupported',
+        409
+      );
+    }
+    const item = getCatalogItem(sourceId);
+    if (!item || item.type !== 'opening_drill' || !item.supportsPhysical) {
+      throw new MentorActivityError('Reviewed physical opening drill not found.', 'activity_source_not_found', 404);
+    }
+    if (learnerColor !== 'white') {
+      throw new MentorActivityError('Physical opening drills currently use Human White.', 'physical_activity_white_only', 409);
+    }
+    if (this.store.getActiveActivity(conversationId)) {
+      throw new MentorActivityError('End the current activity before starting another.', 'activity_already_active', 409);
+    }
+    const physical = this.physicalCoordinator.requireOpeningStartState(conversationId, expectedRevision);
+    const activity = this.store.createActivity({
+      conversationId,
+      type: 'opening_drill',
+      title: item.title,
+      goal: item.goal,
+      learnerColor: 'white',
+      mentorColor: 'black',
+      sourceId: item.id,
+      startFen: item.initialFen,
+      startRevision: physical.revision,
+      boardRevision: physical.revision,
+      phase: 'learner_turn',
+      totalSteps: item.line.length,
+      config: {
+        line: item.line,
+        hints: item.hints || [],
+        topic: item.topic,
+        family: item.family || null,
+        curated: true,
+        boardSource: 'physical',
+        serverInstanceId: physical.physical.serverInstanceId,
+        sessionGeneration: physical.physical.sessionGeneration
+      },
+      state: {
+        completedMentorTurns: 0,
+        fallbackMoves: 0,
+        lastHint: null,
+        lastPhysicalMoveId: null,
+        pauseReason: null,
+        iteration: 1,
+        requestId
+      }
+    });
+    this.record(activity, 'physical_opening_ready', {
+      sourceId: item.id,
+      expectedUci: item.line[0],
+      serverInstanceId: physical.physical.serverInstanceId,
+      sessionGeneration: physical.physical.sessionGeneration
+    });
+    this.physicalCoordinator.syncPhysicalActivity(activity);
+    return this.get(conversationId);
+  }
+
+  getPhysicalPolicy(conversationId) {
+    const activity = this.store.getActiveActivity(conversationId);
+    if (!this.isPhysicalActivity(activity)) return null;
+    return {
+      activityId: activity.id,
+      generation: activity.generation,
+      sourceId: activity.sourceId,
+      title: activity.title,
+      goal: activity.goal,
+      status: activity.status,
+      phase: activity.phase,
+      stepIndex: activity.stepIndex,
+      totalSteps: activity.totalSteps,
+      expectedUci: activity.config.line?.[activity.stepIndex] || null,
+      expectedActor: activity.stepIndex % 2 === 0 ? 'learner' : 'mentor',
+      hints: activity.config.hints || [],
+      attempts: activity.attempts,
+      hintLevel: activity.hints,
+      state: activity.state,
+      serverInstanceId: activity.config.serverInstanceId,
+      sessionGeneration: activity.config.sessionGeneration
+    };
+  }
+
+  validatePhysicalLearnerMove(conversationId, uci) {
+    const activity = this.store.getActiveActivity(conversationId);
+    if (!this.isPhysicalActivity(activity)) return null;
+    if (activity.status !== 'active' || activity.phase !== 'learner_turn') {
+      throw new MentorActivityError('The opening drill is not waiting for a learner move.', 'activity_not_learner_turn', 409);
+    }
+    const expectedUci = activity.config.line?.[activity.stepIndex];
+    if (uci !== expectedUci) {
+      const updated = this.store.updateActivity(activity.id, { attempts: activity.attempts + 1 });
+      this.record(updated, 'physical_incorrect_move', { attemptedUci: uci, expectedUci });
+      this.physicalCoordinator?.syncPhysicalActivity?.(updated);
+      throw new MentorActivityError(
+        `Return the piece to its original square. This drill expects ${expectedUci}.`,
+        'activity_incorrect_move',
+        422,
+        { activity: this.get(conversationId), attemptedUci: uci, expectedUci }
+      );
+    }
+    return activity;
+  }
+
+  notePhysicalIncorrectAttempt(conversationId, details = {}) {
+    const activity = this.store.getActiveActivity(conversationId);
+    if (!this.isPhysicalActivity(activity)) return null;
+    const updated = this.store.updateActivity(activity.id, { attempts: activity.attempts + 1 });
+    this.record(updated, 'physical_incorrect_attempt', details);
+    return this.get(conversationId);
+  }
+
+  physicalMoveCommitted(conversationId, {
+    side,
+    uci,
+    san,
+    revision,
+    moveId,
+    gameStatus = null
+  } = {}) {
+    const activity = this.store.getActiveActivity(conversationId);
+    if (!this.isPhysicalActivity(activity) || !['active', 'paused'].includes(activity.status)) return null;
+    if (moveId && activity.state.lastPhysicalMoveId === moveId) return this.get(conversationId);
+    const expectedActor = activity.stepIndex % 2 === 0 ? 'learner' : 'mentor';
+    const actor = side === 'human' ? 'learner' : 'mentor';
+    const expectedUci = activity.config.line?.[activity.stepIndex];
+    if (activity.status !== 'active' || actor !== expectedActor || uci !== expectedUci) {
+      throw new MentorActivityError('The verified physical move does not match the active opening step.', 'physical_activity_move_mismatch', 409);
+    }
+    const nextStep = activity.stepIndex + 1;
+    const nextState = {
+      ...activity.state,
+      lastPhysicalMoveId: moveId || `${side}:${uci}:${revision}`,
+      completedMentorTurns: Number(activity.state.completedMentorTurns || 0) + (actor === 'mentor' ? 1 : 0),
+      routeBlocked: null,
+      pauseReason: null
+    };
+    const physicalGameOver = Boolean(gameStatus?.isGameOver || gameStatus?.checkmate || gameStatus?.draw);
+    if (nextStep >= activity.totalSteps || physicalGameOver) {
+      const updated = this.store.updateActivity(activity.id, {
+        status: 'paused',
+        phase: 'paused',
+        stepIndex: nextStep,
+        boardRevision: Number.isInteger(revision) ? revision : activity.boardRevision,
+        pendingRequestId: null,
+        state: { ...nextState, pauseReason: 'line_complete' }
+      });
+      this.record(updated, physicalGameOver ? 'physical_game_over' : 'physical_line_complete', {
+        move: { uci, san, side },
+        gameStatus
+      });
+      const progress = this.store.awardActivityProgress(
+        activity.id,
+        [activity.config.topic].filter(Boolean),
+        activity.attempts > 0 ? 3 : activity.hints > 0 ? 6 : 10
+      );
+      if (progress.awarded) this.emitGlobal('mentor-progress-updated', this.getProgressSummary());
+      this.physicalCoordinator?.syncPhysicalActivity?.(updated);
+      return this.get(conversationId);
+    }
+    const nextActor = nextStep % 2 === 0 ? 'learner' : 'mentor';
+    const updated = this.store.updateActivity(activity.id, {
+      stepIndex: nextStep,
+      phase: nextActor === 'learner' ? 'learner_turn' : 'mentor_turn',
+      boardRevision: Number.isInteger(revision) ? revision : activity.boardRevision,
+      pendingRequestId: null,
+      state: nextState
+    });
+    this.record(updated, actor === 'learner' ? 'physical_learner_move' : 'physical_mentor_move', {
+      move: { uci, san, side },
+      nextStep,
+      nextActor,
+      nextUci: activity.config.line[nextStep]
+    });
+    this.physicalCoordinator?.syncPhysicalActivity?.(updated);
+    return this.get(conversationId);
+  }
+
+  markPhysicalRouteBlocked(conversationId, details = {}) {
+    const activity = this.store.getActiveActivity(conversationId);
+    if (!this.isPhysicalActivity(activity)) return null;
+    const updated = this.store.updateActivity(activity.id, {
+      status: 'paused',
+      phase: 'paused',
+      state: { ...activity.state, pauseReason: 'route_blocked', routeBlocked: details }
+    });
+    this.record(updated, 'physical_route_blocked', details);
+    this.physicalCoordinator?.syncPhysicalActivity?.(updated);
+    return this.get(conversationId);
+  }
+
+  preparePhysicalRepeat(conversationId) {
+    const activity = this.store.getActiveActivity(conversationId);
+    if (!this.isPhysicalActivity(activity) || activity.state.pauseReason !== 'line_complete') {
+      throw new MentorActivityError('The completed opening line is not ready to repeat.', 'physical_repeat_unavailable', 409);
+    }
+    const updated = this.store.updateActivity(activity.id, {
+      status: 'paused',
+      phase: 'paused',
+      generation: activity.generation + 1,
+      state: { ...activity.state, pauseReason: 'repeat_restore', repeatRestorePending: true }
+    });
+    this.record(updated, 'physical_repeat_restore_started', {});
+    this.physicalCoordinator?.syncPhysicalActivity?.(updated);
+    return this.get(conversationId);
+  }
+
+  completePhysicalRepeat(conversationId, revision) {
+    const activity = this.store.getActiveActivity(conversationId);
+    if (!this.isPhysicalActivity(activity) || activity.state.pauseReason !== 'repeat_restore') return null;
+    const updated = this.store.updateActivity(activity.id, {
+      status: 'active',
+      phase: 'learner_turn',
+      stepIndex: 0,
+      attempts: 0,
+      hints: 0,
+      boardRevision: Number.isInteger(revision) ? revision : activity.boardRevision,
+      state: {
+        completedMentorTurns: 0,
+        fallbackMoves: 0,
+        lastHint: null,
+        lastPhysicalMoveId: null,
+        pauseReason: null,
+        repeatRestorePending: false,
+        iteration: Number(activity.state.iteration || 1) + 1
+      }
+    });
+    this.record(updated, 'physical_repeat_ready', { expectedUci: activity.config.line[0] });
+    this.physicalCoordinator?.syncPhysicalActivity?.(updated);
+    return this.get(conversationId);
+  }
+
+  resolvePhysicalOpening(conversationId, action) {
+    const activity = this.store.getActiveActivity(conversationId);
+    if (action === 'repeat') return this.preparePhysicalRepeat(conversationId);
+    if (!this.isPhysicalActivity(activity)) {
+      if (action === 'resume') return this.physicalCoordinator?.resumeNormalPlay?.(conversationId) || null;
+      throw new MentorActivityError('No physical opening drill is active.', 'activity_not_found', 404);
+    }
+    if (action === 'retry') {
+      const result = this.physicalCoordinator.retryPhysicalOpening(conversationId, activity);
+      const updated = this.store.updateActivity(activity.id, {
+        status: 'active',
+        phase: 'mentor_turn',
+        state: { ...activity.state, pauseReason: null, routeBlocked: null }
+      });
+      this.record(updated, 'physical_route_retry', result || {});
+      return this.get(conversationId);
+    }
+    if (!['continue', 'finish'].includes(action) || activity.state.pauseReason !== 'line_complete') {
+      throw new MentorActivityError('That opening-drill action is not available now.', 'physical_opening_action_unavailable', 409);
+    }
+    const updated = this.store.updateActivity(activity.id, {
+      status: 'complete',
+      phase: 'complete',
+      pendingRequestId: null,
+      generation: activity.generation + 1,
+      completedAt: Date.now(),
+      state: { ...activity.state, pauseReason: null, resolution: action }
+    });
+    this.record(updated, action === 'continue' ? 'physical_continue_game' : 'physical_lesson_finished', {});
+    this.physicalCoordinator.resolvePhysicalOpening(conversationId, action, updated);
+    return activitySummary(updated, this.store.listActivityEvents(updated.id));
+  }
+
+  cancelStalePhysicalActivity(conversationId, reason = 'physical_session_stale') {
+    const activity = this.store.getActiveActivity(conversationId);
+    if (!this.isPhysicalActivity(activity)) return null;
+    const updated = this.store.updateActivity(activity.id, {
+      status: 'cancelled',
+      phase: 'complete',
+      pendingRequestId: null,
+      generation: activity.generation + 1,
+      completedAt: Date.now(),
+      state: { ...activity.state, pauseReason: reason }
+    });
+    this.record(updated, 'physical_activity_stale', { reason });
+    return updated;
   }
 
   async proposeActivity(proposal = {}, { signal } = {}) {
@@ -428,6 +735,7 @@ class MentorActivityService {
       state: { ...activity.state, pausedFromPhase: activity.phase }
     });
     this.record(updated, 'paused', { reason, previousPhase: activity.phase });
+    if (this.isPhysicalActivity(updated)) this.physicalCoordinator?.syncPhysicalActivity?.(updated);
     return this.get(conversationId);
   }
 
@@ -435,6 +743,22 @@ class MentorActivityService {
     const activity = this.store.getActiveActivity(conversationId);
     if (!activity) throw new MentorActivityError('No paused activity was found.', 'activity_not_found', 404);
     if (activity.status !== 'paused') return this.get(conversationId);
+    if (this.isPhysicalActivity(activity)) {
+      if (['line_complete', 'repeat_restore', 'route_blocked'].includes(activity.state.pauseReason)) {
+        throw new MentorActivityError('Use the opening drill action controls for this paused state.', 'physical_opening_action_required', 409);
+      }
+      const phase = activity.state.pausedFromPhase || 'learner_turn';
+      const physical = this.physicalCoordinator.requireCurrentPhysicalState(conversationId);
+      const updated = this.store.updateActivity(activity.id, {
+        status: 'active',
+        phase,
+        boardRevision: physical.revision,
+        state: { ...activity.state, pausedFromPhase: null, pauseReason: null }
+      });
+      this.record(updated, 'resumed', { phase });
+      this.physicalCoordinator?.syncPhysicalActivity?.(updated);
+      return this.get(conversationId);
+    }
     const board = this.chessService.getState(conversationId);
     let phase = activity.state.pausedFromPhase || (
       board.turn === colorCode(activity.learnerColor) ? 'learner_turn' : 'mentor_turn'
@@ -462,6 +786,7 @@ class MentorActivityService {
       completedAt: Date.now()
     });
     this.record(updated, reason === 'game_over' ? 'game_over' : 'ended', { reason });
+    if (this.isPhysicalActivity(updated)) this.physicalCoordinator?.resolvePhysicalOpening?.(conversationId, 'continue', updated);
     return activitySummary(updated, this.store.listActivityEvents(updated.id));
   }
 
