@@ -93,10 +93,11 @@ function commitLearner(harness, conversationId, uci, actionId) {
 }
 
 function catalogRegression() {
-  assert.strictEqual(OPENINGS.length, 6);
+  assert.strictEqual(OPENINGS.length, 18);
   assert.strictEqual(PUZZLES.length, 12);
   assert.strictEqual(LESSONS.length, 5);
-  assert.strictEqual(new Set([...OPENINGS, ...PUZZLES, ...LESSONS].map((item) => item.id)).size, 23);
+  assert.strictEqual(new Set([...OPENINGS, ...PUZZLES, ...LESSONS].map((item) => item.id)).size, 35);
+  assert(OPENINGS.every((item) => item.line.length === 10 && item.supportsPhysical));
   assert.ok(getCatalogItem('italian-game'));
 }
 
@@ -122,11 +123,15 @@ async function openingAndScoringRegression() {
   await waitForIdle(harness.activity, conversation.id);
   commitLearner(harness, conversation.id, 'f1c4', 'italian-bc4');
   await waitForIdle(harness.activity, conversation.id);
+  commitLearner(harness, conversation.id, 'd2d3', 'italian-d3');
+  await waitForIdle(harness.activity, conversation.id);
+  commitLearner(harness, conversation.id, 'e1g1', 'italian-castle');
+  await waitForIdle(harness.activity, conversation.id);
 
   assert.strictEqual(harness.activity.get(conversation.id), null);
   const completed = harness.store.listActivities(conversation.id)[0];
   assert.strictEqual(completed.status, 'complete');
-  assert.strictEqual(completed.stepIndex, 6);
+  assert.strictEqual(completed.stepIndex, 10);
   const openingProgress = harness.store.listTopicProgress().find((item) => item.topic === 'openings');
   assert.strictEqual(openingProgress.mastery, 3);
   assert.strictEqual(harness.store.awardActivityProgress(completed.id, ['openings'], 10).awarded, false);

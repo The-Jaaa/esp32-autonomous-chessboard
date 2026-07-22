@@ -1,7 +1,7 @@
 const { Chess } = require('chess.js');
 const { STANDARD_FEN } = require('./store');
 
-const OPENINGS = [{
+const LEGACY_OPENINGS = [{
   id: 'italian-game',
   type: 'opening_drill',
   title: 'Italian Game',
@@ -62,6 +62,97 @@ const OPENINGS = [{
   line: ['e2e4', 'e7e6', 'd2d4', 'd7d5', 'b1c3', 'g8f6'],
   hints: ['White takes central space with e4.', 'Black prepares the d5 counterstrike.', 'Support the center with natural development.']
 }];
+
+function opening(id, title, family, goal, skillBands, line, hints) {
+  return {
+    id,
+    type: 'opening_drill',
+    title,
+    family,
+    goal,
+    topic: 'openings',
+    skillBands,
+    supportsPhysical: true,
+    initialFen: STANDARD_FEN,
+    line,
+    hints
+  };
+}
+
+const OPENINGS = [
+  opening('italian-game', 'Italian Game', 'Open games',
+    'Develop quickly, secure the king, and pressure f7.', ['Beginner', 'Intermediate'],
+    ['e2e4', 'e7e5', 'g1f3', 'b8c6', 'f1c4', 'f8c5', 'd2d3', 'g8f6', 'e1g1', 'd7d6'],
+    ['Claim the center with the king pawn.', 'Develop the king knight toward e5.', 'Aim the bishop at f7 and prepare to castle.']),
+  opening('two-knights-defense', 'Two Knights Defense', 'Open games',
+    'Meet the Italian setup with active knight development.', ['Beginner', 'Intermediate'],
+    ['e2e4', 'e7e5', 'g1f3', 'b8c6', 'f1c4', 'g8f6', 'd2d3', 'f8c5', 'e1g1', 'd7d6'],
+    ['Open the center with e4.', 'Develop the king knight.', 'Develop the bishop to c4 and castle.']),
+  opening('ruy-lopez', 'Ruy Lopez', 'Open games',
+    'Build pressure on e5 by challenging its c6 defender.', ['Beginner', 'Intermediate', 'Advanced'],
+    ['e2e4', 'e7e5', 'g1f3', 'b8c6', 'f1b5', 'a7a6', 'b5a4', 'g8f6', 'e1g1', 'f8e7'],
+    ['Claim the center with e4.', 'Attack e5 with the king knight.', 'Place the bishop on b5, then preserve it after ...a6.']),
+  opening('scotch-game', 'Scotch Game', 'Open games',
+    'Open the center early and develop with tempo.', ['Beginner', 'Intermediate'],
+    ['e2e4', 'e7e5', 'g1f3', 'b8c6', 'd2d4', 'e5d4', 'f3d4', 'g8f6', 'b1c3', 'f8b4'],
+    ['Take central space with e4.', 'Develop Nf3 before opening the center.', 'Challenge e5 immediately with d4.']),
+  opening('vienna-game', 'Vienna Game', 'Open games',
+    'Develop the queen knight first and build a flexible kingside attack.', ['Beginner', 'Intermediate'],
+    ['e2e4', 'e7e5', 'b1c3', 'g8f6', 'f1c4', 'b8c6', 'd2d3', 'f8b4', 'g1e2', 'd7d6'],
+    ['Begin with e4.', 'Develop the queen knight to c3.', 'Support the center and prepare kingside development.']),
+  opening('queens-gambit', "Queen's Gambit Declined", 'Queen-pawn openings',
+    "Challenge Black's d5 pawn and build a broad center.", ['Beginner', 'Intermediate', 'Advanced'],
+    ['d2d4', 'd7d5', 'c2c4', 'e7e6', 'b1c3', 'g8f6', 'c1g5', 'f8e7', 'e2e3', 'e8g8'],
+    ['Start with the queen pawn.', 'Challenge d5 with the c-pawn.', 'Develop Nc3 and pin the f6 knight with Bg5.']),
+  opening('queens-gambit-accepted', "Queen's Gambit Accepted", 'Queen-pawn openings',
+    'Recover the gambit pawn while developing naturally.', ['Intermediate', 'Advanced'],
+    ['d2d4', 'd7d5', 'c2c4', 'd5c4', 'e2e3', 'g8f6', 'f1c4', 'e7e6', 'g1f3', 'c7c5'],
+    ['Offer the c-pawn to challenge d5.', 'Prepare to recover c4 with e3.', 'Recapture with the bishop and continue development.']),
+  opening('slav-defense', 'Slav Defense', 'Queen-pawn openings',
+    'Support d5 with the c-pawn while keeping the light bishop active.', ['Intermediate', 'Advanced'],
+    ['d2d4', 'd7d5', 'c2c4', 'c7c6', 'g1f3', 'g8f6', 'b1c3', 'd5c4', 'a2a4', 'c8f5'],
+    ['Build the d4 and c4 center.', 'Develop Nf3 and Nc3.', 'Use a4 to discourage ...b5 after Black captures c4.']),
+  opening('london-system', 'London System', 'Queen-pawn openings',
+    'Build a dependable setup with the bishop outside the pawn chain.', ['Beginner', 'Intermediate'],
+    ['d2d4', 'd7d5', 'g1f3', 'g8f6', 'c1f4', 'e7e6', 'e2e3', 'c7c5', 'c2c3', 'b8c6'],
+    ['Begin with d4.', 'Develop the king knight naturally.', 'Develop Bf4 before closing the pawn chain with e3.']),
+  opening('catalan-opening', 'Catalan Opening', 'Queen-pawn openings',
+    'Combine a queen-pawn center with long-diagonal pressure.', ['Intermediate', 'Advanced'],
+    ['d2d4', 'g8f6', 'c2c4', 'e7e6', 'g2g3', 'd7d5', 'f1g2', 'f8e7', 'g1f3', 'e8g8'],
+    ['Begin with d4 and c4.', 'Prepare to fianchetto with g3.', 'Develop Bg2 and Nf3 to pressure the center.']),
+  opening('english-opening', 'English Opening', 'Flank openings',
+    'Control the center from the flank and build a kingside fianchetto.', ['Intermediate', 'Advanced'],
+    ['c2c4', 'e7e5', 'b1c3', 'g8f6', 'g2g3', 'd7d5', 'c4d5', 'f6d5', 'f1g2', 'd5b6'],
+    ['Start with the c-pawn.', 'Develop Nc3 to support d5.', 'Fianchetto the king bishop after exchanging in the center.']),
+  opening('reti-opening', 'Reti Opening', 'Flank openings',
+    'Delay central pawns while developing and controlling the center indirectly.', ['Intermediate', 'Advanced'],
+    ['g1f3', 'd7d5', 'g2g3', 'g8f6', 'f1g2', 'e7e6', 'e1g1', 'f8e7', 'd2d3', 'e8g8'],
+    ['Develop Nf3 without fixing the center.', 'Prepare a kingside fianchetto.', 'Castle before deciding on the central pawn break.']),
+  opening('sicilian-defense', 'Open Sicilian', 'Black defenses',
+    'Open the center against the Sicilian and develop actively.', ['Intermediate', 'Advanced'],
+    ['e2e4', 'c7c5', 'g1f3', 'd7d6', 'd2d4', 'c5d4', 'f3d4', 'g8f6', 'b1c3', 'a7a6'],
+    ['Claim the center with e4.', 'Develop Nf3 before playing d4.', 'Recapture on d4 with the knight and continue with Nc3.']),
+  opening('french-defense', 'French Advance', 'Black defenses',
+    "Build a space advantage, then support White's advanced pawn chain.", ['Beginner', 'Intermediate', 'Advanced'],
+    ['e2e4', 'e7e6', 'd2d4', 'd7d5', 'e4e5', 'c7c5', 'c2c3', 'b8c6', 'g1f3', 'd8b6'],
+    ['Create the e4-d4 center.', 'Advance e5 when Black challenges it.', 'Support d4 with c3 and develop Nf3.']),
+  opening('caro-kann-classical', 'Caro-Kann Classical', 'Black defenses',
+    'Develop naturally after Black challenges the e4 center.', ['Beginner', 'Intermediate', 'Advanced'],
+    ['e2e4', 'c7c6', 'd2d4', 'd7d5', 'b1c3', 'd5e4', 'c3e4', 'c8f5', 'e4g3', 'f5g6'],
+    ['Build the e4-d4 center.', 'Develop Nc3 before Black captures.', 'Recapture with the knight and preserve it with Ng3.']),
+  opening('scandinavian-defense', 'Scandinavian Defense', 'Black defenses',
+    "Gain time against Black's early queen development.", ['Beginner', 'Intermediate'],
+    ['e2e4', 'd7d5', 'e4d5', 'd8d5', 'b1c3', 'd5d8', 'd2d4', 'g8f6', 'g1f3', 'c7c6'],
+    ['Take the d5 pawn.', 'Develop Nc3 with tempo on the queen.', 'Build a central pawn and knight setup.']),
+  opening('pirc-defense', 'Pirc Defense', 'Black defenses',
+    'Build a large center before Black challenges it from the flank.', ['Intermediate', 'Advanced'],
+    ['e2e4', 'd7d6', 'd2d4', 'g8f6', 'b1c3', 'g7g6', 'f2f4', 'f8g7', 'g1f3', 'e8g8'],
+    ['Occupy the center with e4 and d4.', 'Develop Nc3 to reinforce e4.', 'Use f4 for space before completing development.']),
+  opening('kings-indian-defense', "King's Indian Defense", 'Black defenses',
+    "Build a classical pawn center against Black's kingside fianchetto.", ['Intermediate', 'Advanced'],
+    ['d2d4', 'g8f6', 'c2c4', 'g7g6', 'b1c3', 'f8g7', 'e2e4', 'd7d6', 'g1f3', 'e8g8'],
+    ['Begin with d4 and c4.', 'Develop Nc3 before building the full center.', 'Complete the center with e4 and develop Nf3.'])
+];
 
 const PUZZLES = [{
   id: 'back-rank-mate', title: 'Back-Rank Mate', topic: 'mate_patterns',
@@ -199,8 +290,10 @@ function publicCatalogItem(item) {
     title: item.title,
     goal: item.goal,
     topic: item.topic,
+    family: item.family || null,
     skillBands: item.skillBands,
     fixedLearnerColor: item.fixedLearnerColor || null,
+    supportsPhysical: Boolean(item.supportsPhysical),
     moveCount: item.line.length
   };
 }
