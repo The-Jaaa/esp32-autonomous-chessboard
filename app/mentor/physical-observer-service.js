@@ -559,7 +559,7 @@ class MentorPhysicalObserverService {
     const moveText = snapshot.san || snapshot.move || 'the reviewed reply';
     const displayText = `Black played ${moveText}.`;
     const reply = complete
-      ? `Black played ${moveText}. You completed the reviewed ${activity.title} line.`
+      ? `Black played ${moveText}. You completed the reviewed ${activity.title} line. Choose Repeat, Continue, or Finish.`
       : `Black played ${moveText}. Your reviewed move is ${nextUci}.`;
     const requestId = `physical-opening:${activity.id}:${snapshot.lastMove?.at || snapshot.stateRevision}:${activity.stepIndex}`;
     const prompt = [
@@ -576,7 +576,11 @@ class MentorPhysicalObserverService {
         requestId,
         displayText,
         prompt,
-        urgent: false
+        urgent: false,
+        expectedAssistantText: reply,
+        fallbackAssistantText: reply,
+        timeoutMs: 15000,
+        queueKey: 'physical-opening'
       });
       if (live) return;
     } catch {

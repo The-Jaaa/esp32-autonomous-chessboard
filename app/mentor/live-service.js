@@ -8,6 +8,7 @@ const LIVE_CONTEXT_CHARACTER_LIMIT = 12000;
 const AUDIO_INPUT_MIME_TYPE = 'audio/pcm;rate=16000';
 const AUDIO_OUTPUT_SAMPLE_RATE = 24000;
 const MAX_LIVE_TOOL_BATCHES = 8;
+const DEFAULT_PHYSICAL_TURN_TIMEOUT_MS = 15000;
 const VOICE_TRANSCRIPT_PLACEHOLDER = 'Voice request in progress.';
 
 const LIVE_TOOL_LABELS = {
@@ -641,12 +642,42 @@ class MentorLiveService {
       receivedProviderOutput: false,
       emptyCompletionsToIgnore: Number(values.emptyCompletionsToIgnore || 0),
       emptyCompletionsIgnored: 0,
+      timeoutId: null,
       record,
       resolveCompletion: null,
       completion: null
     };
     turn.completion = new Promise((resolve) => { turn.resolveCompletion = resolve; });
     return turn;
+  }
+
+  armPhysicalTurnTimeout(record, turn, request = {}) {
+    const requested = Number(request.timeoutMs);
+    const timeoutMs = Number.isFinite(requested) && requested > 0
+      ? Math.min(60000, Math.max(10, Math.round(requested)))
+      : DEFAULT_PHYSICAL_TURN_TIMEOUT_MS;
+    turn.timeoutId = setTimeout(() => {
+      if (record.closing || record.turn !== turn) return;
+      const fallback = String(request.fallbackAssistantText || turn.expectedAssistantText || '').trim();
+      if (!turn.assistantText && fallback) {
+        turn.assistantText = fallback;
+        this.updateTurnAssistantMessage(turn);
+      }
+      this.speakerService?.clearOutput(
+        record.conversationId,
+        record.sessionId,
+        'physical_guidance_timeout'
+      );
+      this.logger.warn?.('[MENTOR_LIVE_PHYSICAL_TIMEOUT]', JSON.stringify({
+        conversationId: record.conversationId,
+        sessionId: record.sessionId,
+        requestId: turn.requestId,
+        timeoutMs
+      }));
+      this.finalizeTurn(record, turn.assistantText ? 'complete' : 'failed');
+      this.emitStatus(record, 'listening', { reason: 'physical_guidance_timeout' });
+    }, timeoutMs);
+    turn.timeoutId.unref?.();
   }
 
   createAudioTurn(record) {
@@ -1077,6 +1108,10 @@ class MentorLiveService {
       turn.pendingFinalStatus = status;
       return null;
     }
+    if (turn.timeoutId) {
+      clearTimeout(turn.timeoutId);
+      turn.timeoutId = null;
+    }
     if (status !== 'complete') {
       turn.cancelled = true;
       this.abortToolCalls(record);
@@ -1142,7 +1177,7 @@ class MentorLiveService {
   startPhysicalTurn(record, request) {
     const existing = this.store.getRequestMessages(record.conversationId, request.requestId);
     if (existing.length) return { duplicate: true, sessionId: record.sessionId };
-    const pair = this.store.createMessagePair(record.conversationId, {
+    let pair = this.store.createMessagePair(record.conversationId, {
       requestId: request.requestId,
       text: request.displayText,
       kind: 'physical',
@@ -1158,6 +1193,14 @@ class MentorLiveService {
       pair,
       emptyCompletionsToIgnore: request.urgent ? 1 : 0
     });
+    if (turn.expectedAssistantText) {
+      this.store.replaceMessageContent(pair.assistantMessage.id, turn.expectedAssistantText);
+      pair = {
+        ...pair,
+        assistantMessage: this.store.getMessage(pair.assistantMessage.id)
+      };
+      turn.pair = pair;
+    }
     record.contextPending = false;
     if (request.replaceOutput) {
       this.speakerService?.clearOutput(
@@ -1170,6 +1213,7 @@ class MentorLiveService {
     record.physicalGuidanceLock = request.urgent === true;
     record.discardUnsolicitedAfterPhysical = false;
     record.turn = turn;
+    this.armPhysicalTurnTimeout(record, turn, request);
     this.emit(record.conversationId, 'mentor-live-user-transcript', {
       ...this.statusPayload(record, 'listening'),
       turnId: turn.turnId,
@@ -1206,6 +1250,10 @@ class MentorLiveService {
     }
     if (record.pendingSystemTurns.some((item) => item.requestId === request.requestId)) {
       return { duplicate: true, queued: true, sessionId: record.sessionId };
+    }
+    if (request.queueKey) {
+      record.pendingSystemTurns = record.pendingSystemTurns
+        .filter((item) => item.queueKey !== request.queueKey);
     }
     if (request.urgent) {
       this.speakerService?.clearOutput(

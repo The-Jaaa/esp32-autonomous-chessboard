@@ -653,6 +653,8 @@ export default function MentorWorkspace() {
   const physicalAttached = physicalBoard?.binding?.status === 'active' && Boolean(physicalBoard?.state);
   const workspaceState = physicalAttached ? physicalBoard.state : boardState;
   const mentorRequestBusy = Boolean(activeRequestId || live.toolBusy);
+  const openingLineComplete = physicalAttached && activity?.state?.pauseReason === 'line_complete';
+  const displayedLiveStatus = openingLineComplete && live.status === 'thinking' ? 'listening' : live.status;
   const activityMoveLocked = Boolean(activity && activity.phase !== 'learner_turn');
   const boardInteractionLocked = Boolean(physicalAttached || mentorRequestBusy || pendingBoardAction || activityMoveLocked || activityBusy);
   const boardSetupLocked = Boolean(physicalAttached || mentorRequestBusy || pendingBoardAction || activity || activityBusy);
@@ -1323,9 +1325,9 @@ export default function MentorWorkspace() {
           {error && <div className="mentor-error"><span>{error}</span><button onClick={() => setError('')} title="Dismiss error"><X size={15} /></button></div>}
           <LiveAudioControls live={live} />
           {(live.isActive || live.status === 'failed') && (
-            <div className={`mentor-live-status is-${live.status}`}>
+            <div className={`mentor-live-status is-${displayedLiveStatus}`}>
               <span className="mentor-live-status-dot" />
-              <strong>{liveStatusText(live)}</strong>
+              <strong>{openingLineComplete && live.status === 'thinking' ? 'Opening line complete' : liveStatusText(live)}</strong>
               {live.isActive && <span>{live.micGated ? 'Microphone pauses until playback ends or you interrupt' : live.toolBusy ? 'Microphone and Stop remain available' : 'Speak naturally or type below'}</span>}
             </div>
           )}

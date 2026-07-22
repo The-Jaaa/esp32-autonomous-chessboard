@@ -313,6 +313,36 @@ async function socketRegressions() {
   assert.strictEqual(interrupted.message.status, 'cancelled');
   assert.ok(interrupted.message.content.length > 0);
 
+  const liveSession = connector.sessions[0];
+  const sendRealtimeInput = liveSession.sendRealtimeInput.bind(liveSession);
+  liveSession.sendRealtimeInput = (payload) => {
+    if (payload.text === '[PHYSICAL_OPENING_STEP]\nSimulate a stalled provider response.') {
+      liveSession.realtimeInputs.push(payload);
+      return;
+    }
+    sendRealtimeInput(payload);
+  };
+  const timeoutFinal = waitForEvent(client, 'mentor-live-assistant-transcript', (payload) =>
+    payload.isFinal && payload.message?.requestId === 'physical:opening-timeout');
+  feature.liveService.requestPhysicalTurn(first.id, {
+    requestId: 'physical:opening-timeout',
+    displayText: 'Black completed the reviewed line.',
+    prompt: '[PHYSICAL_OPENING_STEP]\nSimulate a stalled provider response.',
+    expectedAssistantText: 'The reviewed line is complete. Choose Repeat, Continue, or Finish.',
+    fallbackAssistantText: 'The reviewed line is complete. Choose Repeat, Continue, or Finish.',
+    timeoutMs: 25,
+    queueKey: 'physical-opening'
+  });
+  assert.strictEqual(
+    feature.store.getRequestMessages(first.id, 'physical:opening-timeout')[1].content,
+    'The reviewed line is complete. Choose Repeat, Continue, or Finish.',
+    'physical fallback guidance should be visible before provider output'
+  );
+  const timedOut = await timeoutFinal;
+  assert.strictEqual(timedOut.message.status, 'complete');
+  assert.strictEqual(feature.liveService.isConversationActive(first.id), true);
+  liveSession.sendRealtimeInput = sendRealtimeInput;
+
   const failedFinal = waitForEvent(client, 'mentor-live-assistant-transcript', (payload) =>
     payload.isFinal && payload.message?.requestId === 'live-failure-1');
   await emitWithAck(client, 'mentor-live-text-input', {

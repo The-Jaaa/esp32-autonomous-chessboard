@@ -293,6 +293,9 @@ async function run() {
   observer.handleSnapshot(currentSnapshot, 'physical-move');
   assert.strictEqual(physicalTurns.length, 3, 'verified scripted Black reply should offer Live guidance');
   assert.match(physicalTurns[2].request.prompt, /required next learner move is g1f3/i);
+  assert.strictEqual(physicalTurns[2].request.queueKey, 'physical-opening');
+  assert.strictEqual(physicalTurns[2].request.timeoutMs, 15000);
+  assert.match(physicalTurns[2].request.expectedAssistantText, /reviewed move is g1f3/i);
   activePhysicalActivity = null;
   liveActive = false;
   currentSnapshot = snapshot({
