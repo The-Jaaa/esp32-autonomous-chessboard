@@ -1126,7 +1126,7 @@
 .mentor-segmented button { flex: 1; min-height: 32px; border: 0; border-radius: 3px; color: var(--mentor-muted); background: transparent; cursor: pointer; font-size: 11px; }
 .mentor-segmented button.is-selected { color: white; background: var(--mentor-accent); }
 .mentor-activity-description { display: flex; justify-content: space-between; gap: 12px; margin: 0; padding: 10px; border-left: 3px solid var(--mentor-accent); color: var(--mentor-text); background: rgba(59, 130, 246, .08); font-size: 11px; }
-.mentor-activity-description span { color: var(--mentor-muted); white-space: nowrap; }
+.mentor-activity-description span { color: var(--mentor-muted); text-align: right; }
 .mentor-mastery-list { display: grid; gap: 8px; }
 .mentor-mastery-list > div { display: grid; grid-template-columns: 130px 1fr 28px; gap: 8px; align-items: center; text-transform: capitalize; font-size: 10px; }
 .mentor-mastery-list i { height: 5px; overflow: hidden; border-radius: 4px; background: var(--surface-input); }

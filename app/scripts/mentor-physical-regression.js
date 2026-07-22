@@ -77,6 +77,7 @@ async function run() {
   const stoppedLive = [];
   const physicalTurns = [];
   let liveActive = false;
+  let activePhysicalActivity = null;
   let currentSnapshot = snapshot();
   const observer = new MentorPhysicalObserverService({
     store,
@@ -95,7 +96,10 @@ async function run() {
       },
       stopConversation: async (conversationId, reason) => stoppedLive.push({ conversationId, reason })
     },
-    activityService: { get: () => null }
+    activityService: {
+      get: () => activePhysicalActivity,
+      setPhysicalCoordinator: () => {}
+    }
   });
   observer.setAdapter({ getSnapshot: () => currentSnapshot });
 
@@ -258,9 +262,41 @@ async function run() {
   assert.match(physicalTurns[1].request.prompt, /continue the interrupted chess teaching response/i);
   observer.handleSnapshot(currentSnapshot, 'physical-board');
   assert.strictEqual(physicalTurns.length, 2, 'duplicate clean snapshots must not repeat recovery');
-  liveActive = false;
+  activePhysicalActivity = {
+    id: 'physical-opening-1',
+    type: 'opening_drill',
+    title: 'Italian Game',
+    goal: 'Develop quickly.',
+    status: 'active',
+    phase: 'learner_turn',
+    stepIndex: 2,
+    totalSteps: 10,
+    config: {
+      boardSource: 'physical',
+      line: ['e2e4', 'e7e5', 'g1f3', 'b8c6', 'f1c4', 'f8c5', 'd2d3', 'g8f6', 'e1g1', 'd7d6']
+    },
+    state: { pauseReason: null }
+  };
+  const openingGame = new Chess(START_FEN);
+  openingGame.move('e4');
+  openingGame.move('e5');
   currentSnapshot = snapshot({
     stateRevision: 6,
+    fen: openingGame.fen(),
+    pgn: openingGame.pgn(),
+    side: 'engine',
+    move: 'e7e5',
+    san: 'e5',
+    verified: true,
+    lastMove: { side: 'engine', move: 'e7e5', san: 'e5', at: 1000 }
+  });
+  observer.handleSnapshot(currentSnapshot, 'physical-move');
+  assert.strictEqual(physicalTurns.length, 3, 'verified scripted Black reply should offer Live guidance');
+  assert.match(physicalTurns[2].request.prompt, /required next learner move is g1f3/i);
+  activePhysicalActivity = null;
+  liveActive = false;
+  currentSnapshot = snapshot({
+    stateRevision: 7,
     phase: 'sync_warning',
     statusText: 'Restore or center e2.',
     board: { ready: false, missingSquares: ['e2'], extraSquares: [] }

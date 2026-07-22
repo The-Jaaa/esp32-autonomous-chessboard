@@ -246,7 +246,7 @@ class MentorToolService {
     if (conversationId && this.physicalObserver?.isAttached(conversationId)) {
       return TOOL_DECLARATIONS.filter((tool) => this.physicalObserver.allowedTool(tool.name));
     }
-    return TOOL_DECLARATIONS;
+    return TOOL_DECLARATIONS.filter((tool) => tool.name !== 'resolve_opening_drill');
   }
 
   setActivityService(activityService) {

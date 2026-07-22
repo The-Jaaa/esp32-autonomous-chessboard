@@ -2,6 +2,7 @@ const { createHash } = require('crypto');
 const { Chess } = require('chess.js');
 const { gameStatus, moveToUci, normalizeAnnotations } = require('./chess-service');
 const { STANDARD_FEN } = require('./store');
+const { listCatalog } = require('./curriculum');
 
 const PHYSICAL_BOARD_ID = 'main-board';
 const PHYSICAL_READ_TOOLS = new Set([
@@ -113,7 +114,8 @@ function normalizeSnapshot(snapshot, binding) {
       lastError: snapshot.lastError || null,
       syncWarningReason: snapshot.syncWarningReason || null,
       lastMove: snapshot.lastMove || null,
-      openingDrill: snapshot.mentorOpeningDrill || null
+      openingDrill: snapshot.mentorOpeningDrill || null,
+      openingLock: Boolean(snapshot.mentorOpeningLock)
     }
   };
 }
@@ -435,6 +437,10 @@ class MentorPhysicalObserverService {
     const recentMoves = state.history.slice(-12).map((move) => move.san).join(' ');
     const physical = state.physical;
     const activity = this.activityService?.get?.(conversationId) || null;
+    const reviewedOpenings = listCatalog()
+      .filter((item) => item.type === 'opening_drill' && item.supportsPhysical)
+      .map((item) => `${item.title} [${item.id}]`)
+      .join(', ');
     const openingContext = activity?.config?.boardSource === 'physical'
       ? [
           `Active physical opening drill: ${activity.title}`,
@@ -460,6 +466,7 @@ class MentorPhysicalObserverService {
       `Unexpected occupied squares: ${physical.board.extraSquares.join(', ') || '(none)'}`,
       `Robot busy: ${physical.robotBusy ? 'yes' : 'no'}`,
       ...openingContext,
+      `Reviewed physical opening drills: ${reviewedOpenings}`,
       'You may analyze or annotate this position, but you cannot move, reset, load, demonstrate, or otherwise control the physical board.',
       'You may start and guide a reviewed physical opening drill only when the board is at the exact standard starting position.',
       'Never say that you played a physical move. The backend robot chooses and executes the opponent moves.'
@@ -540,6 +547,62 @@ class MentorPhysicalObserverService {
     });
     if (meaningfulChange) this.liveService?.notifyPhysicalBoardUpdated(binding.conversationId, state);
     this.processGuidance(binding.conversationId, snapshot, updated);
+    this.processOpeningGuidance(binding.conversationId, snapshot, event);
+  }
+
+  processOpeningGuidance(conversationId, snapshot, event) {
+    if (event !== 'physical-move' || snapshot.side !== 'engine' || !snapshot.verified) return;
+    const activity = this.activityService?.get?.(conversationId);
+    if (activity?.config?.boardSource !== 'physical' || activity.type !== 'opening_drill') return;
+    const nextUci = activity.config.line?.[activity.stepIndex] || null;
+    const complete = activity.state?.pauseReason === 'line_complete';
+    const moveText = snapshot.san || snapshot.move || 'the reviewed reply';
+    const displayText = `Black played ${moveText}.`;
+    const reply = complete
+      ? `Black played ${moveText}. You completed the reviewed ${activity.title} line.`
+      : `Black played ${moveText}. Your reviewed move is ${nextUci}.`;
+    const requestId = `physical-opening:${activity.id}:${snapshot.lastMove?.at || snapshot.stateRevision}:${activity.stepIndex}`;
+    const prompt = [
+      '[PHYSICAL_OPENING_STEP]',
+      `Opening: ${activity.title}`,
+      `Black just completed the reviewed move ${snapshot.move} (${moveText}).`,
+      complete
+        ? 'The ten-ply reviewed line is complete. Briefly summarize its main idea and ask the learner to choose Repeat, Continue, or Finish.'
+        : `The required next learner move is ${nextUci}. Briefly explain the purpose of Black's move, then clearly ask the learner to play ${nextUci}.`,
+      'Use at most three concise spoken sentences. Do not call a board-changing tool and do not suggest a different move.'
+    ].join('\n');
+    try {
+      const live = this.liveService?.requestPhysicalTurn(conversationId, {
+        requestId,
+        displayText,
+        prompt,
+        urgent: false
+      });
+      if (live) return;
+    } catch {
+      // Fall through to the persisted deterministic guidance.
+    }
+    const pair = this.store.createMessagePair(conversationId, {
+      requestId,
+      text: displayText,
+      kind: 'physical',
+      assistantContent: reply,
+      assistantStatus: 'complete',
+      suppressTitle: true
+    });
+    if (!pair || pair.duplicate) return;
+    const conversation = this.store.touchConversation(conversationId);
+    this.emit(conversationId, 'mentor-message-start', {
+      conversationId,
+      requestId,
+      message: pair.userMessage
+    });
+    this.emit(conversationId, 'mentor-message-complete', {
+      conversationId,
+      requestId,
+      message: pair.assistantMessage,
+      conversation
+    });
   }
 
   processGuidance(conversationId, snapshot, binding) {

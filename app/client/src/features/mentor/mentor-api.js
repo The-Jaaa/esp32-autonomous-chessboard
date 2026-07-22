@@ -118,5 +118,11 @@ export const mentorApi = {
   },
   endActivity(id, activityId) {
     return request(`/conversations/${id}/activities/${activityId}/end`, { method: 'POST', body: '{}' });
+  },
+  resolvePhysicalOpening(id, action) {
+    return request(`/conversations/${id}/physical-opening/action`, {
+      method: 'POST',
+      body: JSON.stringify({ action })
+    });
   }
 };

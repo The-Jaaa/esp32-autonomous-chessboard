@@ -164,7 +164,12 @@ async function runViewport(browser, viewport) {
   await expectText(page.locator('.mentor-physical-status'), 'Waiting for your move');
   assert.strictEqual(await page.getByRole('button', { name: 'Reset board' }).isDisabled(), true);
   assert.strictEqual(await page.getByRole('button', { name: 'Load FEN' }).isDisabled(), true);
-  assert.strictEqual(await page.getByRole('button', { name: 'Start activity' }).isDisabled(), true);
+  assert.strictEqual(await page.getByRole('button', { name: 'Start activity' }).isDisabled(), false);
+  await page.getByRole('button', { name: 'Start activity' }).click();
+  await expectText(page.locator('.mentor-activity-dialog'), 'Physical opening drill');
+  assert.strictEqual(await page.locator('.mentor-activity-dialog select option').count(), 18);
+  assert.ok(await page.locator('.mentor-activity-dialog select optgroup').count() >= 3);
+  await page.locator('.mentor-activity-dialog').getByRole('button', { name: 'Close' }).click();
   await expectText(page.locator('.mentor-move-list-header'), '0 plies');
 
   await page.getByPlaceholder('Ask your chess mentor').fill('Run the browser engine analysis.');

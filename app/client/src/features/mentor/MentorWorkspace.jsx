@@ -166,6 +166,7 @@ function toolLabel(toolCall) {
     request_prediction: 'Request prediction',
     request_hint: 'Give hint',
     end_activity: 'End activity',
+    resolve_opening_drill: 'Update opening drill',
     engine_fallback: `Engine fallback ${args.uci || ''}`.trim(),
     activity_fallback: `Reviewed continuation ${args.uci || ''}`.trim()
   };
@@ -173,6 +174,12 @@ function toolLabel(toolCall) {
 }
 
 function activityPhaseLabel(activity) {
+  const pauseLabels = {
+    line_complete: 'Line complete',
+    repeat_restore: 'Restore starting setup',
+    route_blocked: 'Route blocked'
+  };
+  if (pauseLabels[activity?.state?.pauseReason]) return pauseLabels[activity.state.pauseReason];
   const labels = {
     learner_turn: 'Your turn',
     mentor_turn: 'Mentor turn',
@@ -194,19 +201,37 @@ function activityTypeLabel(type) {
   }[type] || 'Activity';
 }
 
-function ActivityBar({ activity, busy, disabled = false, onStart, onPause, onResume, onHint, onEnd, onProfile }) {
+function ActivityBar({
+  activity,
+  busy,
+  disabled = false,
+  physical = false,
+  openingLock = false,
+  onStart,
+  onPause,
+  onResume,
+  onHint,
+  onEnd,
+  onProfile,
+  onPhysicalAction
+}) {
   if (!activity) {
     return (
       <div className="mentor-activity-bar is-idle">
-        <div><GraduationCap size={17} /><span><strong>Guided practice</strong><small>Start a game, drill, puzzle, or lesson</small></span></div>
+        <div><GraduationCap size={17} /><span><strong>{openingLock ? 'Opening lesson finished' : 'Guided practice'}</strong><small>{openingLock
+          ? 'The physical position is locked until you resume normal play'
+          : physical ? 'Practice a reviewed opening on the real board' : 'Start a game, drill, puzzle, or lesson'}</small></span></div>
         <div className="mentor-activity-actions">
           <button onClick={onProfile} title="Learner profile" aria-label="Learner profile"><Settings2 size={15} /></button>
-          <button className="is-primary" onClick={onStart} disabled={busy || disabled}><Play size={14} /> Start activity</button>
+          {openingLock
+            ? <button className="is-primary" onClick={() => onPhysicalAction('resume')} disabled={busy}><Play size={14} /> Resume play</button>
+            : <button className="is-primary" onClick={onStart} disabled={busy || disabled}><Play size={14} /> Start activity</button>}
         </div>
       </div>
     );
   }
   const progress = activity.totalSteps ? Math.min(100, Math.round((activity.stepIndex / activity.totalSteps) * 100)) : 0;
+  const pauseReason = activity.state?.pauseReason || null;
   return (
     <div className={`mentor-activity-bar is-active is-${activity.phase}`} data-activity-phase={activity.phase}>
       <div className="mentor-activity-main">
@@ -218,24 +243,44 @@ function ActivityBar({ activity, busy, disabled = false, onStart, onPause, onRes
       </div>
       {activity.totalSteps > 0 && <span className="mentor-activity-progress"><i style={{ width: `${progress}%` }} /></span>}
       <div className="mentor-activity-actions">
-        {['opening_drill', 'puzzle', 'guided_lesson'].includes(activity.type) && (
+        {physical && pauseReason === 'line_complete' && <>
+          <button onClick={() => onPhysicalAction('repeat')} disabled={busy} title="Repeat opening">Repeat</button>
+          <button onClick={() => onPhysicalAction('continue')} disabled={busy} title="Continue as a normal game">Continue</button>
+          <button onClick={() => onPhysicalAction('finish')} disabled={busy} title="Finish lesson">Finish</button>
+        </>}
+        {physical && pauseReason === 'route_blocked' && (
+          <button className="is-primary" onClick={() => onPhysicalAction('retry')} disabled={busy} title="Retry exact opening move"><RefreshCcw size={14} /> Retry</button>
+        )}
+        {(!physical || !pauseReason) && ['opening_drill', 'puzzle', 'guided_lesson'].includes(activity.type) && (
           <button onClick={onHint} disabled={busy} title="Request hint" aria-label="Request hint"><Lightbulb size={15} /></button>
         )}
-        {activity.status === 'paused'
+        {!physical && (activity.status === 'paused'
           ? <button onClick={onResume} disabled={busy} title="Resume activity" aria-label="Resume activity"><Play size={15} /></button>
-          : <button onClick={onPause} disabled={busy} title="Pause activity" aria-label="Pause activity"><Pause size={15} /></button>}
-        <button onClick={onEnd} disabled={busy} title="End activity" aria-label="End activity"><X size={15} /></button>
+          : <button onClick={onPause} disabled={busy} title="Pause activity" aria-label="Pause activity"><Pause size={15} /></button>)}
+        {physical && !pauseReason && (activity.status === 'paused'
+          ? <button onClick={onResume} disabled={busy} title="Resume activity" aria-label="Resume activity"><Play size={15} /></button>
+          : <button onClick={onPause} disabled={busy} title="Pause activity" aria-label="Pause activity"><Pause size={15} /></button>)}
+        {(!physical || pauseReason !== 'line_complete') && (
+          <button onClick={onEnd} disabled={busy} title="End activity" aria-label="End activity"><X size={15} /></button>
+        )}
       </div>
     </div>
   );
 }
 
-function ActivityDialog({ catalog, boardRevision, onClose, onStart }) {
-  const [type, setType] = useState('practice_game');
+function ActivityDialog({ catalog, boardRevision, physical = false, onClose, onStart }) {
+  const [type, setType] = useState(physical ? 'opening_drill' : 'practice_game');
   const [sourceId, setSourceId] = useState('');
   const [learnerColor, setLearnerColor] = useState('white');
   const [startFrom, setStartFrom] = useState('standard');
-  const items = useMemo(() => catalog.filter((item) => item.type === type), [catalog, type]);
+  const items = useMemo(() => catalog.filter((item) => item.type === type
+    && (!physical || item.supportsPhysical)), [catalog, physical, type]);
+  const openingFamilies = useMemo(() => items.reduce((groups, item) => {
+    const family = item.family || 'Other openings';
+    if (!groups[family]) groups[family] = [];
+    groups[family].push(item);
+    return groups;
+  }, {}), [items]);
   useEffect(() => {
     setSourceId(items[0]?.id || '');
     if (items[0]?.fixedLearnerColor) setLearnerColor(items[0].fixedLearnerColor);
@@ -254,9 +299,9 @@ function ActivityDialog({ catalog, boardRevision, onClose, onStart }) {
   return (
     <div className="mentor-modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <form className="mentor-dialog mentor-activity-dialog" onSubmit={submit}>
-        <header><div><span>ACTIVITY</span><h2>Start guided practice</h2></div><button type="button" onClick={onClose} title="Close"><X size={18} /></button></header>
+        <header><div><span>ACTIVITY</span><h2>{physical ? 'Practice an opening' : 'Start guided practice'}</h2></div><button type="button" onClick={onClose} title="Close"><X size={18} /></button></header>
         <div className="mentor-dialog-body">
-          <div className="mentor-mode-grid">
+          {!physical && <div className="mentor-mode-grid">
             {[
               ['practice_game', Swords, 'Practice game'],
               ['opening_drill', BookOpen, 'Opening drill'],
@@ -267,7 +312,8 @@ function ActivityDialog({ catalog, boardRevision, onClose, onStart }) {
                 <Icon size={17} /><span>{label}</span>
               </button>
             ))}
-          </div>
+          </div>}
+          {physical && <p className="mentor-activity-description"><strong>Physical opening drill</strong><span>You play White from the full standard setup. Black follows the reviewed line exactly.</span></p>}
           {type !== 'practice_game' && (
             <label>Activity
               <select value={sourceId} onChange={(event) => {
@@ -275,7 +321,13 @@ function ActivityDialog({ catalog, boardRevision, onClose, onStart }) {
                 setSourceId(event.target.value);
                 if (next?.fixedLearnerColor) setLearnerColor(next.fixedLearnerColor);
               }}>
-                {items.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
+                {physical
+                  ? Object.entries(openingFamilies).map(([family, familyItems]) => (
+                      <optgroup key={family} label={family}>
+                        {familyItems.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
+                      </optgroup>
+                    ))
+                  : items.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
               </select>
             </label>
           )}
@@ -288,7 +340,7 @@ function ActivityDialog({ catalog, boardRevision, onClose, onStart }) {
               </select>
             </label>
           )}
-          {!selected?.fixedLearnerColor && (
+          {!physical && !selected?.fixedLearnerColor && (
             <fieldset><legend>Your color</legend><div className="mentor-segmented">
               <button type="button" className={learnerColor === 'white' ? 'is-selected' : ''} onClick={() => setLearnerColor('white')}>White</button>
               <button type="button" className={learnerColor === 'black' ? 'is-selected' : ''} onClick={() => setLearnerColor('black')}>Black</button>
@@ -798,16 +850,42 @@ export default function MentorWorkspace() {
   }, [catalog.length]);
 
   const startActivity = async (options) => {
-    if (!conversationId || !boardState) return;
+    if (!conversationId || !workspaceState) return;
     setActivityBusy(true);
     setError('');
     setNotice('');
     try {
       const result = await mentorApi.startActivity(conversationId, options);
       setActivity(result.activity);
-      setBoardState(result.state);
+      if (physicalAttached) {
+        setPhysicalBoard((current) => ({ ...(current || {}), state: result.state }));
+      } else {
+        setBoardState(result.state);
+      }
       setPreviewFen(null);
       setActivityDialogOpen(false);
+    } catch (activityError) {
+      setError(activityError.message);
+    } finally {
+      setActivityBusy(false);
+    }
+  };
+
+  const resolvePhysicalOpening = async (action) => {
+    if (!conversationId || activityBusy) return;
+    setActivityBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const result = await mentorApi.resolvePhysicalOpening(conversationId, action);
+      const nextActivity = result.activity?.id && ['active', 'paused'].includes(result.activity.status)
+        ? result.activity
+        : null;
+      setActivity(nextActivity);
+      if (result.physicalBoard) setPhysicalBoard(result.physicalBoard);
+      if (action === 'repeat') setNotice('Restore the complete standard setup. The drill restarts after it stays stable.');
+      if (action === 'continue') setNotice('Opening drill complete. Normal physical play resumed.');
+      if (action === 'finish') setNotice('Opening lesson finished. The board will wait until you resume play.');
     } catch (activityError) {
       setError(activityError.message);
     } finally {
@@ -1331,13 +1409,16 @@ export default function MentorWorkspace() {
         <ActivityBar
           activity={activity}
           busy={activityBusy || mentorRequestBusy}
-          disabled={physicalAttached}
+          disabled={false}
+          physical={physicalAttached}
+          openingLock={Boolean(workspaceState?.physical?.openingLock)}
           onStart={openActivityDialog}
           onProfile={() => setProfileDialogOpen(true)}
           onPause={() => updateActivity((id) => mentorApi.pauseActivity(conversationId, id))}
           onResume={() => updateActivity((id) => mentorApi.resumeActivity(conversationId, id))}
           onHint={() => updateActivity((id) => mentorApi.requestHint(conversationId, id))}
           onEnd={() => updateActivity((id) => mentorApi.endActivity(conversationId, id))}
+          onPhysicalAction={resolvePhysicalOpening}
         />
         <div className="mentor-board-stage">
           <div
@@ -1400,10 +1481,11 @@ export default function MentorWorkspace() {
           </form>
         </div>
       )}
-      {activityDialogOpen && boardState && !physicalAttached && (
+      {activityDialogOpen && workspaceState && (
         <ActivityDialog
           catalog={catalog}
-          boardRevision={boardState.revision}
+          boardRevision={workspaceState.revision}
+          physical={physicalAttached}
           onClose={() => setActivityDialogOpen(false)}
           onStart={startActivity}
         />
