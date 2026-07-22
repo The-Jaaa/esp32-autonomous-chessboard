@@ -159,6 +159,73 @@ async function runViewport(browser, viewport) {
   const firstUrl = page.url();
   const firstConversationId = firstUrl.split('/').at(-1);
 
+  const sourceControl = page.getByRole('group', { name: 'Board source' });
+  await sourceControl.getByRole('button', { name: 'Physical', exact: true }).click();
+  await expectText(page.locator('.mentor-physical-status'), 'Waiting for your move');
+  assert.strictEqual(await page.getByRole('button', { name: 'Reset board' }).isDisabled(), true);
+  assert.strictEqual(await page.getByRole('button', { name: 'Load FEN' }).isDisabled(), true);
+  assert.strictEqual(await page.getByRole('button', { name: 'Start activity' }).isDisabled(), true);
+  await expectText(page.locator('.mentor-move-list-header'), '0 plies');
+
+  await page.getByPlaceholder('Ask your chess mentor').fill('Run the browser engine analysis.');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expectText(page.locator('.mentor-tool-card[data-tool-name="analyze_position"]'), 'Best:');
+  await page.locator('.mentor-eval-bar.has-analysis').waitFor({ state: 'visible', timeout: 5000 });
+  const physicalDetail = await page.evaluate(() => fetch(`/api/mentor/conversations/${location.pathname.split('/').at(-1)}`).then((response) => response.json()));
+  const physicalAnalysis = physicalDetail.conversation.messages
+    .flatMap((message) => message.toolCalls || [])
+    .findLast((call) => call.name === 'analyze_position');
+  assert.strictEqual(physicalAnalysis.result.sourceKey, 'physical:mentor-browser-server:1');
+
+  await page.evaluate(() => fetch('/api/test/mentor-physical-state', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      phase: 'sync_warning',
+      statusText: 'Restore or center e2.',
+      board: { ready: false, missingSquares: ['e2'], extraSquares: ['e4'] },
+      syncWarningReason: { type: 'missing_piece' }
+    })
+  }));
+  await expectText(page.locator('.mentor-physical-status'), 'Restore or center e2');
+  await expectText(page.locator('.mentor-message.is-physical'), 'e2');
+  assert.notStrictEqual(
+    await page.locator('[data-square="e2"] > div').first().evaluate((element) => getComputedStyle(element).boxShadow),
+    'none'
+  );
+  assert.notStrictEqual(
+    await page.locator('[data-square="e4"] > div').first().evaluate((element) => getComputedStyle(element).boxShadow),
+    'none'
+  );
+  await page.screenshot({
+    path: path.join(__dirname, '..', 'tmp', `mentor-physical-${viewport.width}x${viewport.height}.png`),
+    fullPage: true
+  });
+
+  await page.evaluate(() => fetch('/api/test/mentor-physical-state', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      phase: 'ready',
+      statusText: 'Waiting for your move.',
+      board: { ready: true, missingSquares: [], extraSquares: [] },
+      syncWarningReason: null
+    })
+  }));
+  await sourceControl.getByRole('button', { name: 'Virtual', exact: true }).click();
+  await expectText(page.locator('.mentor-move-list'), 'e4');
+  assert.strictEqual(await page.locator('.mentor-eval-bar').evaluate((element) => element.classList.contains('has-analysis')), false);
+
+  await sourceControl.getByRole('button', { name: 'Physical', exact: true }).click();
+  await expectText(page.locator('.mentor-physical-status'), 'Waiting for your move');
+  await page.evaluate(() => fetch('/api/test/mentor-physical-state', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionGeneration: 2, stateRevision: 1 })
+  }));
+  await expectText(page.locator('.mentor-physical-status.is-stale'), 'Previous physical session ended');
+  await expectText(page.locator('.mentor-move-list'), 'e4');
+
   await page.goto(`http://127.0.0.1:3010/mentor-v2/${firstConversationId}`);
   await page.waitForURL(`http://127.0.0.1:3010/mentor/${firstConversationId}`);
   await expectText(page.locator('.mentor-move-list'), 'e4');
@@ -523,7 +590,9 @@ async function main() {
   const { chromium } = loadPlaywright();
   const viewports = process.env.MENTOR_BROWSER_VIEWPORT === '1920'
     ? [{ width: 1920, height: 1080 }]
-    : [{ width: 1440, height: 900 }, { width: 1920, height: 1080 }];
+    : process.env.MENTOR_BROWSER_VIEWPORT === '1440'
+      ? [{ width: 1440, height: 900 }]
+      : [{ width: 1440, height: 900 }, { width: 1920, height: 1080 }];
   for (const viewport of viewports) {
     const serverProcess = spawn(process.execPath, ['scripts/mentor-browser-server.js'], {
       cwd: path.join(__dirname, '..'),

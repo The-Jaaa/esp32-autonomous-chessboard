@@ -22,6 +22,7 @@ import {
   Pause,
   Puzzle,
   RefreshCcw,
+  Radio,
   Repeat2,
   Search,
   Settings2,
@@ -193,14 +194,14 @@ function activityTypeLabel(type) {
   }[type] || 'Activity';
 }
 
-function ActivityBar({ activity, busy, onStart, onPause, onResume, onHint, onEnd, onProfile }) {
+function ActivityBar({ activity, busy, disabled = false, onStart, onPause, onResume, onHint, onEnd, onProfile }) {
   if (!activity) {
     return (
       <div className="mentor-activity-bar is-idle">
         <div><GraduationCap size={17} /><span><strong>Guided practice</strong><small>Start a game, drill, puzzle, or lesson</small></span></div>
         <div className="mentor-activity-actions">
           <button onClick={onProfile} title="Learner profile" aria-label="Learner profile"><Settings2 size={15} /></button>
-          <button className="is-primary" onClick={onStart}><Play size={14} /> Start activity</button>
+          <button className="is-primary" onClick={onStart} disabled={busy || disabled}><Play size={14} /> Start activity</button>
         </div>
       </div>
     );
@@ -505,11 +506,12 @@ function ToolCallCard({ toolCall }) {
 function Message({ message }) {
   const isUser = message.role === 'user';
   return (
-    <article className={`mentor-message ${isUser ? 'is-user' : 'is-model'} ${message.kind === 'voice' ? 'is-voice' : ''} ${message.kind === 'activity' ? 'is-activity' : ''}`}>
+    <article className={`mentor-message ${isUser ? 'is-user' : 'is-model'} ${message.kind === 'voice' ? 'is-voice' : ''} ${message.kind === 'activity' ? 'is-activity' : ''} ${message.kind === 'physical' ? 'is-physical' : ''}`}>
       {!isUser && <div className="mentor-message-avatar"><Bot size={18} /></div>}
       <div className="mentor-message-content">
         {message.kind === 'voice' && <span className="mentor-message-kind"><Mic size={11} /> Voice</span>}
         {message.kind === 'activity' && <span className="mentor-message-kind"><GraduationCap size={11} /> Activity</span>}
+        {message.kind === 'physical' && <span className="mentor-message-kind"><Radio size={11} /> Physical board</span>}
         {!!message.toolCalls?.length && (
           <div className="mentor-tool-list">
             {message.toolCalls.map((toolCall) => <ToolCallCard key={toolCall.id} toolCall={toolCall} />)}
@@ -540,6 +542,10 @@ export default function MentorWorkspace() {
   const [loading, setLoading] = useState(true);
   const [socketReady, setSocketReady] = useState(false);
   const [boardState, setBoardState] = useState(null);
+  const [physicalBoard, setPhysicalBoard] = useState({ binding: null, state: null });
+  const [physicalAvailability, setPhysicalAvailability] = useState(null);
+  const [physicalBusy, setPhysicalBusy] = useState(false);
+  const [freshnessNow, setFreshnessNow] = useState(Date.now());
   const [previewFen, setPreviewFen] = useState(null);
   const [pendingBoardAction, setPendingBoardAction] = useState(null);
   const [fenDialogOpen, setFenDialogOpen] = useState(false);
@@ -592,10 +598,19 @@ export default function MentorWorkspace() {
     onError: onLiveError,
     onConversationChanged: onLiveConversationChanged
   });
+  const physicalAttached = physicalBoard?.binding?.status === 'active' && Boolean(physicalBoard?.state);
+  const workspaceState = physicalAttached ? physicalBoard.state : boardState;
   const mentorRequestBusy = Boolean(activeRequestId || live.toolBusy);
   const activityMoveLocked = Boolean(activity && activity.phase !== 'learner_turn');
-  const boardInteractionLocked = Boolean(mentorRequestBusy || pendingBoardAction || activityMoveLocked || activityBusy);
-  const boardSetupLocked = Boolean(mentorRequestBusy || pendingBoardAction || activity || activityBusy);
+  const boardInteractionLocked = Boolean(physicalAttached || mentorRequestBusy || pendingBoardAction || activityMoveLocked || activityBusy);
+  const boardSetupLocked = Boolean(physicalAttached || mentorRequestBusy || pendingBoardAction || activity || activityBusy);
+
+  useEffect(() => {
+    if (!physicalAttached) return undefined;
+    setFreshnessNow(Date.now());
+    const timer = window.setInterval(() => setFreshnessNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [physicalAttached]);
 
   const createConversation = useCallback(async () => {
     const result = await mentorApi.createConversation();
@@ -636,6 +651,7 @@ export default function MentorWorkspace() {
         setConversation(nextConversation);
         setMessages(nextConversation.messages || []);
         setBoardState(nextConversation.chess);
+        setPhysicalBoard(nextConversation.physicalBoard || { binding: null, state: null });
         setActivity(nextConversation.activity || null);
         setProgress(nextConversation.progress || null);
         setPreviewFen(null);
@@ -649,6 +665,14 @@ export default function MentorWorkspace() {
         if (!cancelled) setError(loadError.message);
       })
       .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [conversationId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    mentorApi.getPhysicalBoard()
+      .then((result) => { if (!cancelled) setPhysicalAvailability(result); })
+      .catch((loadError) => { if (!cancelled) setError(loadError.message); });
     return () => { cancelled = true; };
   }, [conversationId]);
 
@@ -701,6 +725,26 @@ export default function MentorWorkspace() {
       const next = payload.activity;
       setActivity(next && ['active', 'paused'].includes(next.status) ? next : null);
     };
+    const onPhysicalBindingUpdated = (payload) => {
+      if (!matches(payload)) return;
+      setPhysicalBoard(payload.physicalBoard || { binding: null, state: null });
+    };
+    const onPhysicalBoardUpdated = (payload) => {
+      if (!matches(payload)) return;
+      setPhysicalBoard((current) => ({ ...current, state: payload.state }));
+      if (payload.state?.physical) {
+        setPhysicalAvailability((current) => ({
+          ...current,
+          available: true,
+          serverInstanceId: payload.state.physical.serverInstanceId,
+          sessionGeneration: payload.state.physical.sessionGeneration,
+          stateRevision: payload.state.physical.stateRevision,
+          phase: payload.state.physical.phase,
+          statusText: payload.state.physical.statusText,
+          boundConversationId: conversationId
+        }));
+      }
+    };
     const onProgressUpdated = (payload) => setProgress(payload);
 
     socket.on('mentor-message-start', onStart);
@@ -716,6 +760,8 @@ export default function MentorWorkspace() {
     socket.on('mentor-tool-cancelled', onToolUpdated);
     socket.on('mentor-activity-updated', onActivityUpdated);
     socket.on('mentor-progress-updated', onProgressUpdated);
+    socket.on('mentor-physical-binding-updated', onPhysicalBindingUpdated);
+    socket.on('mentor-physical-board-updated', onPhysicalBoardUpdated);
     return () => {
       if (streamPollRef.current) clearTimeout(streamPollRef.current);
       socket.emit('mentor-unsubscribe', { conversationId });
@@ -734,6 +780,8 @@ export default function MentorWorkspace() {
       socket.off('mentor-tool-cancelled', onToolUpdated);
       socket.off('mentor-activity-updated', onActivityUpdated);
       socket.off('mentor-progress-updated', onProgressUpdated);
+      socket.off('mentor-physical-binding-updated', onPhysicalBindingUpdated);
+      socket.off('mentor-physical-board-updated', onPhysicalBoardUpdated);
     };
   }, [conversationId, refreshList, socket]);
 
@@ -793,6 +841,51 @@ export default function MentorWorkspace() {
       setError(profileError.message);
     } finally {
       setActivityBusy(false);
+    }
+  };
+
+  const stopLiveForWorkspaceChange = async () => {
+    if (!live.isActive) return;
+    await live.stop();
+  };
+
+  const attachPhysicalBoard = async () => {
+    if (!conversationId || physicalBusy || physicalAttached) return;
+    setPhysicalBusy(true);
+    setError('');
+    try {
+      await stopLiveForWorkspaceChange();
+      const availability = await mentorApi.getPhysicalBoard();
+      setPhysicalAvailability(availability);
+      if (!availability.available) throw new Error('Start the physical game from the Companion Board first.');
+      const result = await mentorApi.attachPhysicalBoard(
+        conversationId,
+        availability.serverInstanceId,
+        availability.sessionGeneration
+      );
+      setPhysicalBoard(result.physicalBoard);
+    } catch (physicalError) {
+      setError(physicalError.message);
+    } finally {
+      setPhysicalBusy(false);
+    }
+  };
+
+  const detachPhysicalBoard = async () => {
+    if (!conversationId || physicalBusy || !physicalAttached) return;
+    setPhysicalBusy(true);
+    setError('');
+    try {
+      await stopLiveForWorkspaceChange();
+      const result = await mentorApi.detachPhysicalBoard(conversationId);
+      setPhysicalBoard(result.physicalBoard || { binding: null, state: null });
+      setPreviewFen(null);
+      setPendingBoardAction(null);
+      setPhysicalAvailability(await mentorApi.getPhysicalBoard());
+    } catch (physicalError) {
+      setError(physicalError.message);
+    } finally {
+      setPhysicalBusy(false);
     }
   };
 
@@ -959,7 +1052,23 @@ export default function MentorWorkspace() {
   }, [promotionPending, submitBoardMove]);
 
   const flipBoard = () => {
-    if (!boardState || mentorRequestBusy || pendingBoardAction || activityBusy) return;
+    if (!workspaceState || mentorRequestBusy || pendingBoardAction || activityBusy) return;
+    if (physicalAttached) {
+      setPhysicalBusy(true);
+      mentorApi.setPhysicalOrientation(
+        conversationId,
+        workspaceState.orientation === 'white' ? 'black' : 'white',
+        workspaceState.revision
+      ).then((result) => {
+        setPhysicalBoard(result.physicalBoard);
+      }).catch((orientationError) => {
+        if (orientationError.state) {
+          setPhysicalBoard((current) => ({ ...current, state: orientationError.state }));
+        }
+        setError(orientationError.message);
+      }).finally(() => setPhysicalBusy(false));
+      return;
+    }
     const actionId = crypto.randomUUID();
     const orientation = boardState.orientation === 'white' ? 'black' : 'white';
     commitBoardAction(actionId, () => mentorApi.setOrientation(
@@ -994,23 +1103,52 @@ export default function MentorWorkspace() {
   };
 
   const grouped = useMemo(() => groupConversations(conversations), [conversations]);
-  const annotationSquareStyles = useMemo(() => Object.fromEntries(
-    (boardState?.annotations?.highlights || []).map(({ square, role }) => [
-      square,
-      { boxShadow: `inset 0 0 0 5px ${ANNOTATION_COLORS[role] || ANNOTATION_COLORS.idea}` }
-    ])
-  ), [boardState?.annotations?.highlights]);
-  const annotationArrows = useMemo(() => (boardState?.annotations?.arrows || []).map((arrow) => ({
+  const annotationSquareStyles = useMemo(() => {
+    const styles = Object.fromEntries(
+      (workspaceState?.annotations?.highlights || []).map(({ square, role }) => [
+        square,
+        { boxShadow: `inset 0 0 0 5px ${ANNOTATION_COLORS[role] || ANNOTATION_COLORS.idea}` }
+      ])
+    );
+    if (!physicalAttached) return styles;
+    const physical = workspaceState.physical;
+    for (const square of physical?.board?.missingSquares || []) {
+      styles[square] = { boxShadow: 'inset 0 0 0 6px #ef4444', backgroundColor: 'rgba(239, 68, 68, 0.45)' };
+    }
+    for (const square of physical?.board?.extraSquares || []) {
+      styles[square] = { boxShadow: 'inset 0 0 0 6px #f59e0b', backgroundColor: 'rgba(245, 158, 11, 0.45)' };
+    }
+    if (physical?.selectedSource) {
+      styles[physical.selectedSource] = { boxShadow: 'inset 0 0 0 6px #3b82f6', backgroundColor: 'rgba(59, 130, 246, 0.4)' };
+    }
+    for (const target of physical?.legalTargets || []) {
+      const square = target.to || target.square;
+      if (!square) continue;
+      const color = target.special ? '#a855f7' : target.capture ? '#ef4444' : '#22c55e';
+      styles[square] = { boxShadow: `inset 0 0 0 6px ${color}` };
+    }
+    if (workspaceState.gameStatus?.inCheck && workspaceState.gameStatus?.checkedKingSquare) {
+      styles[workspaceState.gameStatus.checkedKingSquare] = {
+        boxShadow: 'inset 0 0 0 7px #dc2626',
+        backgroundColor: 'rgba(220, 38, 38, 0.5)'
+      };
+    }
+    return styles;
+  }, [physicalAttached, workspaceState]);
+  const annotationArrows = useMemo(() => (workspaceState?.annotations?.arrows || []).map((arrow) => ({
     startSquare: arrow.from,
     endSquare: arrow.to,
     color: ANNOTATION_COLORS[arrow.role] || ANNOTATION_COLORS.idea
-  })), [boardState?.annotations?.arrows]);
+  })), [workspaceState?.annotations?.arrows]);
   const currentAnalysis = useMemo(() => messages
     .flatMap((message) => message.toolCalls || [])
     .filter((toolCall) => toolCall.status === 'complete'
-      && toolCall.result?.analyzedFen === boardState?.fen
+      && toolCall.result?.analyzedFen === workspaceState?.fen
+      && (toolCall.result?.sourceKey
+        ? toolCall.result.sourceKey === workspaceState?.sourceKey
+        : workspaceState?.source !== 'physical')
       && ['position_analysis', 'move_analysis'].includes(toolCall.result?.kind))
-    .at(-1)?.result || null, [boardState?.fen, messages]);
+    .at(-1)?.result || null, [messages, workspaceState?.fen, workspaceState?.source, workspaceState?.sourceKey]);
   const evaluationPercent = useMemo(() => {
     const score = currentAnalysis?.score;
     if (!score) return 50;
@@ -1160,17 +1298,40 @@ export default function MentorWorkspace() {
 
       <aside className="mentor-board-panel">
         <header>
-          <div><span>WORKSPACE</span><h2>Position board</h2></div>
+          <div><span>WORKSPACE</span><h2>{physicalAttached ? 'Physical board' : 'Position board'}</h2></div>
           <div className="mentor-board-tools">
             <button onClick={() => setProfileDialogOpen(true)} disabled={activityBusy} title="Learner profile" aria-label="Learner profile"><Settings2 size={16} /></button>
-            <button onClick={flipBoard} disabled={!boardState || mentorRequestBusy || !!pendingBoardAction || activityBusy} title="Flip board" aria-label="Flip board"><Repeat2 size={17} /></button>
+            <button onClick={flipBoard} disabled={!workspaceState || mentorRequestBusy || !!pendingBoardAction || activityBusy || physicalBusy} title="Flip board" aria-label="Flip board"><Repeat2 size={17} /></button>
             <button onClick={() => { setFenDraft(boardState?.fen || ''); setFenDialogOpen(true); }} disabled={!boardState || boardSetupLocked} title="Load FEN" aria-label="Load FEN"><Pencil size={16} /></button>
             <button onClick={resetBoard} disabled={!boardState || boardSetupLocked} title="Reset board" aria-label="Reset board"><RefreshCcw size={16} /></button>
           </div>
         </header>
+        <div className="mentor-board-source" role="group" aria-label="Board source">
+          <button className={!physicalAttached ? 'is-active' : ''} onClick={detachPhysicalBoard} disabled={!physicalAttached || physicalBusy}>Virtual</button>
+          <button className={physicalAttached ? 'is-active' : ''} onClick={attachPhysicalBoard} disabled={physicalAttached || physicalBusy || mentorRequestBusy || !!activity}>
+            <Radio size={13} /> Physical
+          </button>
+        </div>
+        {physicalAttached ? (
+          <div className={`mentor-physical-status is-${workspaceState.physical.phase}`}>
+            <span className="mentor-physical-status-dot" />
+            <div>
+              <strong>{workspaceState.physical.robotBusy ? 'Robot working' : workspaceState.physical.phase.replaceAll('_', ' ')}</strong>
+              <small>{workspaceState.physical.statusText}</small>
+            </div>
+            <span>{workspaceState.physical.lastSnapshotAt
+              ? `${Math.max(0, Math.round((freshnessNow - workspaceState.physical.lastSnapshotAt) / 1000))}s`
+              : 'No sensor data'}</span>
+          </div>
+        ) : physicalBoard?.binding?.status === 'stale' ? (
+          <div className="mentor-physical-status is-stale"><span className="mentor-physical-status-dot" /><div><strong>Previous physical session ended</strong><small>Attach the new game explicitly when it is ready.</small></div></div>
+        ) : !physicalAvailability?.available ? (
+          <div className="mentor-physical-unavailable"><span>No active physical game.</span><Link to="/">Open Companion Board</Link></div>
+        ) : null}
         <ActivityBar
           activity={activity}
           busy={activityBusy || mentorRequestBusy}
+          disabled={physicalAttached}
           onStart={openActivityDialog}
           onProfile={() => setProfileDialogOpen(true)}
           onPause={() => updateActivity((id) => mentorApi.pauseActivity(conversationId, id))}
@@ -1180,7 +1341,7 @@ export default function MentorWorkspace() {
         />
         <div className="mentor-board-stage">
           <div
-            className={`mentor-eval-bar is-${boardState?.orientation || 'white'} ${currentAnalysis ? 'has-analysis' : ''}`}
+            className={`mentor-eval-bar is-${workspaceState?.orientation || 'white'} ${currentAnalysis ? 'has-analysis' : ''}`}
             title={currentAnalysis ? `Stockfish evaluation ${formatEngineScore(currentAnalysis.score)}` : 'Position not analyzed'}
             aria-label={currentAnalysis ? `Stockfish evaluation ${formatEngineScore(currentAnalysis.score)}` : 'Position not analyzed'}
           >
@@ -1189,27 +1350,27 @@ export default function MentorWorkspace() {
           </div>
           <div className="mentor-board-frame">
             <Chessboard options={{
-              position: previewFen || boardState?.fen || STANDARD_FEN,
-              boardOrientation: boardState?.orientation || 'white',
+              position: physicalAttached ? workspaceState?.fen : previewFen || workspaceState?.fen || STANDARD_FEN,
+              boardOrientation: workspaceState?.orientation || 'white',
               animationDurationInMs: 350,
               arrows: annotationArrows,
               squareStyles: annotationSquareStyles,
               allowDrawingArrows: false,
               onPieceDrop: onBoardMove,
-              allowDragging: !!boardState && !boardInteractionLocked && !boardState.gameStatus.isGameOver,
+              allowDragging: !!workspaceState && !boardInteractionLocked && !workspaceState.gameStatus.isGameOver,
               darkSquareStyle: { backgroundColor: '#1e293b' },
               lightSquareStyle: { backgroundColor: '#e2e8f0' }
             }} />
           </div>
         </div>
         <div className="mentor-board-summary">
-          <div><span>Turn</span><strong>{boardState?.turnName || 'White'}</strong></div>
-          <div><span>Status</span><strong>{live.toolBusy ? live.toolLabel : pendingBoardAction ? 'Saving move...' : activity ? activityPhaseLabel(activity) : boardState?.gameStatus.resultText || 'Ready'}</strong></div>
+          <div><span>Turn</span><strong>{workspaceState?.turnName || 'White'}</strong></div>
+          <div><span>Status</span><strong>{live.toolBusy ? live.toolLabel : pendingBoardAction ? 'Saving move...' : activity ? activityPhaseLabel(activity) : workspaceState?.gameStatus.resultText || 'Ready'}</strong></div>
         </div>
         <div className="mentor-move-list">
-          <div className="mentor-move-list-header"><span>MOVE LIST</span><strong>{boardState?.history.length || 0} plies</strong></div>
+          <div className="mentor-move-list-header"><span>MOVE LIST</span><strong>{workspaceState?.history.length || 0} plies</strong></div>
           <ol>
-            {(boardState?.history || []).reduce((rows, move, index) => {
+            {(workspaceState?.history || []).reduce((rows, move, index) => {
               if (index % 2 === 0) rows.push([move]);
               else rows.at(-1).push(move);
               return rows;
@@ -1239,7 +1400,7 @@ export default function MentorWorkspace() {
           </form>
         </div>
       )}
-      {activityDialogOpen && boardState && (
+      {activityDialogOpen && boardState && !physicalAttached && (
         <ActivityDialog
           catalog={catalog}
           boardRevision={boardState.revision}

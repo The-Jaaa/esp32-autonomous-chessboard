@@ -11,6 +11,7 @@ function createMentorRouter({
   activityService,
   liveService,
   speakerService,
+  physicalObserver,
   emitBoardUpdate = () => {}
 }) {
   const router = express.Router();
@@ -38,6 +39,10 @@ function createMentorRouter({
     res.json({ devices: speakerService?.listDevices?.() || [] });
   });
 
+  router.get('/physical-board', (req, res) => {
+    res.json(physicalObserver.availability());
+  });
+
   router.post('/conversations', (req, res) => {
     const conversation = store.createConversation(req.body || {});
     res.status(201).json({
@@ -45,6 +50,7 @@ function createMentorRouter({
         ...conversation,
         messages: [],
         chess: chessService.getState(conversation.id),
+        physicalBoard: physicalObserver.detail(conversation.id),
         activity: activityService?.get(conversation.id) || null,
         progress: activityService?.getProgressSummary() || null
       }
@@ -58,6 +64,7 @@ function createMentorRouter({
       conversation: {
         ...withToolCalls(conversation),
         chess: chessService.getState(conversation.id),
+        physicalBoard: physicalObserver.detail(conversation.id),
         activity: activityService?.get(conversation.id) || null,
         progress: activityService?.getProgressSummary() || null
       }
@@ -109,6 +116,12 @@ function createMentorRouter({
 
   router.post('/conversations/:id/moves', (req, res, next) => {
     try {
+      if (physicalObserver.isAttached(req.params.id)) {
+        const error = new Error('The attached physical board is read-only from the mentor workspace.');
+        error.code = 'physical_board_read_only';
+        error.statusCode = 409;
+        throw error;
+      }
       const active = activityService?.validateLearnerMove(req.params.id, req.body || {});
       const result = chessService.move(req.params.id, {
         ...(req.body || {}),
@@ -124,17 +137,61 @@ function createMentorRouter({
   });
 
   router.put('/conversations/:id/position', commitBoardAction((req) => {
+    if (physicalObserver.isAttached(req.params.id)) {
+      const error = new Error('Detach the physical board before loading a virtual position.');
+      error.code = 'physical_board_read_only';
+      error.statusCode = 409;
+      throw error;
+    }
     activityService?.assertBoardSetupAllowed(req.params.id);
     return chessService.setPosition(req.params.id, req.body || {});
   }));
 
   router.post('/conversations/:id/reset', commitBoardAction((req) => {
+    if (physicalObserver.isAttached(req.params.id)) {
+      const error = new Error('Detach the physical board before resetting the virtual position.');
+      error.code = 'physical_board_read_only';
+      error.statusCode = 409;
+      throw error;
+    }
     activityService?.assertBoardSetupAllowed(req.params.id);
     return chessService.reset(req.params.id, req.body || {});
   }));
 
-  router.patch('/conversations/:id/board', commitBoardAction((req) =>
-    chessService.setOrientation(req.params.id, req.body || {})));
+  router.patch('/conversations/:id/board', commitBoardAction((req) => {
+    if (physicalObserver.isAttached(req.params.id)) {
+      const error = new Error('Use the physical-board view endpoint while the physical board is attached.');
+      error.code = 'physical_board_read_only';
+      error.statusCode = 409;
+      throw error;
+    }
+    return chessService.setOrientation(req.params.id, req.body || {});
+  }));
+
+  router.post('/conversations/:id/physical-board', (req, res, next) => {
+    try {
+      return res.json({ physicalBoard: physicalObserver.attach(req.params.id, req.body || {}) });
+    } catch (error) {
+      return next(error);
+    }
+  });
+
+  router.patch('/conversations/:id/physical-board', (req, res, next) => {
+    try {
+      const result = physicalObserver.setOrientation(req.params.id, req.body || {});
+      return res.json({ physicalBoard: physicalObserver.detail(req.params.id), state: result.state });
+    } catch (error) {
+      return next(error);
+    }
+  });
+
+  router.delete('/conversations/:id/physical-board', (req, res, next) => {
+    try {
+      return res.json({ physicalBoard: physicalObserver.detach(req.params.id) });
+    } catch (error) {
+      return next(error);
+    }
+  });
 
   router.get('/catalog', (req, res) => {
     res.json({ catalog: activityService.catalog(req.query.type || null) });
@@ -158,6 +215,12 @@ function createMentorRouter({
   });
 
   router.post('/conversations/:id/activities', asyncRoute(async (req, res) => {
+      if (physicalObserver.isAttached(req.params.id)) {
+        const error = new Error('Physical-board activities are not available yet.');
+        error.code = 'physical_board_read_only';
+        error.statusCode = 409;
+        throw error;
+      }
       const activity = await activityService.startActivity(req.params.id, req.body || {});
       return res.status(201).json({ activity, state: chessService.getState(req.params.id) });
   }));
@@ -209,7 +272,8 @@ function createMentorRouter({
     return res.status(status).json({
       error: error.message || 'Mentor request failed.',
       code: error.code,
-      state: error.state
+      state: error.state,
+      boundConversationId: error.boundConversationId
     });
   });
 

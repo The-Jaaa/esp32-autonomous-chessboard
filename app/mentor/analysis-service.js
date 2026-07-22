@@ -107,8 +107,16 @@ class MentorAnalysisService {
   }
 
   async analyzePosition(conversationId, { mode = 'quick', signal } = {}) {
-    const normalizedMode = normalizeAnalysisMode(mode);
     const state = this.chessService.getState(conversationId);
+    return this.analyzePositionState(state, {
+      mode,
+      signal,
+      assertCurrent: () => this.assertCurrent(conversationId, state)
+    });
+  }
+
+  async analyzePositionState(state, { mode = 'quick', signal, assertCurrent = () => state } = {}) {
+    const normalizedMode = normalizeAnalysisMode(mode);
     if (state.gameStatus.isGameOver || !state.legalMoves.length) {
       throw new MentorAnalysisError('This position is already terminal and has no legal move to analyze.', 'terminal_position');
     }
@@ -117,9 +125,11 @@ class MentorAnalysisService {
       multiPv: 3,
       signal
     });
-    this.assertCurrent(conversationId, state);
+    assertCurrent();
     return {
       kind: 'position_analysis',
+      analyzedSource: state.source || 'virtual',
+      sourceKey: state.sourceKey || `virtual:${state.conversationId}`,
       analyzedFen: state.fen,
       analyzedRevision: state.revision,
       mode: normalizedMode,
@@ -132,8 +142,24 @@ class MentorAnalysisService {
   }
 
   async analyzeMove(conversationId, { uci, mode = 'quick', signal, onProgress = () => {} } = {}) {
-    const normalizedMode = normalizeAnalysisMode(mode);
     const state = this.chessService.getState(conversationId);
+    return this.analyzeMoveState(state, {
+      uci,
+      mode,
+      signal,
+      onProgress,
+      assertCurrent: () => this.assertCurrent(conversationId, state)
+    });
+  }
+
+  async analyzeMoveState(state, {
+    uci,
+    mode = 'quick',
+    signal,
+    onProgress = () => {},
+    assertCurrent = () => state
+  } = {}) {
+    const normalizedMode = normalizeAnalysisMode(mode);
     const source = uci ? 'candidate' : 'latest_move';
     let requestedUci = uci;
     let baseFen;
@@ -192,7 +218,7 @@ class MentorAnalysisService {
       signal
     });
     onProgress(2, 2);
-    this.assertCurrent(conversationId, state);
+    assertCurrent();
 
     const mover = baseGame.turn();
     const bestForMover = scoreForColor(before.score, mover);
@@ -209,6 +235,8 @@ class MentorAnalysisService {
     return {
       kind: 'move_analysis',
       source,
+      analyzedSource: state.source || 'virtual',
+      sourceKey: state.sourceKey || `virtual:${state.conversationId}`,
       analyzedFen: state.fen,
       analyzedRevision: state.revision,
       baseFen,

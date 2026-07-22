@@ -399,6 +399,7 @@
 }
 
 .mentor-message.is-user .mentor-message-kind { color: #bfdbfe; }
+.mentor-message.is-physical .mentor-message-kind { color: #93c5fd; }
 .mentor-message.is-voice .mentor-message-content { min-width: 90px; }
 .mentor-message.is-activity .mentor-message-content { color: #dbeafe; }
 
@@ -837,6 +838,60 @@
 }
 .mentor-board-tools button:hover:not(:disabled) { color: white; background: var(--surface-panel-strong); }
 .mentor-board-tools button:disabled { opacity: .45; cursor: default; }
+
+.mentor-board-source {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  height: 31px;
+  margin: 10px 22px 0;
+  overflow: hidden;
+  border: 1px solid var(--mentor-border);
+  border-radius: 5px;
+}
+.mentor-board-source button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 0;
+  border-right: 1px solid var(--mentor-border);
+  color: var(--mentor-muted);
+  background: var(--surface-panel);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+}
+.mentor-board-source button:last-child { border-right: 0; }
+.mentor-board-source button.is-active { color: white; background: var(--mentor-accent); }
+.mentor-board-source button:disabled:not(.is-active) { opacity: .45; cursor: default; }
+
+.mentor-physical-status,
+.mentor-physical-unavailable {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 43px;
+  margin: 8px 22px 0;
+  padding: 7px 9px;
+  border: 1px solid var(--mentor-border);
+  border-radius: 5px;
+  color: var(--mentor-muted);
+  background: rgba(30, 41, 59, .82);
+  font-size: 10px;
+}
+.mentor-physical-status > div { min-width: 0; flex: 1; }
+.mentor-physical-status strong,
+.mentor-physical-status small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mentor-physical-status strong { color: var(--mentor-text); font-size: 11px; text-transform: capitalize; }
+.mentor-physical-status small { margin-top: 2px; }
+.mentor-physical-status-dot { flex: 0 0 8px; width: 8px; height: 8px; border-radius: 50%; background: var(--success-color); }
+.mentor-physical-status.is-sync_warning { border-color: var(--warning-color); }
+.mentor-physical-status.is-sync_warning .mentor-physical-status-dot,
+.mentor-physical-status.is-stale .mentor-physical-status-dot { background: var(--warning-color); }
+.mentor-physical-status.is-error { border-color: var(--danger-color); }
+.mentor-physical-status.is-error .mentor-physical-status-dot { background: var(--danger-color); }
+.mentor-physical-unavailable { justify-content: space-between; }
+.mentor-physical-unavailable a { color: #bfdbfe; font-weight: 700; text-decoration: none; }
 
 .mentor-activity-bar {
   display: grid;

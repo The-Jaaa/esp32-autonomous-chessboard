@@ -169,6 +169,28 @@ function mapAnnotations(row, revision = 0) {
   };
 }
 
+function mapPhysicalBinding(row) {
+  if (!row) return null;
+  return {
+    conversationId: row.conversation_id,
+    boardId: row.board_id,
+    serverInstanceId: row.server_instance_id,
+    sessionGeneration: Number(row.session_generation),
+    stateRevision: Number(row.state_revision || 0),
+    status: row.status,
+    orientation: row.orientation,
+    annotatedFen: row.annotated_fen || null,
+    analyzedFen: row.analyzed_fen || null,
+    annotations: {
+      highlights: parseJson(row.highlights_json, []),
+      arrows: parseJson(row.arrows_json, [])
+    },
+    lastEventKey: row.last_event_key || null,
+    attachedAt: row.attached_at,
+    updatedAt: row.updated_at
+  };
+}
+
 function titleFromMessage(text) {
   const normalized = String(text || '').replace(/\s+/g, ' ').trim();
   if (!normalized) return DEFAULT_TITLE;
@@ -401,6 +423,34 @@ class MentorStore {
         INSERT INTO mentor_learner_profile(id, skill_band, goals_json, created_at, updated_at)
         VALUES (1, 'Beginner', '[]', ${this.now()}, ${this.now()});
       `
+    }, {
+      version: 7,
+      sql: `
+        CREATE TABLE mentor_physical_bindings (
+          conversation_id TEXT PRIMARY KEY REFERENCES mentor_conversations(id) ON DELETE CASCADE,
+          board_id TEXT NOT NULL DEFAULT 'main-board',
+          server_instance_id TEXT NOT NULL,
+          session_generation INTEGER NOT NULL,
+          state_revision INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL CHECK(status IN ('active', 'stale', 'detached')),
+          orientation TEXT NOT NULL DEFAULT 'white' CHECK(orientation IN ('white', 'black')),
+          annotated_fen TEXT,
+          highlights_json TEXT NOT NULL DEFAULT '[]',
+          arrows_json TEXT NOT NULL DEFAULT '[]',
+          last_event_key TEXT,
+          attached_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        CREATE UNIQUE INDEX mentor_physical_bindings_one_active_board
+          ON mentor_physical_bindings(board_id)
+          WHERE status = 'active';
+      `
+    }, {
+      version: 8,
+      sql: `
+        ALTER TABLE mentor_physical_bindings ADD COLUMN analyzed_fen TEXT;
+      `
     }];
 
     const applied = new Set(
@@ -572,7 +622,8 @@ class MentorStore {
     text,
     kind = 'text',
     assistantContent = '',
-    assistantStatus = 'pending'
+    assistantStatus = 'pending',
+    suppressTitle = false
   }) {
     const existing = this.getRequestMessages(conversationId, requestId);
     if (existing.length) {
@@ -585,7 +636,7 @@ class MentorStore {
 
     const conversation = this.getConversation(conversationId);
     if (!conversation) return null;
-    if (!['text', 'voice', 'activity'].includes(kind)) {
+    if (!['text', 'voice', 'activity', 'physical'].includes(kind)) {
       throw new Error(`Unsupported mentor message kind: ${kind}`);
     }
     if (!['pending', 'streaming', 'complete', 'failed', 'cancelled'].includes(assistantStatus)) {
@@ -616,7 +667,7 @@ class MentorStore {
         assistantId, conversationId, nextSequence + 1, requestId,
         'model', kind, assistantContent, assistantStatus, timestamp, timestamp
       );
-      const nextTitle = conversation.messageCount === 0 && conversation.title === DEFAULT_TITLE
+      const nextTitle = !suppressTitle && conversation.messageCount === 0 && conversation.title === DEFAULT_TITLE
         ? titleFromMessage(text)
         : conversation.title;
       this.db.prepare(`
@@ -785,6 +836,114 @@ class MentorStore {
       this.now()
     );
     return { status: 'committed' };
+  }
+
+  getPhysicalBinding(conversationId) {
+    return mapPhysicalBinding(this.db.prepare(`
+      SELECT * FROM mentor_physical_bindings WHERE conversation_id = ?
+    `).get(conversationId));
+  }
+
+  getActivePhysicalBinding(boardId = 'main-board') {
+    return mapPhysicalBinding(this.db.prepare(`
+      SELECT * FROM mentor_physical_bindings
+      WHERE board_id = ? AND status = 'active'
+    `).get(boardId));
+  }
+
+  attachPhysicalBinding(conversationId, {
+    boardId = 'main-board',
+    serverInstanceId,
+    sessionGeneration,
+    stateRevision = 0,
+    orientation = 'white'
+  }) {
+    const existing = this.getActivePhysicalBinding(boardId);
+    if (existing && existing.conversationId !== conversationId) {
+      return { status: 'conflict', binding: existing };
+    }
+    const timestamp = this.now();
+    this.db.prepare(`
+      INSERT INTO mentor_physical_bindings(
+        conversation_id, board_id, server_instance_id, session_generation,
+        state_revision, status, orientation, annotated_fen, analyzed_fen,
+        highlights_json, arrows_json, last_event_key, attached_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, 'active', ?, NULL, NULL, '[]', '[]', NULL, ?, ?)
+      ON CONFLICT(conversation_id) DO UPDATE SET
+        board_id = excluded.board_id,
+        server_instance_id = excluded.server_instance_id,
+        session_generation = excluded.session_generation,
+        state_revision = excluded.state_revision,
+        status = 'active',
+        orientation = excluded.orientation,
+        annotated_fen = NULL,
+        analyzed_fen = NULL,
+        highlights_json = '[]',
+        arrows_json = '[]',
+        last_event_key = NULL,
+        attached_at = excluded.attached_at,
+        updated_at = excluded.updated_at
+    `).run(
+      conversationId,
+      boardId,
+      serverInstanceId,
+      sessionGeneration,
+      stateRevision,
+      orientation,
+      timestamp,
+      timestamp
+    );
+    return { status: 'active', binding: this.getPhysicalBinding(conversationId) };
+  }
+
+  updatePhysicalBinding(conversationId, patch = {}) {
+    const current = this.getPhysicalBinding(conversationId);
+    if (!current) return null;
+    const next = {
+      stateRevision: Number.isInteger(patch.stateRevision) ? patch.stateRevision : current.stateRevision,
+      status: patch.status || current.status,
+      orientation: patch.orientation || current.orientation,
+      annotatedFen: Object.prototype.hasOwnProperty.call(patch, 'annotatedFen')
+        ? patch.annotatedFen
+        : current.annotatedFen,
+      analyzedFen: Object.prototype.hasOwnProperty.call(patch, 'analyzedFen')
+        ? patch.analyzedFen
+        : current.analyzedFen,
+      annotations: patch.annotations || current.annotations,
+      lastEventKey: Object.prototype.hasOwnProperty.call(patch, 'lastEventKey')
+        ? patch.lastEventKey
+        : current.lastEventKey
+    };
+    this.db.prepare(`
+      UPDATE mentor_physical_bindings
+      SET state_revision = ?, status = ?, orientation = ?, annotated_fen = ?, analyzed_fen = ?,
+          highlights_json = ?, arrows_json = ?, last_event_key = ?, updated_at = ?
+      WHERE conversation_id = ?
+    `).run(
+      next.stateRevision,
+      next.status,
+      next.orientation,
+      next.annotatedFen,
+      next.analyzedFen,
+      JSON.stringify(next.annotations.highlights || []),
+      JSON.stringify(next.annotations.arrows || []),
+      next.lastEventKey,
+      this.now(),
+      conversationId
+    );
+    return this.getPhysicalBinding(conversationId);
+  }
+
+  detachPhysicalBinding(conversationId, status = 'detached') {
+    const current = this.getPhysicalBinding(conversationId);
+    if (!current) return null;
+    return this.updatePhysicalBinding(conversationId, {
+      status,
+      annotatedFen: null,
+      analyzedFen: null,
+      annotations: { highlights: [], arrows: [] },
+      lastEventKey: null
+    });
   }
 
   createActivity({

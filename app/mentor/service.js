@@ -107,7 +107,7 @@ class MentorService {
         messages,
         chessContext,
         signal: controller.signal,
-        toolDeclarations: this.toolService?.declarations() || [],
+        toolDeclarations: this.toolService?.declarations(conversationId) || [],
         executeTool: async (call) => {
           toolOrdinal += 1;
           if (toolOrdinal > MAX_TOOL_CALLS) {

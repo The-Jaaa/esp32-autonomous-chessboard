@@ -197,6 +197,8 @@ function waitWithSignal(milliseconds, signal) {
 
 function compactBoardState(state) {
   return {
+    source: state.source || 'virtual',
+    sourceKey: state.sourceKey || `virtual:${state.conversationId}`,
     fen: state.fen,
     pgn: state.pgn,
     turn: state.turnName,
@@ -205,7 +207,8 @@ function compactBoardState(state) {
     gameStatus: state.gameStatus,
     recentMoves: state.history.slice(-12).map((move) => ({ uci: move.uci, san: move.san })),
     legalMoves: state.legalMoves,
-    annotations: state.annotations
+    annotations: state.annotations,
+    physical: state.physical || null
   };
 }
 
@@ -216,23 +219,37 @@ function progressTotalFor(name, args) {
 }
 
 class MentorToolService {
-  constructor({ store, chessService, analysisService = null, activityService = null, emit = () => {}, emitBoardUpdate = () => {}, delay = waitWithSignal }) {
+  constructor({ store, chessService, analysisService = null, activityService = null, physicalObserver = null, emit = () => {}, emitBoardUpdate = () => {}, delay = waitWithSignal }) {
     this.store = store;
     this.chessService = chessService;
     this.analysisService = analysisService;
     this.activityService = activityService;
+    this.physicalObserver = physicalObserver;
     this.emit = emit;
     this.emitBoardUpdate = emitBoardUpdate;
     this.delay = delay;
     this.inFlight = new Map();
   }
 
-  declarations() {
+  declarations(conversationId = null) {
+    if (conversationId && this.physicalObserver?.isAttached(conversationId)) {
+      return TOOL_DECLARATIONS.filter((tool) => this.physicalObserver.allowedTool(tool.name));
+    }
     return TOOL_DECLARATIONS;
   }
 
   setActivityService(activityService) {
     this.activityService = activityService;
+  }
+
+  setPhysicalObserver(physicalObserver) {
+    this.physicalObserver = physicalObserver;
+  }
+
+  workspaceState(conversationId) {
+    return this.physicalObserver?.isAttached(conversationId)
+      ? this.physicalObserver.getState(conversationId)
+      : this.chessService.getState(conversationId);
   }
 
   publish(conversationId, event, toolCall) {
@@ -300,6 +317,13 @@ class MentorToolService {
     });
     try {
       if (signal?.aborted) throw makeAbortError();
+      if (this.physicalObserver?.isAttached(conversationId)
+        && !this.physicalObserver.allowedTool(name)) {
+        const error = new Error(`${name} is unavailable while observing the read-only physical board.`);
+        error.code = 'physical_board_read_only';
+        error.state = this.physicalObserver.getState(conversationId);
+        throw error;
+      }
       this.activityService?.validateTool(conversationId, requestId, name, args);
       const result = await this.runTool(name, args, {
         conversationId,
@@ -340,7 +364,7 @@ class MentorToolService {
           error: {
             message: error.message,
             code: error.code || 'tool_failed',
-            board: error.state ? compactBoardState(error.state) : compactBoardState(this.chessService.getState(conversationId))
+            board: error.state ? compactBoardState(error.state) : compactBoardState(this.workspaceState(conversationId))
           }
         },
         toolCall
@@ -352,7 +376,7 @@ class MentorToolService {
     const { conversationId, requestId, toolCall, signal, onProgress } = context;
     if (name === 'get_board_state') {
       onProgress(1, 1);
-      return compactBoardState(this.chessService.getState(conversationId));
+      return compactBoardState(this.workspaceState(conversationId));
     }
 
     if (name === 'get_activity_state') {
@@ -411,7 +435,12 @@ class MentorToolService {
 
     if (name === 'analyze_position') {
       if (!this.analysisService) throw new Error('Stockfish mentor analysis is unavailable.');
-      const result = await this.analysisService.analyzePosition(conversationId, {
+      const result = this.physicalObserver?.isAttached(conversationId)
+        ? await this.physicalObserver.analyzePosition(conversationId, {
+          mode: args.mode || 'quick',
+          signal
+        })
+        : await this.analysisService.analyzePosition(conversationId, {
         mode: args.mode || 'quick',
         signal
       });
@@ -421,12 +450,15 @@ class MentorToolService {
 
     if (name === 'analyze_move') {
       if (!this.analysisService) throw new Error('Stockfish mentor analysis is unavailable.');
-      return this.analysisService.analyzeMove(conversationId, {
+      const options = {
         uci: args.uci,
         mode: args.mode || 'quick',
         signal,
         onProgress
-      });
+      };
+      return this.physicalObserver?.isAttached(conversationId)
+        ? this.physicalObserver.analyzeMove(conversationId, options)
+        : this.analysisService.analyzeMove(conversationId, options);
     }
 
     if (name === 'play_move') {
@@ -524,6 +556,15 @@ class MentorToolService {
     }
 
     if (name === 'set_orientation') {
+      if (this.physicalObserver?.isAttached(conversationId)) {
+        const state = this.physicalObserver.getState(conversationId);
+        const result = this.physicalObserver.setOrientation(conversationId, {
+          orientation: args.orientation,
+          expectedRevision: state.revision
+        });
+        onProgress(1, 1);
+        return { orientation: result.state.orientation, board: compactBoardState(result.state) };
+      }
       const state = this.chessService.getState(conversationId);
       const actionId = `mentor:${toolCall.id}:0`;
       const result = this.chessService.setOrientation(conversationId, {
@@ -537,6 +578,16 @@ class MentorToolService {
     }
 
     if (name === 'annotate_board') {
+      if (this.physicalObserver?.isAttached(conversationId)) {
+        const state = this.physicalObserver.getState(conversationId);
+        const result = this.physicalObserver.setAnnotations(conversationId, {
+          highlights: args.highlights,
+          arrows: args.arrows,
+          expectedRevision: state.revision
+        });
+        onProgress(1, 1);
+        return { annotations: result.state.annotations, board: compactBoardState(result.state) };
+      }
       const state = this.chessService.getState(conversationId);
       const actionId = `mentor:${toolCall.id}:0`;
       const result = this.chessService.setAnnotations(conversationId, {

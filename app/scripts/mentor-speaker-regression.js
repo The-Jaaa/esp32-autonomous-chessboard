@@ -11,13 +11,18 @@ const {
   MAX_SPEAKER_QUEUE_BYTES,
   MentorSpeakerService,
   SPEAKER_END_RESEND_MS,
+  SPEAKER_ENCODING,
   SPEAKER_FEED_AHEAD_BYTES,
   SPEAKER_FEED_AHEAD_MS,
   SPEAKER_HEADER_BYTES,
   SPEAKER_PROTOCOL_VERSION,
   SPEAKER_START_BUFFER_BYTES,
   SPEAKER_START_BUFFER_MS,
+  createImaAdpcmState,
   createSpeakerFrame,
+  decodeImaAdpcmToPcm16Le,
+  encodePcm16LeToImaAdpcm,
+  flushImaAdpcm,
   parseSpeakerFrame
 } = require('../mentor/speaker-service');
 const { DeterministicMentorLiveConnector } = require('../mentor/live-service');
@@ -75,7 +80,7 @@ class FakeSpeakerBoard {
       boardId: this.boardId,
       token: this.token,
       capabilities: {
-        encoding: 'pcm_s16le',
+        encoding: SPEAKER_ENCODING,
         sampleRate: 24000,
         channels: 1,
         bufferBytes: 131072
@@ -126,6 +131,34 @@ async function protocolRegressions() {
   assert.strictEqual(SPEAKER_START_BUFFER_MS, 3000);
   assert.strictEqual(SPEAKER_START_BUFFER_BYTES, 24000 * 2 * 3);
   assert.strictEqual(SPEAKER_END_RESEND_MS, 250);
+  const codecSamples = Array.from({ length: 240 }, (_, index) => (
+    Math.round(Math.sin(index * Math.PI / 24) * 12000)
+  ));
+  const codecPcm = Buffer.alloc(codecSamples.length * 2);
+  codecSamples.forEach((sample, index) => codecPcm.writeInt16LE(sample, index * 2));
+  const codecState = createImaAdpcmState();
+  const codecEncoded = Buffer.concat([
+    encodePcm16LeToImaAdpcm(codecPcm, codecState),
+    flushImaAdpcm(codecState)
+  ]);
+  const codecDecoded = decodeImaAdpcmToPcm16Le(codecEncoded);
+  assert.strictEqual(codecEncoded.length, codecPcm.length / 4);
+  assert.strictEqual(codecDecoded.length, codecPcm.length);
+  const averageError = codecSamples.reduce((total, sample, index) => (
+    total + Math.abs(sample - codecDecoded.readInt16LE(index * 2))
+  ), 0) / codecSamples.length;
+  assert.ok(averageError < 1200, `Unexpected ADPCM average error ${averageError}.`);
+  const chunkedState = createImaAdpcmState();
+  const chunkedEncoded = [];
+  for (let offset = 0; offset < codecPcm.length; offset += 2) {
+    chunkedEncoded.push(encodePcm16LeToImaAdpcm(codecPcm.subarray(offset, offset + 2), chunkedState));
+  }
+  chunkedEncoded.push(flushImaAdpcm(chunkedState));
+  assert.deepStrictEqual(Buffer.concat(chunkedEncoded), codecEncoded);
+  assert.strictEqual(flushImaAdpcm(chunkedState).length, 0);
+  const oddState = createImaAdpcmState();
+  assert.strictEqual(encodePcm16LeToImaAdpcm(codecPcm.subarray(0, 2), oddState).length, 0);
+  assert.strictEqual(flushImaAdpcm(oddState).length, 1);
   const payload = Buffer.from([1, 2, 3, 4]);
   const encoded = createSpeakerFrame(FRAME_TYPES.PCM, payload, 7);
   const parsed = parseSpeakerFrame(encoded);
@@ -151,7 +184,7 @@ async function protocolRegressions() {
     protocolVersion: 1,
     boardId: 'intruder',
     token: 'wrong',
-    capabilities: { encoding: 'pcm_s16le', sampleRate: 24000, channels: 1 }
+    capabilities: { encoding: SPEAKER_ENCODING, sampleRate: 24000, channels: 1 }
   })}\n`);
   const rejection = await waitForEvent(rejected, 'data');
   assert.match(rejection.toString('utf8'), /rejected/);
@@ -211,14 +244,19 @@ async function protocolRegressions() {
   );
   assert.strictEqual(board.frames[0].type, FRAME_TYPES.START);
   assert.strictEqual(JSON.parse(board.frames[0].payload.toString()).volume, 64);
+  assert.strictEqual(JSON.parse(board.frames[0].payload.toString()).encoding, SPEAKER_ENCODING);
+  assert.strictEqual(JSON.parse(board.frames[0].payload.toString()).bitsPerSample, 4);
   assert.strictEqual(board.frames[1].type, FRAME_TYPES.PCM);
-  assert.deepStrictEqual(board.frames[1].payload, pcm);
+  assert.deepStrictEqual(
+    board.frames[1].payload,
+    encodePcm16LeToImaAdpcm(pcm, createImaAdpcmState())
+  );
   assert.strictEqual(service.endSpeech('conversation-a', 'session-a'), true);
   await new Promise((resolve) => setTimeout(resolve, 25));
   const pcmBeforeInterrupt = board.frames
     .filter((frame) => frame.type === FRAME_TYPES.PCM)
     .reduce((total, frame) => total + frame.payload.length, 0);
-  assert.ok(pcmBeforeInterrupt <= 131072 + pcm.length + 2000);
+  assert.ok(pcmBeforeInterrupt <= (131072 + pcm.length + 4000) / 4);
   const interruptedAt = Date.now();
   service.clearOutput('conversation-a', 'session-a', 'latency_test');
   await waitForCondition(

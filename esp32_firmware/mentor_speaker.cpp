@@ -13,7 +13,7 @@ namespace {
 constexpr uint8_t PROTOCOL_VERSION = 1;
 constexpr size_t FRAME_HEADER_BYTES = 16;
 constexpr uint32_t SAMPLE_RATE = 24000;
-constexpr uint32_t I2S_SAMPLE_RATE = 48000;
+constexpr const char* AUDIO_ENCODING = "ima_adpcm4";
 constexpr size_t BYTES_PER_SECOND = SAMPLE_RATE * sizeof(int16_t);
 constexpr size_t RING_BYTES = 2097152;
 constexpr size_t PREBUFFER_BYTES = (BYTES_PER_SECOND * 1800) / 1000;
@@ -23,6 +23,21 @@ constexpr uint32_t TELEMETRY_MS = 250;
 constexpr uint32_t I2S_WRITE_TIMEOUT_MS = 20;
 constexpr uint32_t STARVATION_GRACE_MS = 800;
 constexpr uint8_t PLAYBACK_BURST_WRITES = 8;
+constexpr size_t RECEIVE_BUDGET_BYTES = 32768;
+constexpr int8_t IMA_INDEX_TABLE[16] = {
+  -1, -1, -1, -1, 2, 4, 6, 8,
+  -1, -1, -1, -1, 2, 4, 6, 8
+};
+constexpr int16_t IMA_STEP_TABLE[89] = {
+  7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31,
+  34, 37, 41, 45, 50, 55, 60, 66, 73, 80, 88, 97, 107, 118, 130,
+  143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449,
+  494, 544, 598, 658, 724, 796, 876, 963, 1060, 1166, 1282, 1411,
+  1552, 1707, 1878, 2066, 2272, 2499, 2749, 3024, 3327, 3660, 4026,
+  4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630, 9493, 10442,
+  11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623,
+  27086, 29794, 32767
+};
 
 enum FrameType : uint8_t {
   FRAME_START = 1,
@@ -70,6 +85,10 @@ volatile uint32_t speakerUnderrunCount = 0;
 volatile uint32_t speakerBufferedMilliseconds = 0;
 volatile uint32_t speakerSensorMaxGapMs = 0;
 volatile uint32_t speakerPreviousSensorScanMs = 0;
+volatile uint32_t streamReceivedBytes = 0;
+volatile uint32_t streamConsumedBytes = 0;
+volatile uint32_t streamReceivedHash = 2166136261UL;
+volatile uint32_t streamConsumedHash = 2166136261UL;
 bool handshakeAccepted = false;
 volatile bool streamEnding = false;
 volatile bool prebuffering = true;
@@ -85,8 +104,31 @@ uint32_t i2sBytesPerSecond = 0;
 uint32_t i2sWindowTimeouts = 0;
 uint32_t i2sTimeoutsPerSecond = 0;
 uint32_t ringGeneration = 0;
+int32_t adpcmPredictor = 0;
+int adpcmIndex = 0;
 char activeSessionId[80] = {0};
 String handshakeLine;
+
+uint32_t updateFnv1a(uint32_t hash, const uint8_t* bytes, size_t length) {
+  for (size_t index = 0; index < length; ++index) {
+    hash ^= bytes[index];
+    hash *= 16777619UL;
+  }
+  return hash;
+}
+
+int16_t decodeImaAdpcmNibble(uint8_t codeValue) {
+  const uint8_t code = codeValue & 0x0f;
+  const int step = IMA_STEP_TABLE[adpcmIndex];
+  int delta = step >> 3;
+  if (code & 4) delta += step;
+  if (code & 2) delta += step >> 1;
+  if (code & 1) delta += step >> 2;
+  adpcmPredictor += (code & 8) ? -delta : delta;
+  adpcmPredictor = std::max<int32_t>(-32768, std::min<int32_t>(32767, adpcmPredictor));
+  adpcmIndex = std::max(0, std::min(88, adpcmIndex + IMA_INDEX_TABLE[code]));
+  return static_cast<int16_t>(adpcmPredictor);
+}
 
 void clearRing() {
   if (ringMutex) xSemaphoreTake(ringMutex, portMAX_DELAY);
@@ -156,7 +198,7 @@ void resetReceiver() {
 
 void sendTelemetry(const char* type, const char* error = nullptr) {
   if (!audioClient.connected() || !handshakeAccepted) return;
-  StaticJsonDocument<320> document;
+  StaticJsonDocument<512> document;
   document["type"] = type;
   if (activeSessionId[0]) document["sessionId"] = activeSessionId;
   document["bufferedMs"] = speakerBufferedMilliseconds;
@@ -166,6 +208,10 @@ void sendTelemetry(const char* type, const char* error = nullptr) {
   document["sensorMaxGapMs"] = speakerSensorMaxGapMs;
   document["i2sBytesPerSecond"] = i2sBytesPerSecond;
   document["i2sTimeoutsPerSecond"] = i2sTimeoutsPerSecond;
+  document["streamReceivedBytes"] = streamReceivedBytes;
+  document["streamConsumedBytes"] = streamConsumedBytes;
+  document["streamReceivedHash"] = streamReceivedHash;
+  document["streamConsumedHash"] = streamConsumedHash;
   if (error) document["error"] = error;
   if (socketWriteMutex) xSemaphoreTake(socketWriteMutex, portMAX_DELAY);
   if (audioClient.connected() && handshakeAccepted) {
@@ -177,16 +223,16 @@ void sendTelemetry(const char* type, const char* error = nullptr) {
 
 bool initializeI2s() {
   i2s_chan_config_t channelConfig = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-  channelConfig.dma_desc_num = 8;
-  channelConfig.dma_frame_num = 240;
+  channelConfig.dma_desc_num = 12;
+  channelConfig.dma_frame_num = 480;
   channelConfig.auto_clear = true;
   channelConfig.intr_priority = 2;
   if (i2s_new_channel(&channelConfig, &i2sTx, nullptr) != ESP_OK) return false;
 
   i2s_std_config_t standardConfig = {};
-  standardConfig.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(I2S_SAMPLE_RATE);
+  standardConfig.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE);
   standardConfig.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
-    I2S_DATA_BIT_WIDTH_32BIT,
+    I2S_DATA_BIT_WIDTH_16BIT,
     I2S_SLOT_MODE_STEREO
   );
   standardConfig.slot_cfg.slot_mask = I2S_STD_SLOT_BOTH;
@@ -224,6 +270,8 @@ void resetPlayback(const char* telemetryType = nullptr) {
   i2sBytesPerSecond = 0;
   i2sWindowTimeouts = 0;
   i2sTimeoutsPerSecond = 0;
+  adpcmPredictor = 0;
+  adpcmIndex = 0;
   if (i2sTx) {
     if (i2sMutex) xSemaphoreTake(i2sMutex, portMAX_DELAY);
     i2s_channel_disable(i2sTx);
@@ -255,13 +303,19 @@ void processControlFrame() {
     const char* session = document["sessionId"] | "";
     if (!session[0] || strlen(session) >= sizeof(activeSessionId)
         || document["sampleRate"].as<uint32_t>() != SAMPLE_RATE
-        || document["bitsPerSample"].as<uint8_t>() != 16) {
+        || strcmp(document["encoding"] | "", AUDIO_ENCODING) != 0
+        || document["bitsPerSample"].as<uint8_t>() != 4
+        || document["decodedBitsPerSample"].as<uint8_t>() != 16) {
       sendTelemetry("error", "unsupported_start");
       return;
     }
     strlcpy(activeSessionId, session, sizeof(activeSessionId));
     streamVolume = constrain(static_cast<int>(document["volume"] | 50), 0, 100);
     resetPlayback();
+    streamReceivedBytes = 0;
+    streamConsumedBytes = 0;
+    streamReceivedHash = 2166136261UL;
+    streamConsumedHash = 2166136261UL;
     speakerSensorMaxGapMs = 0;
     Serial.printf("[MENTOR_SPEAKER] stream start session=%s volume=%u\n", activeSessionId, streamVolume);
     sendTelemetry("started");
@@ -312,8 +366,7 @@ bool parseFrameHeader() {
   if (receiver.payloadLength > MAX_FRAME_BYTES) return false;
   if (receiver.type == FRAME_PCM) {
     receiver.discardPayload = !activeSessionId[0]
-      || receiver.sequence <= lastSequence
-      || (receiver.payloadLength % sizeof(int16_t)) != 0;
+      || receiver.sequence <= lastSequence;
   } else if (receiver.payloadLength >= sizeof(receiver.controlPayload)) {
     return false;
   }
@@ -321,8 +374,11 @@ bool parseFrameHeader() {
 }
 
 void receiveFrames() {
-  uint8_t temporary[1024];
-  while (audioClient.connected() && audioClient.available() > 0) {
+  uint8_t temporary[512];
+  uint8_t decodedPcm[2048];
+  size_t processedBytes = 0;
+  while (audioClient.connected() && audioClient.available() > 0
+         && processedBytes < RECEIVE_BUDGET_BYTES) {
     if (receiver.headerBytes < FRAME_HEADER_BYTES) {
       const size_t wanted = FRAME_HEADER_BYTES - receiver.headerBytes;
       const size_t received = audioClient.read(
@@ -331,6 +387,7 @@ void receiveFrames() {
       );
       if (received == 0) break;
       receiver.headerBytes += received;
+      processedBytes += received;
       if (receiver.headerBytes < FRAME_HEADER_BYTES) break;
       if (!parseFrameHeader()) {
         sendTelemetry("error", "invalid_frame_header");
@@ -351,13 +408,25 @@ void receiveFrames() {
       remaining,
       std::min<size_t>(sizeof(temporary), audioClient.available())
     );
-    if (receiver.type == FRAME_PCM && !receiver.discardPayload) readable = std::min(readable, ringFree());
+    if (receiver.type == FRAME_PCM && !receiver.discardPayload) {
+      readable = std::min(readable, ringFree() / (2 * sizeof(int16_t)));
+    }
     if (readable == 0) break;
     const size_t received = audioClient.read(temporary, readable);
     if (received == 0) break;
+    processedBytes += received;
     if (receiver.type == FRAME_PCM) {
       if (!receiver.discardPayload) {
-        ringWrite(temporary, received);
+        for (size_t index = 0; index < received; ++index) {
+          const int16_t first = decodeImaAdpcmNibble(temporary[index] & 0x0f);
+          const int16_t second = decodeImaAdpcmNibble(temporary[index] >> 4);
+          memcpy(decodedPcm + index * 4, &first, sizeof(first));
+          memcpy(decodedPcm + index * 4 + sizeof(first), &second, sizeof(second));
+        }
+        const size_t decodedBytes = received * 2 * sizeof(int16_t);
+        const size_t written = ringWrite(decodedPcm, decodedBytes);
+        streamReceivedHash = updateFnv1a(streamReceivedHash, decodedPcm, written);
+        streamReceivedBytes += written;
         lastPcmMs = millis();
       }
     } else {
@@ -397,7 +466,7 @@ void servicePlayback() {
   if (ringCount() > 0) {
     starvationStartedMs = 0;
     uint8_t monoBytes[512];
-    int32_t stereoSamples[1024];
+    int16_t stereoSamples[512];
     uint32_t generation = 0;
     const size_t monoLength = ringPeek(monoBytes, sizeof(monoBytes), generation)
       & ~static_cast<size_t>(1);
@@ -406,21 +475,17 @@ void servicePlayback() {
       int16_t sample;
       memcpy(&sample, monoBytes + index * 2, sizeof(sample));
       const int32_t scaled = (static_cast<int32_t>(sample) * streamVolume) / 100;
-      const int32_t output = static_cast<int32_t>(
-        static_cast<int64_t>(constrain(scaled, -32768L, 32767L)) * 65536LL
-      );
-      const size_t outputIndex = index * 4;
+      const int16_t output = static_cast<int16_t>(constrain(scaled, -32768L, 32767L));
+      const size_t outputIndex = index * 2;
       stereoSamples[outputIndex] = output;
       stereoSamples[outputIndex + 1] = output;
-      stereoSamples[outputIndex + 2] = output;
-      stereoSamples[outputIndex + 3] = output;
     }
     size_t bytesWritten = 0;
     if (i2sMutex) xSemaphoreTake(i2sMutex, portMAX_DELAY);
     const esp_err_t result = i2s_channel_write(
       i2sTx,
       stereoSamples,
-      sampleCount * 4 * sizeof(int32_t),
+      sampleCount * 2 * sizeof(int16_t),
       &bytesWritten,
       pdMS_TO_TICKS(I2S_WRITE_TIMEOUT_MS)
     );
@@ -429,7 +494,10 @@ void servicePlayback() {
     // Those bytes have already reached DMA and must not be replayed.
     if (bytesWritten > 0) {
       i2sWindowBytes += bytesWritten;
-      ringDiscard((bytesWritten / 8) & ~static_cast<size_t>(1), generation);
+      const size_t consumedBytes = (bytesWritten / 2) & ~static_cast<size_t>(1);
+      streamConsumedHash = updateFnv1a(streamConsumedHash, monoBytes, consumedBytes);
+      streamConsumedBytes += consumedBytes;
+      ringDiscard(consumedBytes, generation);
     }
     if (result == ESP_ERR_TIMEOUT) i2sWindowTimeouts++;
     if (result != ESP_OK && result != ESP_ERR_TIMEOUT) {
@@ -443,7 +511,13 @@ void servicePlayback() {
     prebuffering = true;
     streamEnding = false;
     sendTelemetry("ended");
-    Serial.println("[MENTOR_SPEAKER] stream ended");
+    Serial.printf(
+      "[MENTOR_SPEAKER] stream ended received=%lu/%08lx consumed=%lu/%08lx\n",
+      static_cast<unsigned long>(streamReceivedBytes),
+      static_cast<unsigned long>(streamReceivedHash),
+      static_cast<unsigned long>(streamConsumedBytes),
+      static_cast<unsigned long>(streamConsumedHash)
+    );
     activeSessionId[0] = '\0';
   } else if (!streamEnding && speakerPlaying && bufferedBytes == 0) {
     if (starvationStartedMs == 0) {
@@ -478,9 +552,10 @@ void sendHello() {
   document["boardId"] = speakerConfig.boardId;
   document["token"] = speakerConfig.token;
   JsonObject capabilities = document.createNestedObject("capabilities");
-  capabilities["encoding"] = "pcm_s16le";
+  capabilities["encoding"] = AUDIO_ENCODING;
   capabilities["sampleRate"] = SAMPLE_RATE;
   capabilities["channels"] = 1;
+  capabilities["decodedBitsPerSample"] = 16;
   capabilities["bufferBytes"] = RING_BYTES;
   if (socketWriteMutex) xSemaphoreTake(socketWriteMutex, portMAX_DELAY);
   serializeJson(document, audioClient);
@@ -622,7 +697,7 @@ bool beginMentorSpeaker(const MentorSpeakerConfig& config) {
     "mentorPlayback",
     12288,
     nullptr,
-    3,
+    4,
     &playbackTaskHandle,
     0
   );

@@ -23,6 +23,24 @@ export const mentorApi = {
   getAudioDevices() {
     return request('/audio/devices');
   },
+  getPhysicalBoard() {
+    return request('/physical-board');
+  },
+  attachPhysicalBoard(id, serverInstanceId, sessionGeneration) {
+    return request(`/conversations/${id}/physical-board`, {
+      method: 'POST',
+      body: JSON.stringify({ serverInstanceId, sessionGeneration })
+    });
+  },
+  setPhysicalOrientation(id, orientation, expectedRevision) {
+    return request(`/conversations/${id}/physical-board`, {
+      method: 'PATCH',
+      body: JSON.stringify({ orientation, expectedRevision })
+    });
+  },
+  detachPhysicalBoard(id) {
+    return request(`/conversations/${id}/physical-board`, { method: 'DELETE' });
+  },
   listConversations(query = '') {
     return request(`/conversations?query=${encodeURIComponent(query)}`);
   },

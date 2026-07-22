@@ -33,7 +33,10 @@ const LIVE_SYSTEM_INSTRUCTION = [
   'Do not leave an assigned mentor turn at analysis alone.',
   'Use Stockfish analysis tools before making objective claims about evaluations, best moves, tactics, or move quality.',
   'Never claim that a tool succeeded until its function response confirms success.',
-  'These tools affect only the conversation workspace. Never imply that they control the physical chessboard.',
+  'The workspace may be a virtual board or a read-only mirror of the physical chessboard.',
+  'When it is physical, you may read, analyze, orient, and annotate the app view, but you must never claim to move, reset, or control physical pieces.',
+  'In the current physical mode the learner controls White and the physical-board robot controls Black. Never claim that you personally played either physical side.',
+  'Messages beginning with [PHYSICAL_BOARD_GUIDANCE] are urgent internal safety instructions. Speak the required recovery instruction exactly and do not answer an earlier learner request in that turn.',
   'Messages beginning with [BOARD_CONTEXT_UPDATE] are silent internal state updates. Absorb them without replying unless the user is already discussing that board change.'
 ].join(' ');
 
@@ -90,6 +93,8 @@ function mergeTranscript(current, incoming) {
 function boardContextFromState(state) {
   const recentMoves = (state?.history || []).slice(-12).map((move) => move.san).join(' ');
   return [
+    `Workspace source: ${state?.source || 'virtual'}`,
+    `Workspace source key: ${state?.sourceKey || 'unknown'}`,
     `FEN: ${state?.fen || 'unknown'}`,
     `PGN: ${state?.pgn || '(none)'}`,
     `Turn: ${state?.turnName || 'unknown'}`,
@@ -98,7 +103,16 @@ function boardContextFromState(state) {
     `Orientation: ${state?.orientation || 'white'}`,
     `Revision: ${Number.isInteger(state?.revision) ? state.revision : 'unknown'}`,
     `Highlights: ${JSON.stringify(state?.annotations?.highlights || [])}`,
-    `Arrows: ${JSON.stringify(state?.annotations?.arrows || [])}`
+    `Arrows: ${JSON.stringify(state?.annotations?.arrows || [])}`,
+    ...(state?.physical ? [
+      `Physical human color: ${state.physical.humanColor || 'white'}`,
+      `Physical robot color: ${state.physical.robotColor || 'black'}`,
+      `Physical phase: ${state.physical.phase}`,
+      `Physical status: ${state.physical.statusText}`,
+      `Physical missing squares: ${(state.physical.board?.missingSquares || []).join(', ') || '(none)'}`,
+      `Physical extra squares: ${(state.physical.board?.extraSquares || []).join(', ') || '(none)'}`,
+      `Robot busy: ${state.physical.robotBusy ? 'yes' : 'no'}`
+    ] : [])
   ].join('\n');
 }
 
@@ -149,6 +163,7 @@ class DeterministicMentorLiveSession {
     this.realtimeInputs = [];
     this.toolResponses = [];
     this.pendingToolReply = null;
+    this.responding = false;
   }
 
   sendClientContent(payload) {
@@ -158,6 +173,32 @@ class DeterministicMentorLiveSession {
   sendRealtimeInput(payload) {
     if (this.closed) throw new Error('Deterministic Live session is closed.');
     this.realtimeInputs.push(payload);
+    if (this.responding && payload.audioStreamEnd) return;
+    if (this.responding && payload.text?.startsWith('[PHYSICAL_BOARD_GUIDANCE]')) {
+      this.generation += 1;
+      this.responding = false;
+      this.callbacks.onmessage?.({
+        serverContent: {
+          interrupted: true,
+          outputTranscription: { text: 'Stale output from the interrupted response.' },
+          modelTurn: {
+            parts: [{
+              inlineData: {
+                data: Buffer.alloc(480).toString('base64'),
+                mimeType: 'audio/pcm;rate=24000'
+              }
+            }]
+          },
+          turnComplete: true
+        }
+      });
+      queueMicrotask(() => {
+        if (this.closed) return;
+        this.callbacks.onmessage?.({ serverContent: { turnComplete: true } });
+        this.respond(`I heard your typed question: ${payload.text}`);
+      });
+      return;
+    }
     if (payload.text === 'Run the Live board tool demo.') {
       this.emitToolCall([{
         id: 'live-browser-line',
@@ -210,6 +251,7 @@ class DeterministicMentorLiveSession {
 
   respond(text) {
     const generation = ++this.generation;
+    this.responding = true;
     const midpoint = Math.max(1, Math.floor(text.length / 2));
     const first = text.slice(0, midpoint);
     setTimeout(() => {
@@ -218,6 +260,7 @@ class DeterministicMentorLiveSession {
     }, this.delayMs);
     setTimeout(() => {
       if (this.closed || generation !== this.generation) return;
+      this.responding = false;
       this.callbacks.onmessage?.({
         serverContent: {
           outputTranscription: { text },
@@ -251,6 +294,7 @@ class DeterministicMentorLiveSession {
   interrupt() {
     if (!this.closed) {
       this.generation += 1;
+      this.responding = false;
       this.callbacks.onmessage?.({ serverContent: { interrupted: true, turnComplete: true } });
     }
   }
@@ -258,6 +302,7 @@ class DeterministicMentorLiveSession {
   fail(message = 'Deterministic Gemini Live failure') {
     if (!this.closed) {
       this.generation += 1;
+      this.responding = false;
       this.callbacks.onerror?.(new Error(message));
     }
   }
@@ -265,6 +310,7 @@ class DeterministicMentorLiveSession {
   close() {
     if (this.closed) return;
     this.closed = true;
+    this.responding = false;
     queueMicrotask(() => this.callbacks.onclose?.());
   }
 }
@@ -293,6 +339,7 @@ class MentorLiveService {
     toolService,
     activityService = null,
     speakerService = null,
+    stateProvider = null,
     connector,
     emit = () => {},
     model = DEFAULT_LIVE_MODEL,
@@ -306,6 +353,7 @@ class MentorLiveService {
     this.toolService = toolService;
     this.activityService = activityService;
     this.speakerService = speakerService;
+    this.stateProvider = stateProvider || ((conversationId) => this.chessService.getState(conversationId));
     this.connector = connector;
     this.emit = emit;
     this.model = model;
@@ -405,6 +453,9 @@ class MentorLiveService {
       speaker: null,
       activeToolCalls: new Map(),
       toolQueue: Promise.resolve(),
+      pendingSystemTurns: [],
+      physicalGuidanceLock: false,
+      discardUnsolicitedAfterPhysical: false,
       ready: false,
       closing: false,
       closedEmitted: false
@@ -445,8 +496,8 @@ class MentorLiveService {
           systemInstruction: {
             parts: [{ text: LIVE_SYSTEM_INSTRUCTION }]
           },
-          tools: this.toolService?.declarations()?.length
-            ? [{ functionDeclarations: this.toolService.declarations() }]
+          tools: this.toolService?.declarations(conversationId)?.length
+            ? [{ functionDeclarations: this.toolService.declarations(conversationId) }]
             : undefined
         },
         callbacks: {
@@ -458,7 +509,7 @@ class MentorLiveService {
       });
 
       const history = this.store.contextMessages(conversationId, LIVE_CONTEXT_CHARACTER_LIMIT);
-      const chessState = this.chessService.getState(conversationId);
+      const chessState = this.stateProvider(conversationId);
       record.providerSession.sendClientContent({
         turns: initialHistoryTurns(history, chessState),
         turnComplete: false
@@ -477,6 +528,7 @@ class MentorLiveService {
   sendAudio(socket, payload = {}) {
     const record = this.assertRecord(socket, payload);
     if (!record.ready || record.closing) return false;
+    if (record.physicalGuidanceLock) return false;
     if (typeof payload.data !== 'string' || !payload.data || payload.data.length > 262144) {
       throw liveError('Live audio data is required.', 'mentor_live_invalid_audio');
     }
@@ -489,12 +541,20 @@ class MentorLiveService {
   sendAudioEnd(socket, payload = {}) {
     const record = this.assertRecord(socket, payload);
     if (!record.ready || record.closing) return false;
+    if (record.physicalGuidanceLock) return false;
     record.providerSession.sendRealtimeInput({ audioStreamEnd: true });
     return true;
   }
 
   sendText(socket, payload = {}) {
     const record = this.assertRecord(socket, payload);
+    if (record.physicalGuidanceLock) {
+      throw liveError(
+        'Wait for the urgent physical-board guidance to finish.',
+        'mentor_live_physical_guidance_busy',
+        409
+      );
+    }
     if (this.hasActiveTools(record)) {
       throw liveError(
         'Wait for the current Live mentor tool to finish, or stop the Live session.',
@@ -508,6 +568,8 @@ class MentorLiveService {
     if (!validateMessageText(payload.text)) {
       throw liveError('Message text must contain 1-8000 characters.', 'mentor_live_invalid_text');
     }
+    record.discardUnsolicitedAfterPhysical = false;
+    record.suppressAudioUntilTurnComplete = false;
     this.activityService?.prepareConversationTurn(record.conversationId, payload.requestId);
     const existing = this.store.getRequestMessages(record.conversationId, payload.requestId);
     if (existing.length) {
@@ -561,6 +623,7 @@ class MentorLiveService {
       source: values.source,
       userText: values.userText || '',
       assistantText: values.assistantText || '',
+      expectedAssistantText: values.expectedAssistantText || '',
       pair: values.pair || null,
       toolBatchCount: 0,
       toolCallCount: 0,
@@ -575,6 +638,9 @@ class MentorLiveService {
       cancelled: false,
       placeholderTitle: null,
       shellEmitted: values.shellEmitted === true,
+      receivedProviderOutput: false,
+      emptyCompletionsToIgnore: Number(values.emptyCompletionsToIgnore || 0),
+      emptyCompletionsIgnored: 0,
       record,
       resolveCompletion: null,
       completion: null
@@ -623,9 +689,10 @@ class MentorLiveService {
       turn.pair = this.store.createMessagePair(record.conversationId, {
         requestId: turn.requestId,
         text: userText,
-        kind: turn.source === 'activity' ? 'activity' : 'voice',
+        kind: turn.source === 'activity' ? 'activity' : turn.source === 'physical' ? 'physical' : 'voice',
         assistantContent: turn.assistantText,
-        assistantStatus: 'streaming'
+        assistantStatus: 'streaming',
+        suppressTitle: turn.source === 'physical'
       });
       if (!turn.userText) turn.placeholderTitle = titleFromMessage(userText);
     } else {
@@ -680,7 +747,9 @@ class MentorLiveService {
   }
 
   handleInputTranscript(record, text) {
-    if (record.closing) return;
+    if (record.closing || record.physicalGuidanceLock) return;
+    record.discardUnsolicitedAfterPhysical = false;
+    record.suppressAudioUntilTurnComplete = false;
     if (record.turn && !record.turn.toolBusy
       && !(record.turn.source === 'audio' && record.turn.hadTools)
       && (record.turn.source === 'text' || record.turn.source === 'activity'
@@ -704,8 +773,10 @@ class MentorLiveService {
   handleOutputTranscript(record, text) {
     if (record.closing) return;
     const turn = this.currentTurn(record, record.contextPending ? 'context' : 'audio');
+    turn.receivedProviderOutput = true;
     turn.hadTools = true;
-    turn.assistantText = mergeTranscript(turn.assistantText, text);
+    turn.assistantText = turn.expectedAssistantText
+      || mergeTranscript(turn.assistantText, text);
     const message = this.updateTurnAssistantMessage(turn);
     const status = turn.toolBusy ? 'tool_running' : 'speaking';
     this.emit(record.conversationId, 'mentor-live-assistant-transcript', {
@@ -896,6 +967,22 @@ class MentorLiveService {
       this.handleToolCancellation(record, message.toolCallCancellation);
     }
     const content = message?.serverContent;
+    if (record.discardUnsolicitedAfterPhysical && !record.turn) {
+      if (content?.inputTranscription?.text) {
+        record.discardUnsolicitedAfterPhysical = false;
+        record.suppressAudioUntilTurnComplete = false;
+      } else if (content?.outputTranscription?.text
+          || audioParts(message).length
+          || message?.toolCall?.functionCalls?.length
+          || content?.turnComplete) {
+        if (content?.turnComplete) {
+          record.discardUnsolicitedAfterPhysical = false;
+          record.suppressAudioUntilTurnComplete = false;
+          this.emitStatus(record, 'listening');
+        }
+        return;
+      }
+    }
     const interrupted = content?.interrupted === true;
     if (interrupted) {
       const interruptedTurn = record.turn;
@@ -914,7 +1001,11 @@ class MentorLiveService {
         || interruptedTurn.pair)) {
         this.finalizeTurn(record, 'cancelled');
       }
-      this.emitStatus(record, 'listening');
+      if (!record.turn) this.emitStatus(record, 'listening');
+      if (content?.inputTranscription?.text) {
+        this.handleInputTranscript(record, content.inputTranscription.text);
+      }
+      return;
     }
     if (content?.inputTranscription?.text) {
       this.handleInputTranscript(record, content.inputTranscription.text);
@@ -925,6 +1016,7 @@ class MentorLiveService {
     for (const part of audioParts(message)) {
       if (part.text && !content?.outputTranscription?.text) this.handleOutputTranscript(record, part.text);
       if (part.inlineData?.data) {
+        this.currentTurn(record, record.contextPending ? 'context' : 'audio').receivedProviderOutput = true;
         const mimeType = part.inlineData.mimeType || 'audio/pcm;rate=24000';
         const match = /rate=(\d+)/i.exec(mimeType);
         const sampleRate = match ? Number(match[1]) : AUDIO_OUTPUT_SAMPLE_RATE;
@@ -964,7 +1056,12 @@ class MentorLiveService {
     if (content?.turnComplete && record.turn && !interrupted && !hasToolCalls) {
       this.speakerService?.endSpeech(record.conversationId, record.sessionId);
       record.suppressAudioUntilTurnComplete = false;
-      if (record.turn.toolBusy) {
+      if (record.turn.source === 'physical'
+          && !record.turn.receivedProviderOutput
+          && record.turn.emptyCompletionsIgnored < record.turn.emptyCompletionsToIgnore) {
+        record.turn.emptyCompletionsIgnored += 1;
+        this.emitStatus(record, 'thinking');
+      } else if (record.turn.toolBusy) {
         record.turn.pendingFinalStatus = 'complete';
       } else {
         this.finalizeTurn(record, 'complete');
@@ -986,10 +1083,15 @@ class MentorLiveService {
     }
     record.turn = null;
     record.contextPending = false;
+    if (turn.source === 'physical') {
+      record.physicalGuidanceLock = false;
+      record.discardUnsolicitedAfterPhysical = true;
+      record.suppressAudioUntilTurnComplete = true;
+    }
 
     if (turn.source === 'context') {
       turn.resolveCompletion?.(null);
-      this.flushBoardContext(record);
+      if (!this.flushPendingSystemTurns(record)) this.flushBoardContext(record);
       return null;
     }
 
@@ -1000,9 +1102,10 @@ class MentorLiveService {
       pair = this.store.createMessagePair(record.conversationId, {
         requestId: turn.requestId,
         text: userText,
-        kind: 'voice',
+        kind: turn.source === 'physical' ? 'physical' : 'voice',
         assistantContent: turn.assistantText,
-        assistantStatus
+        assistantStatus,
+        suppressTitle: turn.source === 'physical'
       });
     } else {
       this.store.replaceMessageContent(pair.userMessage.id, userText);
@@ -1032,8 +1135,110 @@ class MentorLiveService {
       conversation
     });
     turn.resolveCompletion?.({ status: assistantStatus, ...pair });
-    this.flushBoardContext(record);
+    if (!this.flushPendingSystemTurns(record)) this.flushBoardContext(record);
     return pair;
+  }
+
+  startPhysicalTurn(record, request) {
+    const existing = this.store.getRequestMessages(record.conversationId, request.requestId);
+    if (existing.length) return { duplicate: true, sessionId: record.sessionId };
+    const pair = this.store.createMessagePair(record.conversationId, {
+      requestId: request.requestId,
+      text: request.displayText,
+      kind: 'physical',
+      suppressTitle: true
+    });
+    const turn = this.createTurn(record, {
+      turnId: this.createId(),
+      requestId: request.requestId,
+      source: 'physical',
+      userText: request.displayText,
+      assistantText: request.expectedAssistantText || '',
+      expectedAssistantText: request.expectedAssistantText,
+      pair,
+      emptyCompletionsToIgnore: request.urgent ? 1 : 0
+    });
+    record.contextPending = false;
+    if (request.replaceOutput) {
+      this.speakerService?.clearOutput(
+        record.conversationId,
+        record.sessionId,
+        'physical_guidance_replaced'
+      );
+    }
+    record.suppressAudioUntilTurnComplete = false;
+    record.physicalGuidanceLock = request.urgent === true;
+    record.discardUnsolicitedAfterPhysical = false;
+    record.turn = turn;
+    this.emit(record.conversationId, 'mentor-live-user-transcript', {
+      ...this.statusPayload(record, 'listening'),
+      turnId: turn.turnId,
+      text: request.displayText,
+      isFinal: true,
+      message: pair.userMessage
+    });
+    this.emit(record.conversationId, 'mentor-live-assistant-transcript', {
+      ...this.statusPayload(record, 'thinking'),
+      turnId: turn.turnId,
+      text: turn.assistantText,
+      isFinal: false,
+      message: pair.assistantMessage
+    });
+    turn.shellEmitted = true;
+    if (!request.promptAlreadySent) {
+      record.providerSession.sendRealtimeInput({ text: request.prompt });
+    }
+    this.emitStatus(record, 'thinking');
+    return { duplicate: false, ...pair, completion: turn.completion, sessionId: record.sessionId };
+  }
+
+  flushPendingSystemTurns(record) {
+    if (record.turn || record.closing || !record.ready || !record.pendingSystemTurns.length) return false;
+    this.startPhysicalTurn(record, record.pendingSystemTurns.shift());
+    return true;
+  }
+
+  requestPhysicalTurn(conversationId, request) {
+    const record = this.byConversation.get(conversationId);
+    if (!record || record.closing || !record.ready) return null;
+    if (this.store.getRequestMessages(conversationId, request.requestId).length) {
+      return { duplicate: true, sessionId: record.sessionId };
+    }
+    if (record.pendingSystemTurns.some((item) => item.requestId === request.requestId)) {
+      return { duplicate: true, queued: true, sessionId: record.sessionId };
+    }
+    if (request.urgent) {
+      this.speakerService?.clearOutput(
+        record.conversationId,
+        record.sessionId,
+        'physical_guidance_interrupt'
+      );
+    }
+    if (request.urgent && (record.turn || this.hasActiveTools(record))) {
+      const queued = record.pendingSystemTurns
+        .filter((item) => item.requestId !== request.requestId);
+      record.pendingSystemTurns = [{ ...request, promptAlreadySent: true }, ...queued];
+      record.physicalGuidanceLock = true;
+      record.suppressAudioUntilTurnComplete = true;
+      this.abortToolCalls(record);
+      if (record.turn) {
+        record.turn.cancelled = true;
+      }
+      record.socket.emit('mentor-live-interrupted', {
+        ...this.statusPayload(record, 'interrupted'),
+        physicalGuidance: true
+      });
+      record.providerSession.sendRealtimeInput({ audioStreamEnd: true });
+      record.providerSession.sendRealtimeInput({ text: request.prompt });
+      return { queued: true, interrupting: true, sessionId: record.sessionId };
+    }
+    if (record.turn || this.hasActiveTools(record)) {
+      if (!record.pendingSystemTurns.some((item) => item.requestId === request.requestId)) {
+        record.pendingSystemTurns.push(request);
+      }
+      return { queued: true, sessionId: record.sessionId };
+    }
+    return this.startPhysicalTurn(record, request);
   }
 
   requestActivityTurn(conversationId, { requestId, displayText, prompt }) {
@@ -1087,6 +1292,10 @@ class MentorLiveService {
     return true;
   }
 
+  notifyPhysicalBoardUpdated(conversationId, state) {
+    return this.notifyBoardUpdated(conversationId, state, { actionId: null });
+  }
+
   flushBoardContext(record) {
     if (!record.pendingBoardState || record.turn || record.closing || !record.ready) return false;
     const { state } = record.pendingBoardState;
@@ -1102,7 +1311,10 @@ class MentorLiveService {
     if (this.bySocket.get(record.socket.id) !== record) return;
     const message = providerErrorMessage(error);
     record.ready = false;
+    record.physicalGuidanceLock = false;
+    record.discardUnsolicitedAfterPhysical = false;
     record.pendingBoardState = null;
+    record.pendingSystemTurns = [];
     this.abortToolCalls(record);
     if (record.turn) this.finalizeTurn(record, 'failed');
     record.socket.emit('mentor-live-error', {
@@ -1133,8 +1345,11 @@ class MentorLiveService {
       wasClean: event?.wasClean ?? null
     }));
     record.ready = false;
+    record.physicalGuidanceLock = false;
+    record.discardUnsolicitedAfterPhysical = false;
     this.speakerService?.releaseSession(record.conversationId, record.sessionId, 'provider_closed');
     record.pendingBoardState = null;
+    record.pendingSystemTurns = [];
     this.abortToolCalls(record);
     if (record.turn) this.finalizeTurn(record, unexpected ? 'failed' : 'cancelled');
     this.release(record);
@@ -1165,12 +1380,15 @@ class MentorLiveService {
   async closeRecord(record, reason) {
     if (record.closing) return;
     record.closing = true;
+    record.physicalGuidanceLock = false;
+    record.discardUnsolicitedAfterPhysical = false;
     this.logger.log?.('[MENTOR_LIVE_CLOSING]', JSON.stringify({
       conversationId: record.conversationId,
       sessionId: record.sessionId,
       reason
     }));
     this.abortToolCalls(record);
+    record.pendingSystemTurns = [];
     if (record.turn) this.finalizeTurn(record, 'cancelled');
     await record.toolQueue.catch(() => {});
     try {

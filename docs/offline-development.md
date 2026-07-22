@@ -1258,7 +1258,7 @@ and H row orientations.
 The production firmware now includes a targeted Gemini Live speaker client.
 This supersedes the earlier `1,042,543` flash / `47,128` RAM baseline recorded
 throughout the historical offline milestones. The current USB-only production
-baseline is exactly `1,078,743` bytes flash and `48,440` bytes static RAM with
+baseline is exactly `1,079,947` bytes flash and `48,456` bytes static RAM with
 the 16 MB `app3M_fat9M_16MB` partition scheme.
 
 All verification scripts use `CDCOnBoot=default`. This matches the board's
@@ -1266,9 +1266,9 @@ CH343 UART upload/monitor port on COM11; enabling USB CDC-on-boot redirects
 `Serial` away from that cable and makes guarded telemetry appear blank.
 
 The speaker task is isolated from the offline engine and motion ownership
-state. It runs on core 0, receives authenticated 24 kHz mono PCM over TCP,
-duplicates samples into both I2S channels, and repeats samples for stable
-48 kHz MAX98357A output. A 2 MiB PSRAM ring holds approximately 43.7 seconds
+state. It runs on core 0, receives authenticated stateful 4-bit IMA ADPCM at
+24 kHz over TCP, decodes it to signed PCM16LE, and duplicates samples into both
+native 24 kHz 16-bit I2S channels. A 2 MiB PSRAM ring holds approximately 43.7 seconds
 of source PCM and playback begins after approximately 1.8 seconds is available.
 Existing offline diagnostic builds
 exclude the speaker task, while their compile verifiers compare their embedded
@@ -1310,9 +1310,9 @@ changing the physical device to `degraded`; actual device failures retain the
 normal degraded or browser-fallback behavior.
 
 Hardware acceptance used the ignored local network/secrets configuration. The
-board authenticated as `main-board` with a 2 MiB buffer, no audible starvation
-or I2S timeouts, 2-4 ms sensor gaps, and approximately 6.18 MB free PSRAM. Clear 1-10,
-1-20, and conversational Gemini Live playback passed. The earlier full-response
+board authenticated as `main-board` with a 2 MiB buffer, zero underruns, a 2 ms
+maximum sensor gap, and approximately 6.18 MB free PSRAM. Clear 1-10, 1-20, and
+captured real Gemini Live playback passed. The earlier full-response
 approach was retired after persisted `cancelled` replies showed that active
 microphone input could interrupt Gemini during the long wait before playback.
 Final telemetry review found that a completed final TCP control frame was not
@@ -1321,6 +1321,15 @@ as their payload completes, and cross-task stream-ending/prebuffer flags are
 volatile. A guarded 4.52-second hardware tone test now emits clean `ended`
 telemetry with zero I2S timeouts and no false underrun, so the UI no longer
 depends on the idle guard to clear natural completion.
+
+Long hotspot tests later showed that raw PCM at approximately 48 KB/s, and then
+G.711 mu-law at approximately 24 KB/s, left too little margin above the ESP32
+Arduino lwIP TCP receive-window throughput. Tone playback was clean and decoded
+receive/consume hashes matched, isolating the problem to sustained delivery.
+The production transport now uses continuous IMA ADPCM at approximately 12 KB/s
+while browser audio remains untouched. A 14.08-second captured Gemini response
+finished with all `675,844` decoded bytes received and consumed, matching FNV-1a
+hashes, nearly ten seconds of peak buffer margin, and audibly smooth output.
 
 The production Wi-Fi retry no longer calls `WiFi.disconnect()` every three
 seconds. That loop could cancel association on slower access points with reason

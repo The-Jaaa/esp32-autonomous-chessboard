@@ -7,6 +7,7 @@ const { MentorEngineService } = require('./engine-service');
 const { MentorAnalysisService } = require('./analysis-service');
 const { MentorActivityService } = require('./activity-service');
 const { MentorSpeakerService } = require('./speaker-service');
+const { MentorPhysicalObserverService } = require('./physical-observer-service');
 const {
   DEFAULT_LIVE_MODEL,
   DEFAULT_LIVE_VOICE,
@@ -51,6 +52,13 @@ function createMentorFeature({
     io.to(roomName(conversationId)).emit(event, payload);
   };
 
+  const physicalObserver = new MentorPhysicalObserverService({
+    store,
+    chessService,
+    analysisService: mentorAnalysis,
+    emit
+  });
+
   let liveService;
   let activityService;
   const emitBoardUpdate = (conversationId, result) => {
@@ -68,6 +76,7 @@ function createMentorFeature({
     store,
     chessService,
     analysisService: mentorAnalysis,
+    physicalObserver,
     emit,
     emitBoardUpdate
   });
@@ -86,7 +95,9 @@ function createMentorFeature({
     provider: textProvider,
     toolService,
     activityService,
-    contextProvider: (conversationId) => chessService.promptContext(conversationId),
+    contextProvider: (conversationId) => physicalObserver.isAttached(conversationId)
+      ? physicalObserver.promptContext(conversationId)
+      : chessService.promptContext(conversationId),
     emit
   });
   const connector = liveConnector || (process.env.MENTOR_FAKE_LIVE === '1'
@@ -99,10 +110,18 @@ function createMentorFeature({
     toolService,
     activityService,
     speakerService,
+    stateProvider: (conversationId) => physicalObserver.isAttached(conversationId)
+      ? physicalObserver.getState(conversationId)
+      : chessService.getState(conversationId),
     connector,
     emit,
     model: liveModel,
     voiceName: liveVoice
+  });
+  physicalObserver.setDependencies({
+    textService: service,
+    liveService,
+    activityService
   });
   activityService.setRunners({
     isLiveActive: (conversationId) => liveService.isConversationActive(conversationId),
@@ -119,6 +138,7 @@ function createMentorFeature({
     activityService,
     liveService,
     speakerService,
+    physicalObserver,
     emitBoardUpdate
   }));
 
@@ -156,6 +176,7 @@ function createMentorFeature({
     analysisService: mentorAnalysis,
     engineService: mentorEngine,
     liveService,
+    physicalObserver,
     liveConnector: connector,
     provider: textProvider,
     async close() {

@@ -212,6 +212,82 @@ async function socketRegressions() {
   assert.strictEqual(audioMessages[0].content, 'Can you explain this position?');
   assert.strictEqual(audioMessages[1].content, 'Yes. Let us examine the position together.');
 
+  const queuedTypedFinal = waitForEvent(client, 'mentor-live-assistant-transcript', (payload) =>
+    payload.isFinal && payload.message?.requestId === 'live-before-check');
+  await emitWithAck(client, 'mentor-live-text-input', {
+    conversationId: first.id,
+    sessionId: started.sessionId,
+    requestId: 'live-before-check',
+    text: 'Finish this explanation before announcing check.'
+  });
+  const queuedPhysicalFinal = waitForEvent(client, 'mentor-live-assistant-transcript', (payload) =>
+    payload.isFinal && payload.message?.requestId === 'physical:check');
+  const queuedPhysical = feature.liveService.requestPhysicalTurn(first.id, {
+    requestId: 'physical:check',
+    displayText: 'Black is in check.',
+    prompt: '[PHYSICAL_BOARD_GUIDANCE]\nBlack is in check.',
+    urgent: false
+  });
+  assert.strictEqual(queuedPhysical.queued, true);
+  await queuedTypedFinal;
+  await queuedPhysicalFinal;
+  assert.ok(feature.store.getRequestMessages(first.id, 'physical:check').every((message) => message.kind === 'physical'));
+
+  const urgentPartial = waitForEvent(client, 'mentor-live-assistant-transcript', (payload) =>
+    !payload.isFinal && payload.message?.requestId === 'live-before-warning' && payload.text);
+  await emitWithAck(client, 'mentor-live-text-input', {
+    conversationId: first.id,
+    sessionId: started.sessionId,
+    requestId: 'live-before-warning',
+    text: 'This response should be interrupted by a board warning.'
+  });
+  await urgentPartial;
+  const urgentPhysicalFinal = waitForEvent(client, 'mentor-live-assistant-transcript', (payload) =>
+    payload.isFinal && payload.message?.requestId === 'physical:restore-e2');
+  const urgentPhysical = feature.liveService.requestPhysicalTurn(first.id, {
+    requestId: 'physical:restore-e2',
+    displayText: 'Restore or center e2.',
+    prompt: '[PHYSICAL_BOARD_GUIDANCE]\nPlease restore or center e2.',
+    urgent: true,
+    expectedAssistantText: 'Please restore or center e2.'
+  });
+  assert.strictEqual(urgentPhysical.queued, true);
+  assert.strictEqual(urgentPhysical.interrupting, true);
+  const guidanceBusy = await emitWithAck(client, 'mentor-live-text-input', {
+    conversationId: first.id,
+    sessionId: started.sessionId,
+    requestId: 'live-during-physical-warning',
+    text: 'This must not interrupt the recovery instruction.'
+  });
+  assert.strictEqual(guidanceBusy.success, false);
+  assert.strictEqual(guidanceBusy.code, 'mentor_live_physical_guidance_busy');
+  await urgentPhysicalFinal;
+  assert.strictEqual(feature.store.getRequestMessages(first.id, 'live-before-warning')[1].status, 'cancelled');
+  assert.strictEqual(feature.store.getRequestMessages(first.id, 'physical:restore-e2')[1].status, 'complete');
+  assert.strictEqual(
+    feature.store.getRequestMessages(first.id, 'physical:restore-e2')[1].content,
+    'Please restore or center e2.'
+  );
+  assert.strictEqual(connector.sessions[0].realtimeInputs.filter((input) =>
+    input.text?.startsWith('[PHYSICAL_BOARD_GUIDANCE]\nPlease restore or center e2.')).length, 1);
+  const messageCountBeforeUnsolicitedTail = feature.store.listMessages(first.id).length;
+  connector.sessions[0].callbacks.onmessage?.({
+    serverContent: {
+      outputTranscription: { text: 'Just as I was saying, here is the interrupted explanation.' },
+      modelTurn: {
+        parts: [{
+          inlineData: {
+            data: Buffer.alloc(480).toString('base64'),
+            mimeType: 'audio/pcm;rate=24000'
+          }
+        }]
+      },
+      turnComplete: true
+    }
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.strictEqual(feature.store.listMessages(first.id).length, messageCountBeforeUnsolicitedTail);
+
   const boardResponse = await fetch(`${baseUrl}/api/mentor/conversations/${first.id}/moves`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

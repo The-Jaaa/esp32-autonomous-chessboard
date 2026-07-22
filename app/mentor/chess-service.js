@@ -161,6 +161,8 @@ class MentorChessService {
     const history = game.history({ verbose: true }).map(serializeMove);
     const legalMoves = game.moves({ verbose: true }).map(moveToUci).sort();
     return {
+      source: 'virtual',
+      sourceKey: `virtual:${conversationId}`,
       conversationId,
       initialFen: session.initialFen,
       fen: game.fen(),

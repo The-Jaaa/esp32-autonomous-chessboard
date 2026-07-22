@@ -219,10 +219,17 @@ export function useMentorLive({ socket, conversationId, onMessage, onError, onCo
   const stop = useCallback((notifyServer = true) => {
     startAttemptRef.current += 1;
     const sessionId = sessionRef.current;
-    if (notifyServer && socket && sessionId) {
-      socket.emit('mentor-live-stop', { conversationId, sessionId });
-    }
+    const completion = notifyServer && socket && sessionId
+      ? new Promise((resolve) => {
+          const timeout = window.setTimeout(resolve, 1500);
+          socket.emit('mentor-live-stop', { conversationId, sessionId }, (result) => {
+            window.clearTimeout(timeout);
+            resolve(result);
+          });
+        })
+      : Promise.resolve({ success: true });
     cleanupLocal('inactive');
+    return completion;
   }, [cleanupLocal, conversationId, socket]);
 
   const start = useCallback(async () => {

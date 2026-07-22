@@ -881,6 +881,8 @@ const PHYSICAL_SERVER_INSTANCE_ID = randomUUID();
 const physicalSession = {
   active: false,
   sessionGeneration: 0,
+  stateRevision: 0,
+  mentorStateSignature: '',
   phase: 'idle',
   setupMode: 'full',
   game: new Chess(),
@@ -1329,7 +1331,13 @@ function serializePhysicalState() {
   };
 
   return {
+    protocolVersion: PHYSICAL_OWNERSHIP_PROTOCOL_VERSION,
+    serverInstanceId: PHYSICAL_SERVER_INSTANCE_ID,
+    sessionGeneration: physicalSession.sessionGeneration,
+    stateRevision: physicalSession.stateRevision,
     active: physicalSession.active,
+    humanColor: 'white',
+    robotColor: 'black',
     phase: physicalSession.phase,
     setupMode: physicalSession.setupMode,
     statusText: physicalSession.statusText,
@@ -1399,11 +1407,53 @@ function serializePhysicalState() {
   };
 }
 
+function physicalMentorStateSignature() {
+  return JSON.stringify({
+    active: physicalSession.active,
+    sessionGeneration: physicalSession.sessionGeneration,
+    phase: physicalSession.phase,
+    setupMode: physicalSession.setupMode,
+    fen: physicalSession.game.fen(),
+    occupied: occupiedIndices(physicalSession.occupancy),
+    selectedSource: physicalSession.selectedSource,
+    pendingCaptureTarget: physicalSession.pendingCaptureTarget,
+    pendingCastleMove: physicalSession.pendingCastleMove,
+    legalTargets: physicalSession.legalTargets,
+    pendingRobotJob: summarizePendingRobotJob(),
+    pendingUndo: physicalSession.pendingUndo ? {
+      id: physicalSession.pendingUndo.id,
+      mode: physicalSession.pendingUndo.mode,
+      remaining: physicalSession.pendingUndo.entries?.length || 0,
+      waitingForHumanRestore: physicalSession.pendingUndo.waitingForHumanRestore || null
+    } : null,
+    pendingRedo: physicalSession.pendingRedo ? {
+      id: physicalSession.pendingRedo.id,
+      mode: physicalSession.pendingRedo.mode,
+      remaining: physicalSession.pendingRedo.entries?.length || 0
+    } : null,
+    moveLog: physicalSession.moveLog.map((entry) => [entry.id, entry.uci, entry.verified]),
+    statusText: physicalSession.statusText,
+    lastError: physicalSession.lastError,
+    syncWarningReason: physicalSession.syncWarningReason,
+    lastMove: physicalSession.lastMove
+  });
+}
+
 function emitPhysicalState(eventName = 'physical-status', extra = {}) {
+  const signature = physicalMentorStateSignature();
+  if (signature !== physicalSession.mentorStateSignature) {
+    physicalSession.mentorStateSignature = signature;
+    physicalSession.stateRevision += 1;
+  }
   const state = { ...serializePhysicalState(), ...extra };
   io.emit(eventName, state);
   if (eventName !== 'physical-status') io.emit('physical-status', state);
+  mentorFeature.physicalObserver.handleSnapshot(state, eventName);
 }
+
+mentorFeature.physicalObserver.setAdapter({
+  getSnapshot: () => serializePhysicalState()
+});
 
 function queuePhysicalCommand(command) {
   const queued = {
@@ -1692,13 +1742,26 @@ function summarizePhysicalMoveLogEntry(entry) {
   return {
     id: entry.id,
     side: entry.side,
+    beforeFen: entry.beforeFen || null,
+    afterFen: entry.afterFen || null,
     move: entry.uci,
+    uci: entry.uci,
     san: entry.san,
+    color: entry.color || null,
+    piece: entry.piece || null,
     from: entry.from,
     to: entry.to,
+    flags: entry.flags || '',
     capturedSquare: entry.capturedSquare || null,
     capturedPiece: entry.capturedPiece || null,
+    promotion: entry.promotion || null,
+    castleRookMove: entry.castleRookMove ? { ...entry.castleRookMove } : null,
+    enPassantCapturedSquare: entry.enPassantCapturedSquare || null,
     robotGraveyardSlot: entry.robotGraveyardSlot?.label || null,
+    robotCapturedPathSquares: Array.isArray(entry.robotCapturedPathSquares)
+      ? [...entry.robotCapturedPathSquares]
+      : [],
+    createdAt: entry.createdAt || null,
     verified: Boolean(entry.verified)
   };
 }
@@ -4767,6 +4830,8 @@ app.post('/api/physical/start', (req, res) => {
   const { level = 1, profile = 'balanced', graveyardSlots = [], setupMode = 'full' } = req.body || {};
 
   physicalSession.sessionGeneration += 1;
+  physicalSession.stateRevision = 0;
+  physicalSession.mentorStateSignature = '';
   physicalSession.active = true;
   physicalSession.phase = 'setup';
   physicalSession.setupMode = setupMode === 'partial' ? 'partial' : 'full';

@@ -6,6 +6,8 @@ const SPEAKER_MAGIC = Buffer.from('CMSP');
 const SPEAKER_HEADER_BYTES = 16;
 const SPEAKER_SAMPLE_RATE = 24000;
 const SPEAKER_BYTES_PER_SECOND = SPEAKER_SAMPLE_RATE * 2;
+const SPEAKER_ENCODING = 'ima_adpcm4';
+const SPEAKER_TRANSPORT_BYTES_PER_SECOND = SPEAKER_SAMPLE_RATE / 2;
 const MAX_SPEAKER_QUEUE_BYTES = SPEAKER_BYTES_PER_SECOND * 42;
 const MAX_BUFFERED_RESPONSE_BYTES = SPEAKER_BYTES_PER_SECOND * 40;
 const SPEAKER_START_BUFFER_MS = 3000;
@@ -19,7 +21,7 @@ const SPEAKER_FEED_AHEAD_BYTES = Math.floor(
   SPEAKER_BYTES_PER_SECOND * SPEAKER_FEED_AHEAD_MS / 1000
 );
 const SPEAKER_PCM_FRAME_BYTES = Math.floor(
-  SPEAKER_BYTES_PER_SECOND * SPEAKER_PCM_FRAME_MS / 1000
+  SPEAKER_TRANSPORT_BYTES_PER_SECOND * SPEAKER_PCM_FRAME_MS / 1000
 );
 const SPEAKER_START_BUFFER_BYTES = Math.floor(
   SPEAKER_BYTES_PER_SECOND * SPEAKER_START_BUFFER_MS / 1000
@@ -27,6 +29,20 @@ const SPEAKER_START_BUFFER_BYTES = Math.floor(
 const MAX_HANDSHAKE_BYTES = 4096;
 const DEFAULT_DEVICE_ID = 'main-board';
 const DEFAULT_VOLUME = 50;
+const IMA_INDEX_TABLE = Object.freeze([
+  -1, -1, -1, -1, 2, 4, 6, 8,
+  -1, -1, -1, -1, 2, 4, 6, 8
+]);
+const IMA_STEP_TABLE = Object.freeze([
+  7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31,
+  34, 37, 41, 45, 50, 55, 60, 66, 73, 80, 88, 97, 107, 118, 130,
+  143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449,
+  494, 544, 598, 658, 724, 796, 876, 963, 1060, 1166, 1282, 1411,
+  1552, 1707, 1878, 2066, 2272, 2499, 2749, 3024, 3327, 3660, 4026,
+  4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630, 9493, 10442,
+  11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623,
+  27086, 29794, 32767
+]);
 
 const FRAME_TYPES = Object.freeze({
   START: 1,
@@ -41,6 +57,89 @@ function speakerError(message, code = 'mentor_speaker_error', statusCode = 400) 
   error.code = code;
   error.statusCode = statusCode;
   return error;
+}
+
+function createImaAdpcmState() {
+  return { predictor: 0, index: 0, pendingNibble: null };
+}
+
+function encodeImaAdpcmNibble(sampleValue, state) {
+  const sample = Math.max(-32768, Math.min(32767, Number(sampleValue) || 0));
+  const step = IMA_STEP_TABLE[state.index];
+  let difference = sample - state.predictor;
+  let code = 0;
+  if (difference < 0) {
+    code = 8;
+    difference = -difference;
+  }
+  let delta = step >> 3;
+  if (difference >= step) {
+    code |= 4;
+    difference -= step;
+    delta += step;
+  }
+  if (difference >= (step >> 1)) {
+    code |= 2;
+    difference -= step >> 1;
+    delta += step >> 1;
+  }
+  if (difference >= (step >> 2)) {
+    code |= 1;
+    delta += step >> 2;
+  }
+  state.predictor += (code & 8) ? -delta : delta;
+  state.predictor = Math.max(-32768, Math.min(32767, state.predictor));
+  state.index = Math.max(0, Math.min(88, state.index + IMA_INDEX_TABLE[code]));
+  return code & 0x0f;
+}
+
+function decodeImaAdpcmNibble(codeValue, state) {
+  const code = Number(codeValue) & 0x0f;
+  const step = IMA_STEP_TABLE[state.index];
+  let delta = step >> 3;
+  if (code & 4) delta += step;
+  if (code & 2) delta += step >> 1;
+  if (code & 1) delta += step >> 2;
+  state.predictor += (code & 8) ? -delta : delta;
+  state.predictor = Math.max(-32768, Math.min(32767, state.predictor));
+  state.index = Math.max(0, Math.min(88, state.index + IMA_INDEX_TABLE[code]));
+  return state.predictor;
+}
+
+function encodePcm16LeToImaAdpcm(pcm, state = createImaAdpcmState()) {
+  const bytes = Buffer.isBuffer(pcm) ? pcm : Buffer.from(pcm || []);
+  if (bytes.length % 2 !== 0) {
+    throw speakerError('PCM16 input must contain complete samples.', 'mentor_speaker_invalid_pcm');
+  }
+  const output = [];
+  for (let offset = 0; offset < bytes.length; offset += 2) {
+    const nibble = encodeImaAdpcmNibble(bytes.readInt16LE(offset), state);
+    if (state.pendingNibble === null) state.pendingNibble = nibble;
+    else {
+      output.push(state.pendingNibble | (nibble << 4));
+      state.pendingNibble = null;
+    }
+  }
+  return Buffer.from(output);
+}
+
+function flushImaAdpcm(state) {
+  if (state.pendingNibble === null) return Buffer.alloc(0);
+  const output = Buffer.from([state.pendingNibble]);
+  state.pendingNibble = null;
+  return output;
+}
+
+function decodeImaAdpcmToPcm16Le(encodedAudio, state = createImaAdpcmState()) {
+  const encoded = Buffer.isBuffer(encodedAudio)
+    ? encodedAudio
+    : Buffer.from(encodedAudio || []);
+  const pcm = Buffer.allocUnsafe(encoded.length * 4);
+  for (let index = 0; index < encoded.length; index += 1) {
+    pcm.writeInt16LE(decodeImaAdpcmNibble(encoded[index] & 0x0f, state), index * 4);
+    pcm.writeInt16LE(decodeImaAdpcmNibble(encoded[index] >> 4, state), index * 4 + 2);
+  }
+  return pcm;
 }
 
 function normalizeOutputMode(value) {
@@ -175,7 +274,7 @@ class MentorSpeakerService extends EventEmitter {
     const boardId = String(message?.boardId || '').trim();
     const suppliedToken = String(message?.token || '');
     const capabilities = message?.capabilities || {};
-    const validCapabilities = capabilities.encoding === 'pcm_s16le'
+    const validCapabilities = capabilities.encoding === SPEAKER_ENCODING
       && Number(capabilities.sampleRate) === SPEAKER_SAMPLE_RATE
       && Number(capabilities.channels) === 1;
     if (message?.type !== 'hello'
@@ -379,6 +478,7 @@ class MentorSpeakerService extends EventEmitter {
       queuedBytes: 0,
       responseQueue: [],
       responseBytes: 0,
+      adpcmState: createImaAdpcmState(),
       collectingResponse: false,
       responseRejected: false,
       bufferedBytes: 0,
@@ -497,7 +597,21 @@ class MentorSpeakerService extends EventEmitter {
     this.resetPlaybackQueue(binding);
     binding.responseQueue = [];
     binding.responseBytes = 0;
+    binding.adpcmState = createImaAdpcmState();
     binding.collectingResponse = false;
+  }
+
+  flushPendingAudio(binding) {
+    const encodedAudio = flushImaAdpcm(binding.adpcmState);
+    if (encodedAudio.length === 0) return;
+    const decodedBytes = encodedAudio.length * 4;
+    if (binding.speaking) {
+      binding.audioQueue.push(encodedAudio);
+      binding.queuedBytes += decodedBytes;
+    } else {
+      binding.responseQueue.push(encodedAudio);
+      binding.responseBytes += decodedBytes;
+    }
   }
 
   schedulePump(binding) {
@@ -528,11 +642,16 @@ class MentorSpeakerService extends EventEmitter {
       0,
       deviceFeedAheadBytes - this.estimatedBufferedBytes(binding)
     );
-    while (availableBytes >= 2 && binding.audioQueue.length > 0) {
+    while (availableBytes >= 4 && binding.audioQueue.length > 0) {
       const queued = binding.audioQueue[0];
-      const frameBytes = Math.min(queued.length, SPEAKER_PCM_FRAME_BYTES, availableBytes) & ~1;
+      const frameBytes = Math.min(
+        queued.length,
+        SPEAKER_PCM_FRAME_BYTES,
+        Math.floor(availableBytes / 4)
+      );
       if (frameBytes <= 0) break;
       const payload = queued.subarray(0, frameBytes);
+      const decodedBytes = frameBytes * 4;
       const sequence = ++binding.sequence;
       if (!this.write(device, createSpeakerFrame(FRAME_TYPES.PCM, payload, sequence))) {
         this.degradeBinding(binding, 'audio_backpressure');
@@ -540,10 +659,10 @@ class MentorSpeakerService extends EventEmitter {
       }
       binding.audioQueue[0] = queued.subarray(frameBytes);
       if (binding.audioQueue[0].length === 0) binding.audioQueue.shift();
-      binding.queuedBytes -= frameBytes;
-      binding.speechBytes += frameBytes;
-      this.updateBufferedEstimate(binding, frameBytes);
-      availableBytes -= frameBytes;
+      binding.queuedBytes -= decodedBytes;
+      binding.speechBytes += decodedBytes;
+      this.updateBufferedEstimate(binding, decodedBytes);
+      availableBytes -= decodedBytes;
     }
 
     if (binding.queuedBytes === 0 && binding.endRequested && !binding.endSent) {
@@ -573,7 +692,9 @@ class MentorSpeakerService extends EventEmitter {
       conversationId: binding.conversationId,
       sampleRate: SPEAKER_SAMPLE_RATE,
       channels: 1,
-      bitsPerSample: 16,
+      encoding: SPEAKER_ENCODING,
+      bitsPerSample: 4,
+      decodedBitsPerSample: 16,
       volume: binding.volume
     });
     if (!this.write(device, frame)) return false;
@@ -623,6 +744,7 @@ class MentorSpeakerService extends EventEmitter {
       binding.firstProviderChunkAt = null;
       binding.lastProviderChunkAt = null;
       binding.maxProviderGapMs = 0;
+      binding.adpcmState = createImaAdpcmState();
       binding.collectingResponse = true;
       this.publish(binding, 'buffering', { bufferedResponseMs: 0 });
     }
@@ -640,13 +762,15 @@ class MentorSpeakerService extends EventEmitter {
     }
     binding.providerChunkCount += 1;
     binding.providerBytes += bytes.length;
+    const encodedAudio = encodePcm16LeToImaAdpcm(bytes, binding.adpcmState);
+    const decodedBytes = encodedAudio.length * 4;
     if (binding.speaking) {
-      binding.audioQueue.push(Buffer.from(bytes));
-      binding.queuedBytes += bytes.length;
+      if (encodedAudio.length > 0) binding.audioQueue.push(encodedAudio);
+      binding.queuedBytes += decodedBytes;
       this.pumpAudio(binding);
     } else {
-      binding.responseQueue.push(Buffer.from(bytes));
-      binding.responseBytes += bytes.length;
+      if (encodedAudio.length > 0) binding.responseQueue.push(encodedAudio);
+      binding.responseBytes += decodedBytes;
       if (binding.responseBytes >= this.startBufferBytes
           && !this.startBufferedPlayback(binding, device)) {
         return this.degradeBinding(binding, 'start_backpressure');
@@ -712,6 +836,7 @@ class MentorSpeakerService extends EventEmitter {
       return false;
     }
     binding.collectingResponse = false;
+    this.flushPendingAudio(binding);
     if (!binding.speaking && binding.responseBytes > 0
         && !this.startBufferedPlayback(binding, device)) {
       this.degradeBinding(binding, 'start_backpressure');
@@ -788,6 +913,7 @@ module.exports = {
   MAX_BUFFERED_RESPONSE_BYTES,
   SPEAKER_DEGRADED_BUFFER_MS,
   SPEAKER_END_RESEND_MS,
+  SPEAKER_ENCODING,
   SPEAKER_IDLE_END_MS,
   SPEAKER_FEED_AHEAD_BYTES,
   SPEAKER_FEED_AHEAD_MS,
@@ -798,9 +924,14 @@ module.exports = {
   SPEAKER_MAGIC,
   SPEAKER_PROTOCOL_VERSION,
   SPEAKER_SAMPLE_RATE,
+  SPEAKER_TRANSPORT_BYTES_PER_SECOND,
   SPEAKER_START_BUFFER_BYTES,
   SPEAKER_START_BUFFER_MS,
   createSpeakerFrame,
+  createImaAdpcmState,
+  decodeImaAdpcmToPcm16Le,
+  encodePcm16LeToImaAdpcm,
+  flushImaAdpcm,
   normalizeOutputMode,
   normalizeVolume,
   parseSpeakerFrame,
