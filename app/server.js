@@ -876,6 +876,7 @@ const PHYSICAL_LED_COLORS = {
 
 const PHYSICAL_PROMOTIONS_ENABLED = false;
 const PHYSICAL_OWNERSHIP_PROTOCOL_VERSION = 1;
+const PHYSICAL_SENSOR_FRESH_MS = 5000;
 const PHYSICAL_SERVER_INSTANCE_ID = randomUUID();
 
 const physicalSession = {
@@ -905,6 +906,7 @@ const physicalSession = {
   commands: [],
   nextCommandId: 1,
   lastSnapshotAt: null,
+  lastPollAt: null,
   lastCalibrationKey: '',
   lastError: null,
   syncWarningReason: null,
@@ -1402,6 +1404,7 @@ function serializePhysicalState() {
     physicalRedoCount: physicalSession.redoStack.length,
     physicalMoveLog: physicalSession.moveLog.map(summarizePhysicalMoveLogEntry),
     lastSnapshotAt: physicalSession.lastSnapshotAt,
+    lastPollAt: physicalSession.lastPollAt,
     lastError: physicalSession.lastError,
     syncWarningReason: physicalSession.syncWarningReason,
     postRobotSettleGuard: physicalSession.postRobotSettleGuard,
@@ -1576,6 +1579,42 @@ function retryOpeningDrillPolicy() {
 
 mentorFeature.physicalObserver.setAdapter({
   getSnapshot: () => serializePhysicalState(),
+  getGameStatus: () => ({
+    ...serializePhysicalState(),
+    sensorFresh: Boolean(
+      Math.max(physicalSession.lastSnapshotAt || 0, physicalSession.lastPollAt || 0)
+      && Date.now() - Math.max(physicalSession.lastSnapshotAt || 0, physicalSession.lastPollAt || 0)
+        <= PHYSICAL_SENSOR_FRESH_MS
+    ),
+    sensorAgeMs: Math.max(physicalSession.lastSnapshotAt || 0, physicalSession.lastPollAt || 0)
+      ? Math.max(0, Date.now() - Math.max(physicalSession.lastSnapshotAt || 0, physicalSession.lastPollAt || 0))
+      : null
+  }),
+  startDefaultGame: () => {
+    const lastBoardContactAt = Math.max(physicalSession.lastSnapshotAt || 0, physicalSession.lastPollAt || 0);
+    const sensorAgeMs = lastBoardContactAt
+      ? Math.max(0, Date.now() - lastBoardContactAt)
+      : null;
+    if (sensorAgeMs === null || sensorAgeMs > PHYSICAL_SENSOR_FRESH_MS) {
+      const error = new Error('The physical board sensor connection is not fresh. Check the ESP32 connection before starting.');
+      error.code = 'physical_sensor_stale';
+      error.statusCode = 409;
+      error.sensorAgeMs = sensorAgeMs;
+      throw error;
+    }
+    if (physicalSession.active && physicalSession.phase !== 'idle') {
+      const error = new Error('A physical game is already active. Attach to it instead of starting another game.');
+      error.code = 'physical_game_active';
+      error.statusCode = 409;
+      throw error;
+    }
+    return startPhysicalSession({
+      level: 1,
+      profile: 'balanced',
+      graveyardSlots: DEFAULT_GRAVEYARD_SLOTS,
+      setupMode: 'full'
+    });
+  },
   setOpeningDrill: setOpeningDrillPolicy,
   retryOpeningDrill: retryOpeningDrillPolicy,
   resolveOpeningDrill: resolveOpeningDrillPolicy
@@ -5381,9 +5420,7 @@ async function processPhysicalSnapshot(occupancy, metadata = {}) {
   emitPhysicalState('physical-board', { snapshotMeta: metadata });
 }
 
-app.post('/api/physical/start', (req, res) => {
-  const { level = 1, profile = 'balanced', graveyardSlots = [], setupMode = 'full' } = req.body || {};
-
+function startPhysicalSession({ level = 1, profile = 'balanced', graveyardSlots = [], setupMode = 'full' } = {}) {
   physicalSession.sessionGeneration += 1;
   physicalSession.stateRevision = 0;
   physicalSession.mentorStateSignature = '';
@@ -5438,7 +5475,13 @@ app.post('/api/physical/start', (req, res) => {
   queuePhysicalCommand({ type: 'request-snapshot' });
   emitPhysicalState();
 
-  return res.json({ success: true, state: serializePhysicalState() });
+  return { success: true, state: serializePhysicalState() };
+}
+
+app.post('/api/physical/start', (req, res) => {
+  const result = startPhysicalSession(req.body || {});
+
+  return res.json(result);
 });
 
 app.get('/api/physical/status', (req, res) => {
@@ -5689,6 +5732,7 @@ app.post('/api/physical/snapshot', async (req, res) => {
 });
 
 app.get('/api/physical/poll', (req, res) => {
+  physicalSession.lastPollAt = Date.now();
   const commands = physicalSession.commands.splice(0, physicalSession.commands.length);
   res.json({
     success: true,

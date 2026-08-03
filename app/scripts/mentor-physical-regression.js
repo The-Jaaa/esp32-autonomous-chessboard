@@ -112,7 +112,8 @@ async function run() {
   const virtualBefore = chessService.getState(first.id);
   const attached = observer.attach(first.id, {
     serverInstanceId: 'server-a',
-    sessionGeneration: 7
+    sessionGeneration: 7,
+    coachingMode: 'off'
   });
   assert.strictEqual(attached.binding.status, 'active');
   assert.strictEqual(attached.state.source, 'physical');
@@ -195,6 +196,10 @@ async function run() {
   assert.deepStrictEqual(
     toolService.declarations(first.id).map((tool) => tool.name),
     [
+      'get_physical_game_status',
+      'start_physical_game',
+      'attach_physical_game',
+      'set_physical_coaching',
       'get_board_state',
       'analyze_position',
       'analyze_move',

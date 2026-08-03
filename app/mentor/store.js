@@ -186,6 +186,18 @@ function mapPhysicalBinding(row) {
       arrows: parseJson(row.arrows_json, [])
     },
     lastEventKey: row.last_event_key || null,
+    coachingMode: row.coaching_mode || 'off',
+    coachingOrigin: row.coaching_origin || null,
+    coachingPromptedAt: row.coaching_prompted_at || null,
+    lastCoachedRevision: row.last_coached_revision === null || row.last_coached_revision === undefined
+      ? null
+      : Number(row.last_coached_revision),
+    lastCoachedMoveId: row.last_coached_move_id || null,
+    fullTurnsSinceSummary: Number(row.full_turns_since_summary || 0),
+    lastCoachingTrigger: row.last_coaching_trigger || null,
+    lastCoachingFen: row.last_coaching_fen || null,
+    lastObservedRobotMoveId: row.last_observed_robot_move_id || null,
+    adviceFingerprints: parseJson(row.advice_fingerprints_json, []),
     attachedAt: row.attached_at,
     updatedAt: row.updated_at
   };
@@ -450,6 +462,33 @@ class MentorStore {
       version: 8,
       sql: `
         ALTER TABLE mentor_physical_bindings ADD COLUMN analyzed_fen TEXT;
+      `
+    }, {
+      version: 9,
+      sql: `
+        ALTER TABLE mentor_physical_bindings ADD COLUMN coaching_mode TEXT NOT NULL DEFAULT 'off'
+          CHECK(coaching_mode IN ('off', 'prompt_pending', 'selective'));
+        ALTER TABLE mentor_physical_bindings ADD COLUMN coaching_origin TEXT;
+        ALTER TABLE mentor_physical_bindings ADD COLUMN coaching_prompted_at INTEGER;
+        ALTER TABLE mentor_physical_bindings ADD COLUMN last_coached_revision INTEGER;
+        ALTER TABLE mentor_physical_bindings ADD COLUMN last_coached_move_id TEXT;
+        ALTER TABLE mentor_physical_bindings ADD COLUMN full_turns_since_summary INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE mentor_physical_bindings ADD COLUMN last_coaching_trigger TEXT;
+        ALTER TABLE mentor_physical_bindings ADD COLUMN last_coaching_fen TEXT;
+        ALTER TABLE mentor_physical_bindings ADD COLUMN last_observed_robot_move_id TEXT;
+        ALTER TABLE mentor_physical_bindings ADD COLUMN advice_fingerprints_json TEXT NOT NULL DEFAULT '[]';
+
+        CREATE TABLE mentor_physical_actions (
+          conversation_id TEXT NOT NULL REFERENCES mentor_conversations(id) ON DELETE CASCADE,
+          request_id TEXT NOT NULL,
+          action_type TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('complete', 'failed')),
+          result_json TEXT,
+          error_code TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY(conversation_id, request_id)
+        );
       `
     }];
 
@@ -856,7 +895,9 @@ class MentorStore {
     serverInstanceId,
     sessionGeneration,
     stateRevision = 0,
-    orientation = 'white'
+    orientation = 'white',
+    coachingMode = 'prompt_pending',
+    coachingOrigin = 'manual'
   }) {
     const existing = this.getActivePhysicalBinding(boardId);
     if (existing && existing.conversationId !== conversationId) {
@@ -867,8 +908,11 @@ class MentorStore {
       INSERT INTO mentor_physical_bindings(
         conversation_id, board_id, server_instance_id, session_generation,
         state_revision, status, orientation, annotated_fen, analyzed_fen,
-        highlights_json, arrows_json, last_event_key, attached_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, 'active', ?, NULL, NULL, '[]', '[]', NULL, ?, ?)
+        highlights_json, arrows_json, last_event_key, coaching_mode, coaching_origin,
+        coaching_prompted_at, last_coached_revision, last_coached_move_id,
+        full_turns_since_summary, last_coaching_trigger, last_coaching_fen,
+        last_observed_robot_move_id, advice_fingerprints_json, attached_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, 'active', ?, NULL, NULL, '[]', '[]', NULL, ?, ?, NULL, NULL, NULL, 0, NULL, NULL, NULL, '[]', ?, ?)
       ON CONFLICT(conversation_id) DO UPDATE SET
         board_id = excluded.board_id,
         server_instance_id = excluded.server_instance_id,
@@ -881,6 +925,16 @@ class MentorStore {
         highlights_json = '[]',
         arrows_json = '[]',
         last_event_key = NULL,
+        coaching_mode = excluded.coaching_mode,
+        coaching_origin = excluded.coaching_origin,
+        coaching_prompted_at = NULL,
+        last_coached_revision = NULL,
+        last_coached_move_id = NULL,
+        full_turns_since_summary = 0,
+        last_coaching_trigger = NULL,
+        last_coaching_fen = NULL,
+        last_observed_robot_move_id = NULL,
+        advice_fingerprints_json = '[]',
         attached_at = excluded.attached_at,
         updated_at = excluded.updated_at
     `).run(
@@ -890,6 +944,8 @@ class MentorStore {
       sessionGeneration,
       stateRevision,
       orientation,
+      coachingMode,
+      coachingOrigin,
       timestamp,
       timestamp
     );
@@ -912,12 +968,44 @@ class MentorStore {
       annotations: patch.annotations || current.annotations,
       lastEventKey: Object.prototype.hasOwnProperty.call(patch, 'lastEventKey')
         ? patch.lastEventKey
-        : current.lastEventKey
+        : current.lastEventKey,
+      coachingMode: patch.coachingMode || current.coachingMode,
+      coachingOrigin: Object.prototype.hasOwnProperty.call(patch, 'coachingOrigin')
+        ? patch.coachingOrigin
+        : current.coachingOrigin,
+      coachingPromptedAt: Object.prototype.hasOwnProperty.call(patch, 'coachingPromptedAt')
+        ? patch.coachingPromptedAt
+        : current.coachingPromptedAt,
+      lastCoachedRevision: Object.prototype.hasOwnProperty.call(patch, 'lastCoachedRevision')
+        ? patch.lastCoachedRevision
+        : current.lastCoachedRevision,
+      lastCoachedMoveId: Object.prototype.hasOwnProperty.call(patch, 'lastCoachedMoveId')
+        ? patch.lastCoachedMoveId
+        : current.lastCoachedMoveId,
+      fullTurnsSinceSummary: Number.isInteger(patch.fullTurnsSinceSummary)
+        ? patch.fullTurnsSinceSummary
+        : current.fullTurnsSinceSummary,
+      lastCoachingTrigger: Object.prototype.hasOwnProperty.call(patch, 'lastCoachingTrigger')
+        ? patch.lastCoachingTrigger
+        : current.lastCoachingTrigger,
+      lastCoachingFen: Object.prototype.hasOwnProperty.call(patch, 'lastCoachingFen')
+        ? patch.lastCoachingFen
+        : current.lastCoachingFen,
+      lastObservedRobotMoveId: Object.prototype.hasOwnProperty.call(patch, 'lastObservedRobotMoveId')
+        ? patch.lastObservedRobotMoveId
+        : current.lastObservedRobotMoveId,
+      adviceFingerprints: Array.isArray(patch.adviceFingerprints)
+        ? patch.adviceFingerprints
+        : current.adviceFingerprints
     };
     this.db.prepare(`
       UPDATE mentor_physical_bindings
       SET state_revision = ?, status = ?, orientation = ?, annotated_fen = ?, analyzed_fen = ?,
-          highlights_json = ?, arrows_json = ?, last_event_key = ?, updated_at = ?
+          highlights_json = ?, arrows_json = ?, last_event_key = ?, coaching_mode = ?,
+          coaching_origin = ?, coaching_prompted_at = ?, last_coached_revision = ?,
+          last_coached_move_id = ?, full_turns_since_summary = ?, last_coaching_trigger = ?,
+          last_coaching_fen = ?, last_observed_robot_move_id = ?, advice_fingerprints_json = ?,
+          updated_at = ?
       WHERE conversation_id = ?
     `).run(
       next.stateRevision,
@@ -928,10 +1016,57 @@ class MentorStore {
       JSON.stringify(next.annotations.highlights || []),
       JSON.stringify(next.annotations.arrows || []),
       next.lastEventKey,
+      next.coachingMode,
+      next.coachingOrigin,
+      next.coachingPromptedAt,
+      next.lastCoachedRevision,
+      next.lastCoachedMoveId,
+      next.fullTurnsSinceSummary,
+      next.lastCoachingTrigger,
+      next.lastCoachingFen,
+      next.lastObservedRobotMoveId,
+      JSON.stringify(next.adviceFingerprints.slice(-8)),
       this.now(),
       conversationId
     );
     return this.getPhysicalBinding(conversationId);
+  }
+
+  getPhysicalAction(conversationId, requestId) {
+    const row = this.db.prepare(`
+      SELECT * FROM mentor_physical_actions WHERE conversation_id = ? AND request_id = ?
+    `).get(conversationId, requestId);
+    if (!row) return null;
+    return {
+      conversationId: row.conversation_id,
+      requestId: row.request_id,
+      actionType: row.action_type,
+      status: row.status,
+      result: parseJson(row.result_json, null),
+      errorCode: row.error_code || null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  savePhysicalAction(conversationId, requestId, actionType, result, errorCode = null) {
+    const timestamp = this.now();
+    this.db.prepare(`
+      INSERT INTO mentor_physical_actions(
+        conversation_id, request_id, action_type, status, result_json, error_code, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(conversation_id, request_id) DO NOTHING
+    `).run(
+      conversationId,
+      requestId,
+      actionType,
+      errorCode ? 'failed' : 'complete',
+      result === undefined ? null : JSON.stringify(result),
+      errorCode,
+      timestamp,
+      timestamp
+    );
+    return this.getPhysicalAction(conversationId, requestId);
   }
 
   detachPhysicalBinding(conversationId, status = 'detached') {

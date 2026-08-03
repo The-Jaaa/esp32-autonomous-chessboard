@@ -12,6 +12,10 @@ const DEFAULT_PHYSICAL_TURN_TIMEOUT_MS = 15000;
 const VOICE_TRANSCRIPT_PLACEHOLDER = 'Voice request in progress.';
 
 const LIVE_TOOL_LABELS = {
+  get_physical_game_status: 'Checking physical board',
+  start_physical_game: 'Starting physical game',
+  attach_physical_game: 'Attaching physical board',
+  set_physical_coaching: 'Updating coaching',
   get_board_state: 'Reading board',
   analyze_position: 'Analyzing position',
   analyze_move: 'Analyzing move',
@@ -30,6 +34,8 @@ const LIVE_SYSTEM_INSTRUCTION = [
   'The user may speak or type and may interrupt you while you are speaking.',
   'Use the available virtual-board tools proactively when a visual example will improve the lesson.',
   'Start a structured activity only after the learner explicitly agrees.',
+  'If the learner ambiguously says they want to play a game, ask exactly whether they want Physical or Virtual before calling a start tool.',
+  'An explicit request to start a physical game is consent to call start_physical_game. Use only the high-level physical tools and never imply direct motor control.',
   'During an assigned activity turn, analyze first and then make exactly one mentor move, unless you explicitly request a prediction.',
   'Do not leave an assigned mentor turn at analysis alone.',
   'Use Stockfish analysis tools before making objective claims about evaluations, best moves, tactics, or move quality.',
@@ -418,6 +424,62 @@ class MentorLiveService {
     return record.activeToolCalls.size > 0 || record.turn?.toolBusy === true;
   }
 
+  async connectProvider(record) {
+    const generation = Number(record.providerGeneration || 0) + 1;
+    record.providerGeneration = generation;
+    const isCurrent = () => this.byConversation.get(record.conversationId) === record
+      && record.providerGeneration === generation
+      && !record.closing;
+    const providerSession = await this.connector.connect({
+      model: this.model,
+      config: {
+        responseModalities: ['AUDIO'],
+        inputAudioTranscription: {},
+        outputAudioTranscription: {},
+        realtimeInputConfig: {
+          automaticActivityDetection: {}
+        },
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: { voiceName: this.voiceName }
+          }
+        },
+        systemInstruction: {
+          parts: [{ text: LIVE_SYSTEM_INSTRUCTION }]
+        },
+        tools: this.toolService?.declarations(record.conversationId)?.length
+          ? [{ functionDeclarations: this.toolService.declarations(record.conversationId) }]
+          : undefined
+      },
+      callbacks: {
+        onopen: () => {
+          if (isCurrent()) this.logger.log?.(`[MENTOR_LIVE_OPEN] ${record.sessionId}`);
+        },
+        onmessage: (message) => {
+          if (isCurrent()) this.handleProviderMessage(record, message);
+        },
+        onerror: (error) => {
+          if (isCurrent()) this.handleProviderError(record, error);
+        },
+        onclose: (event) => {
+          if (isCurrent()) this.handleProviderClose(record, event);
+        }
+      }
+    });
+    if (!isCurrent()) {
+      await Promise.resolve(providerSession?.close?.()).catch(() => {});
+      return null;
+    }
+    record.providerSession = providerSession;
+    const history = this.store.contextMessages(record.conversationId, LIVE_CONTEXT_CHARACTER_LIMIT);
+    const chessState = this.stateProvider(record.conversationId);
+    record.providerSession.sendClientContent({
+      turns: initialHistoryTurns(history, chessState),
+      turnComplete: false
+    });
+    return providerSession;
+  }
+
   async start(socket, {
     conversationId,
     outputMode = 'auto',
@@ -458,6 +520,9 @@ class MentorLiveService {
       activeToolCalls: new Map(),
       toolQueue: Promise.resolve(),
       pendingSystemTurns: [],
+      pendingContextReconnect: null,
+      reconnecting: false,
+      providerGeneration: 0,
       physicalGuidanceLock: false,
       discardUnsolicitedAfterPhysical: false,
       ready: false,
@@ -483,41 +548,7 @@ class MentorLiveService {
           speakerStatus: outputMode === 'auto' ? 'fallback' : 'browser'
         };
       this.emitStatus(record, 'connecting');
-      record.providerSession = await this.connector.connect({
-        model: this.model,
-        config: {
-          responseModalities: ['AUDIO'],
-          inputAudioTranscription: {},
-          outputAudioTranscription: {},
-          realtimeInputConfig: {
-            automaticActivityDetection: {}
-          },
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: this.voiceName }
-            }
-          },
-          systemInstruction: {
-            parts: [{ text: LIVE_SYSTEM_INSTRUCTION }]
-          },
-          tools: this.toolService?.declarations(conversationId)?.length
-            ? [{ functionDeclarations: this.toolService.declarations(conversationId) }]
-            : undefined
-        },
-        callbacks: {
-          onopen: () => this.logger.log?.(`[MENTOR_LIVE_OPEN] ${record.sessionId}`),
-          onmessage: (message) => this.handleProviderMessage(record, message),
-          onerror: (error) => this.handleProviderError(record, error),
-          onclose: (event) => this.handleProviderClose(record, event)
-        }
-      });
-
-      const history = this.store.contextMessages(conversationId, LIVE_CONTEXT_CHARACTER_LIMIT);
-      const chessState = this.stateProvider(conversationId);
-      record.providerSession.sendClientContent({
-        turns: initialHistoryTurns(history, chessState),
-        turnComplete: false
-      });
+      await this.connectProvider(record);
       record.ready = true;
       this.emitStatus(record, 'listening');
       return { duplicate: false, sessionId: record.sessionId, ...record.speaker };
@@ -1146,6 +1177,10 @@ class MentorLiveService {
 
     if (turn.source === 'context') {
       turn.resolveCompletion?.(null);
+      if (record.pendingContextReconnect) {
+        this.reconnectProvider(record).catch(() => {});
+        return null;
+      }
       if (!this.flushPendingSystemTurns(record)) this.flushBoardContext(record);
       return null;
     }
@@ -1190,11 +1225,18 @@ class MentorLiveService {
       conversation
     });
     turn.resolveCompletion?.({ status: assistantStatus, ...pair });
+    if (record.pendingContextReconnect) {
+      this.reconnectProvider(record).catch(() => {});
+      return pair;
+    }
     if (!this.flushPendingSystemTurns(record)) this.flushBoardContext(record);
     return pair;
   }
 
   startPhysicalTurn(record, request) {
+    if (request.validateBeforeStart && !request.validateBeforeStart()) {
+      return { stale: true, sessionId: record.sessionId };
+    }
     const existing = this.store.getRequestMessages(record.conversationId, request.requestId);
     if (existing.length) return { duplicate: true, sessionId: record.sessionId };
     let pair = this.store.createMessagePair(record.conversationId, {
@@ -1258,8 +1300,58 @@ class MentorLiveService {
 
   flushPendingSystemTurns(record) {
     if (record.turn || record.closing || !record.ready || !record.pendingSystemTurns.length) return false;
-    this.startPhysicalTurn(record, record.pendingSystemTurns.shift());
-    return true;
+    while (record.pendingSystemTurns.length) {
+      const request = record.pendingSystemTurns.shift();
+      if (request.validateBeforeStart && !request.validateBeforeStart()) continue;
+      this.startPhysicalTurn(record, request);
+      return true;
+    }
+    return false;
+  }
+
+  requestContextReconnect(conversationId, reason = 'workspace_changed') {
+    const record = this.byConversation.get(conversationId);
+    if (!record || record.closing) return null;
+    record.pendingContextReconnect = { reason, requestedAt: Date.now() };
+    this.speakerService?.clearOutput(record.conversationId, record.sessionId, reason);
+    this.emitStatus(record, 'switching_source', { reason, text: 'Switching to physical board' });
+    if (!record.turn && !this.hasActiveTools(record)) this.reconnectProvider(record).catch(() => {});
+    return { queued: Boolean(record.turn || this.hasActiveTools(record)), sessionId: record.sessionId };
+  }
+
+  async reconnectProvider(record) {
+    if (!record || record.closing || record.reconnecting || !record.pendingContextReconnect) return false;
+    record.reconnecting = true;
+    record.ready = false;
+    const pending = record.pendingContextReconnect;
+    record.pendingContextReconnect = null;
+    this.emitStatus(record, 'reconnecting', { reason: pending.reason, text: 'Reconnecting' });
+    const previous = record.providerSession;
+    record.providerGeneration += 1;
+    record.providerSession = null;
+    try {
+      await Promise.resolve(previous?.close?.()).catch(() => {});
+      await this.connectProvider(record);
+      record.ready = true;
+      record.reconnecting = false;
+      this.emitStatus(record, 'listening', { reason: pending.reason, reconnected: true });
+      return true;
+    } catch (error) {
+      record.reconnecting = false;
+      this.logger.error?.('[MENTOR_LIVE_RECONNECT_FAILED]', JSON.stringify({
+        conversationId: record.conversationId,
+        sessionId: record.sessionId,
+        reason: pending.reason,
+        error: providerErrorMessage(error)
+      }));
+      record.socket.emit('mentor-live-error', {
+        ...this.statusPayload(record, 'failed'),
+        code: 'mentor_live_reconnect_failed',
+        error: providerErrorMessage(error)
+      });
+      await this.closeRecord(record, 'context_reconnect_failed');
+      return false;
+    }
   }
 
   requestPhysicalTurn(conversationId, request) {

@@ -416,7 +416,9 @@ function liveStatusText(live) {
     muted: 'Live voice muted',
     thinking: 'Live voice thinking',
     speaking: 'Live voice speaking',
-    interrupted: 'Live voice interrupted'
+    interrupted: 'Live voice interrupted',
+    switching_source: 'Switching to physical board',
+    reconnecting: 'Reconnecting Live voice'
   };
   return labels[live.status] || 'Live voice';
 }
@@ -597,6 +599,7 @@ export default function MentorWorkspace() {
   const [physicalBoard, setPhysicalBoard] = useState({ binding: null, state: null });
   const [physicalAvailability, setPhysicalAvailability] = useState(null);
   const [physicalBusy, setPhysicalBusy] = useState(false);
+  const [coachingStatus, setCoachingStatus] = useState(null);
   const [freshnessNow, setFreshnessNow] = useState(Date.now());
   const [previewFen, setPreviewFen] = useState(null);
   const [pendingBoardAction, setPendingBoardAction] = useState(null);
@@ -706,6 +709,7 @@ export default function MentorWorkspace() {
         setMessages(nextConversation.messages || []);
         setBoardState(nextConversation.chess);
         setPhysicalBoard(nextConversation.physicalBoard || { binding: null, state: null });
+        setCoachingStatus(null);
         setActivity(nextConversation.activity || null);
         setProgress(nextConversation.progress || null);
         setPreviewFen(null);
@@ -761,6 +765,7 @@ export default function MentorWorkspace() {
       if (streamPollRef.current) clearTimeout(streamPollRef.current);
       setMessages((current) => upsertMessage(current, payload.message));
       setActiveRequestId(null);
+      setCoachingStatus(null);
       if (payload.error) setError(payload.error);
       refreshList('');
     };
@@ -800,6 +805,10 @@ export default function MentorWorkspace() {
       }
     };
     const onProgressUpdated = (payload) => setProgress(payload);
+    const onCoachingUpdated = (payload) => {
+      if (!matches(payload)) return;
+      setCoachingStatus(payload);
+    };
 
     socket.on('mentor-message-start', onStart);
     socket.on('mentor-message-delta', onDelta);
@@ -816,6 +825,7 @@ export default function MentorWorkspace() {
     socket.on('mentor-progress-updated', onProgressUpdated);
     socket.on('mentor-physical-binding-updated', onPhysicalBindingUpdated);
     socket.on('mentor-physical-board-updated', onPhysicalBoardUpdated);
+    socket.on('mentor-physical-coaching-updated', onCoachingUpdated);
     return () => {
       if (streamPollRef.current) clearTimeout(streamPollRef.current);
       socket.emit('mentor-unsubscribe', { conversationId });
@@ -836,6 +846,7 @@ export default function MentorWorkspace() {
       socket.off('mentor-progress-updated', onProgressUpdated);
       socket.off('mentor-physical-binding-updated', onPhysicalBindingUpdated);
       socket.off('mentor-physical-board-updated', onPhysicalBoardUpdated);
+      socket.off('mentor-physical-coaching-updated', onCoachingUpdated);
     };
   }, [conversationId, refreshList, socket]);
 
@@ -962,6 +973,25 @@ export default function MentorWorkspace() {
       setPreviewFen(null);
       setPendingBoardAction(null);
       setPhysicalAvailability(await mentorApi.getPhysicalBoard());
+    } catch (physicalError) {
+      setError(physicalError.message);
+    } finally {
+      setPhysicalBusy(false);
+    }
+  };
+
+  const togglePhysicalCoaching = async () => {
+    if (!conversationId || !physicalAttached || physicalBusy) return;
+    setPhysicalBusy(true);
+    setError('');
+    try {
+      const currentMode = physicalBoard.binding?.coachingMode;
+      const result = await mentorApi.setPhysicalCoaching(
+        conversationId,
+        currentMode === 'selective' ? 'off' : 'selective'
+      );
+      setPhysicalBoard(result.physicalBoard);
+      setCoachingStatus(null);
     } catch (physicalError) {
       setError(physicalError.message);
     } finally {
@@ -1393,16 +1423,28 @@ export default function MentorWorkspace() {
           </button>
         </div>
         {physicalAttached ? (
-          <div className={`mentor-physical-status is-${workspaceState.physical.phase}`}>
-            <span className="mentor-physical-status-dot" />
-            <div>
-              <strong>{workspaceState.physical.robotBusy ? 'Robot working' : workspaceState.physical.phase.replaceAll('_', ' ')}</strong>
-              <small>{workspaceState.physical.statusText}</small>
+          <>
+            <div className={`mentor-physical-status is-${workspaceState.physical.phase}`}>
+              <span className="mentor-physical-status-dot" />
+              <div>
+                <strong>{workspaceState.physical.robotBusy ? 'Robot working' : workspaceState.physical.phase.replaceAll('_', ' ')}</strong>
+                <small>{workspaceState.physical.statusText}</small>
+              </div>
+              <span>{workspaceState.physical.lastSnapshotAt
+                ? `${Math.max(0, Math.round((freshnessNow - workspaceState.physical.lastSnapshotAt) / 1000))}s`
+                : 'No sensor data'}</span>
             </div>
-            <span>{workspaceState.physical.lastSnapshotAt
-              ? `${Math.max(0, Math.round((freshnessNow - workspaceState.physical.lastSnapshotAt) / 1000))}s`
-              : 'No sensor data'}</span>
-          </div>
+            <button
+              className={`mentor-coaching-toggle ${physicalBoard.binding?.coachingMode === 'selective' ? 'is-active' : ''}`}
+              type="button"
+              onClick={togglePhysicalCoaching}
+              disabled={physicalBusy}
+              aria-pressed={physicalBoard.binding?.coachingMode === 'selective'}
+            >
+              <span>{coachingStatus?.text || (physicalBoard.binding?.coachingMode === 'selective' ? 'Selective coaching on' : physicalBoard.binding?.coachingMode === 'prompt_pending' ? 'Coaching choice pending' : 'Coaching paused')}</span>
+              <strong>{physicalBoard.binding?.coachingMode === 'selective' ? 'On' : 'Off'}</strong>
+            </button>
+          </>
         ) : physicalBoard?.binding?.status === 'stale' ? (
           <div className="mentor-physical-status is-stale"><span className="mentor-physical-status-dot" /><div><strong>Previous physical session ended</strong><small>Attach the new game explicitly when it is ready.</small></div></div>
         ) : !physicalAvailability?.available ? (

@@ -890,6 +890,15 @@
 .mentor-physical-status.is-stale .mentor-physical-status-dot { background: var(--warning-color); }
 .mentor-physical-status.is-error { border-color: var(--danger-color); }
 .mentor-physical-status.is-error .mentor-physical-status-dot { background: var(--danger-color); }
+.mentor-coaching-toggle {
+  width: 100%; min-height: 34px; display: flex; align-items: center; justify-content: space-between;
+  padding: 0 10px; border: 1px solid var(--mentor-border); border-radius: 5px;
+  color: var(--mentor-muted); background: var(--surface-input); cursor: pointer; font-size: 11px;
+}
+.mentor-coaching-toggle strong { color: var(--mentor-text); font-size: 10px; text-transform: uppercase; }
+.mentor-coaching-toggle.is-active { border-color: color-mix(in srgb, var(--mentor-accent) 55%, var(--mentor-border)); color: var(--mentor-text); }
+.mentor-coaching-toggle.is-active strong { color: var(--success-color); }
+.mentor-coaching-toggle:disabled { opacity: .55; cursor: default; }
 .mentor-physical-unavailable { justify-content: space-between; }
 .mentor-physical-unavailable a { color: #bfdbfe; font-weight: 700; text-decoration: none; }
 

@@ -41,6 +41,18 @@ export const mentorApi = {
   detachPhysicalBoard(id) {
     return request(`/conversations/${id}/physical-board`, { method: 'DELETE' });
   },
+  startPhysicalGame(id, requestId) {
+    return request(`/conversations/${id}/physical-game/start`, {
+      method: 'POST',
+      body: JSON.stringify({ requestId })
+    });
+  },
+  setPhysicalCoaching(id, mode) {
+    return request(`/conversations/${id}/physical-coaching`, {
+      method: 'PATCH',
+      body: JSON.stringify({ mode })
+    });
+  },
   listConversations(query = '') {
     return request(`/conversations?query=${encodeURIComponent(query)}`);
   },

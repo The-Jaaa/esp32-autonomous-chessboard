@@ -176,6 +176,32 @@ function createMentorRouter({
     }
   });
 
+  router.post('/conversations/:id/physical-game/start', (req, res, next) => {
+    try {
+      const requestId = String(req.body?.requestId || '').trim();
+      if (!requestId) {
+        const error = new Error('A requestId is required to start a physical game.');
+        error.statusCode = 400;
+        error.code = 'missing_request_id';
+        throw error;
+      }
+      return res.json(physicalObserver.startPhysicalGame(req.params.id, {
+        requestId,
+        requireIntent: false
+      }));
+    } catch (error) {
+      return next(error);
+    }
+  });
+
+  router.patch('/conversations/:id/physical-coaching', (req, res, next) => {
+    try {
+      return res.json(physicalObserver.setCoaching(req.params.id, req.body?.mode, 'user'));
+    } catch (error) {
+      return next(error);
+    }
+  });
+
   router.patch('/conversations/:id/physical-board', (req, res, next) => {
     try {
       const result = physicalObserver.setOrientation(req.params.id, req.body || {});

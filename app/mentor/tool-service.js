@@ -14,6 +14,27 @@ const CUSTOM_ACTIVITY_PROPERTIES = {
 };
 
 const TOOL_DECLARATIONS = [{
+  name: 'get_physical_game_status',
+  description: 'Check whether the physical chessboard is connected, whether a game is active, and whether it is already attached to a mentor conversation.',
+  parametersJsonSchema: { type: 'object', properties: {}, additionalProperties: false }
+}, {
+  name: 'start_physical_game',
+  description: 'Start and attach one default physical game after the learner explicitly asks for a physical game. Never call for an ambiguous request to play a game.',
+  parametersJsonSchema: { type: 'object', properties: {}, additionalProperties: false }
+}, {
+  name: 'attach_physical_game',
+  description: 'Attach this conversation to an already active, unbound physical game after the learner explicitly confirms attachment.',
+  parametersJsonSchema: { type: 'object', properties: {}, additionalProperties: false }
+}, {
+  name: 'set_physical_coaching',
+  description: 'Enable or disable selective coaching for the attached physical game.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: { mode: { type: 'string', enum: ['selective', 'off'] } },
+    required: ['mode'],
+    additionalProperties: false
+  }
+}, {
   name: 'get_board_state',
   description: 'Read the authoritative board state, legal moves, orientation, and teaching annotations.',
   parametersJsonSchema: { type: 'object', properties: {}, additionalProperties: false }
@@ -385,6 +406,32 @@ class MentorToolService {
 
   async runTool(name, args, context) {
     const { conversationId, requestId, toolCall, signal, onProgress } = context;
+    if (name === 'get_physical_game_status') {
+      onProgress(1, 1);
+      return this.physicalObserver?.getPhysicalGameStatus(conversationId) || { available: false };
+    }
+
+    if (name === 'start_physical_game') {
+      if (!this.physicalObserver) throw new Error('Physical game control is unavailable.');
+      const result = this.physicalObserver.startPhysicalGame(conversationId, { requestId });
+      onProgress(1, 1);
+      return result;
+    }
+
+    if (name === 'attach_physical_game') {
+      if (!this.physicalObserver) throw new Error('Physical game control is unavailable.');
+      const result = this.physicalObserver.attachPhysicalGame(conversationId, { requestId });
+      onProgress(1, 1);
+      return result;
+    }
+
+    if (name === 'set_physical_coaching') {
+      if (!this.physicalObserver) throw new Error('Physical coaching is unavailable.');
+      const result = this.physicalObserver.setCoaching(conversationId, args.mode, 'gemini');
+      onProgress(1, 1);
+      return result;
+    }
+
     if (name === 'get_board_state') {
       onProgress(1, 1);
       return compactBoardState(this.workspaceState(conversationId));

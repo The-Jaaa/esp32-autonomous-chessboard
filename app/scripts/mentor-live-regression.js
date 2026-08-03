@@ -459,6 +459,10 @@ async function socketRegressions() {
   const declarationNames = connector.connectCalls.at(-1).config.tools[0].functionDeclarations
     .map((declaration) => declaration.name);
   const expectedToolNames = [
+    'get_physical_game_status',
+    'start_physical_game',
+    'attach_physical_game',
+    'set_physical_coaching',
     'get_board_state',
     'analyze_position',
     'analyze_move',
@@ -705,6 +709,48 @@ async function socketRegressions() {
   await emitWithAck(client, 'mentor-subscribe', { conversationId: second.id });
   const secondStart = await emitWithAck(client, 'mentor-live-start', { conversationId: second.id });
   assert.strictEqual(secondStart.success, true);
+  const physicalSnapshot = {
+    serverInstanceId: 'live-physical-server',
+    sessionGeneration: 2,
+    stateRevision: 1,
+    active: true,
+    phase: 'ready',
+    setupMode: 'full',
+    statusText: 'Waiting for your move.',
+    fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+    pgn: '',
+    gameStatus: { inCheck: false, checkmate: false, draw: false, resultText: null },
+    physicalMoveLog: [],
+    board: { ready: true, missingSquares: [], extraSquares: [] },
+    calibration: { ready: true, missingSquares: [], extraSquares: [] },
+    robotBusy: false,
+    pendingRobotJob: null,
+    pendingUndo: null,
+    pendingRedo: null,
+    robotGraveyardOccupied: [],
+    lastSnapshotAt: Date.now(),
+    lastMove: null
+  };
+  feature.physicalObserver.setAdapter({
+    getSnapshot: () => physicalSnapshot,
+    getGameStatus: () => ({ ...physicalSnapshot, sensorFresh: true, sensorAgeMs: 1 })
+  });
+  const reconnected = waitForEvent(client, 'mentor-live-status', (payload) =>
+    payload.conversationId === second.id && payload.reconnected === true);
+  feature.physicalObserver.attach(second.id, {
+    serverInstanceId: physicalSnapshot.serverInstanceId,
+    sessionGeneration: physicalSnapshot.sessionGeneration,
+    allowLiveSwitch: true,
+    coachingMode: 'off'
+  });
+  const reconnectedStatus = await reconnected;
+  assert.strictEqual(reconnectedStatus.sessionId, secondStart.sessionId, 'browser Live session identity should remain stable');
+  const physicalDeclarations = connector.connectCalls.at(-1).config.tools[0].functionDeclarations
+    .map((declaration) => declaration.name);
+  assert(physicalDeclarations.includes('get_physical_game_status'));
+  assert(physicalDeclarations.includes('get_board_state'));
+  assert(!physicalDeclarations.includes('play_move'));
+  assert.strictEqual(feature.liveService.isConversationActive(second.id), true);
   const unexpectedClose = waitForEvent(client, 'mentor-live-error', (payload) =>
     payload.conversationId === second.id && payload.code === 'mentor_live_provider_closed');
   connector.sessions.at(-1).callbacks.onclose({
@@ -732,5 +778,5 @@ async function main() {
 
 main().catch((error) => {
   console.error(error);
-  process.exitCode = 1;
+  process.exit(1);
 });

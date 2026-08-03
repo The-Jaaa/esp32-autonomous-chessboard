@@ -95,11 +95,41 @@ bytes static RAM.
 
 ## Remaining Demo Milestones
 
-1. Mentor intent and narration reliability.
-2. Shared White/Black and difficulty controls, including validated Gemini use.
-3. Online physical promotions.
-4. Gemini-led physical curriculum beyond fixed opening drills.
-5. Production offline feedback, side selection, and promotion interaction.
-6. Continuous production offline gameplay.
-7. Online/offline ownership, persistence, and reconnect handoff.
-8. Final demo operations, documentation, and release acceptance.
+1. Shared White/Black and difficulty controls, including validated Gemini use.
+2. Online physical promotions.
+3. Gemini-led physical curriculum beyond fixed opening drills.
+4. Production offline feedback, side selection, and promotion interaction.
+5. Continuous production offline gameplay.
+6. Online/offline ownership, persistence, and reconnect handoff.
+7. Final demo operations, documentation, and release acceptance.
+
+## Mentor Physical Intent And Selective Coaching
+
+The mentor can now start the default physical game through validated high-level
+tools. Ambiguous game requests require a Physical-or-Virtual choice; an explicit
+physical request starts one full standard setup as Human White at Level 1,
+Balanced, using the accepted Z/I graveyard coordinates. A fresh ESP32 physical
+poll or sensor snapshot is required. Active games are attached rather than
+reset, and start/attach request IDs are persisted so they cannot execute twice.
+
+Starting or attaching from Gemini Live completes the current tool response and
+then refreshes only the provider connection. The browser microphone, selected
+speaker target, output mode, volume, and Live session identity remain intact.
+The refreshed provider receives the physical context and read-only physical
+tool set; no mentor tool receives motor, magnet, raw sensor, or command-queue
+access.
+
+Physical bindings now persist `off`, `prompt_pending`, or `selective` coaching.
+Gemini-started games and continued opening drills use selective coaching;
+manual attachment asks once. The coordinator waits for a verified robot reply
+and 1.5 seconds of stable occupancy, analyzes the preceding human move with
+quick Stockfish, and speaks only for important move-quality/mate events,
+check/game results, promotions, material swings of at least three points, or a
+three-complete-turn strategic checkpoint. Ordinary lifts and routine moves are
+silent. Urgent recovery guidance retains interrupt priority.
+
+Automated acceptance includes migration/restart persistence, intent and
+idempotency, Live source refresh, silent lifts, three-turn cadence, all mentor
+regressions and desktop browser checks, existing physical planner/state tests,
+zero-warning client lint, and production client build. Firmware source and the
+accepted `1,079,947` flash / `48,456` static RAM baseline are unchanged.

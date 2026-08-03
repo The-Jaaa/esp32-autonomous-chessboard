@@ -6,6 +6,10 @@ const { listCatalog } = require('./curriculum');
 
 const PHYSICAL_BOARD_ID = 'main-board';
 const PHYSICAL_READ_TOOLS = new Set([
+  'get_physical_game_status',
+  'start_physical_game',
+  'attach_physical_game',
+  'set_physical_coaching',
   'get_board_state',
   'analyze_position',
   'analyze_move',
@@ -35,6 +39,7 @@ function sourceKey(snapshot) {
 
 function serializePhysicalMove(entry, index) {
   return {
+    id: entry.id || `${entry.uci || entry.move}:${entry.createdAt || index + 1}`,
     ply: index + 1,
     uci: entry.uci || entry.move,
     san: entry.san,
@@ -115,9 +120,46 @@ function normalizeSnapshot(snapshot, binding) {
       syncWarningReason: snapshot.syncWarningReason || null,
       lastMove: snapshot.lastMove || null,
       openingDrill: snapshot.mentorOpeningDrill || null,
-      openingLock: Boolean(snapshot.mentorOpeningLock)
+      openingLock: Boolean(snapshot.mentorOpeningLock),
+      coaching: {
+        mode: binding.coachingMode,
+        lastTrigger: binding.lastCoachingTrigger,
+        analysisState: binding.coachingAnalysisState || 'idle',
+        fullTurnsSinceSummary: binding.fullTurnsSinceSummary
+      }
     }
   };
+}
+
+function materialScore(fen) {
+  const board = String(fen || '').split(' ')[0] || '';
+  const values = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 };
+  let score = 0;
+  for (const piece of board) {
+    const value = values[piece.toLowerCase()];
+    if (value === undefined) continue;
+    score += piece === piece.toUpperCase() ? value : -value;
+  }
+  return score;
+}
+
+function physicalMoveIdentity(move) {
+  if (!move) return null;
+  return String(move.id || `${move.uci || move.move}:${move.createdAt || move.at || ''}`);
+}
+
+function coachingFallback(trigger, humanMove, analysis) {
+  const san = humanMove?.san || humanMove?.uci || 'your move';
+  if (trigger === 'checkmate') return `That ends the game by checkmate. Review how ${san} changed the king's safety.`;
+  if (trigger === 'draw') return 'The game is drawn. This is a good point to review which winning chances disappeared.';
+  if (trigger === 'check') return `The position is now in check. Notice how ${san} changed the forcing moves available to both sides.`;
+  if (trigger === 'promotion') return `The promotion changed the position sharply. Check the new piece's immediate threats before planning the next move.`;
+  if (trigger === 'material_swing') return `The last turn changed the material balance significantly. Recheck every capture and recapture before continuing.`;
+  if (['inaccuracy', 'mistake', 'blunder'].includes(trigger)) {
+    const alternative = analysis?.bestAlternative?.san || analysis?.before?.bestMove?.san || analysis?.before?.bestMove?.uci;
+    return `${san} was classified as a${trigger === 'inaccuracy' ? 'n' : ''} ${trigger}.${alternative ? ` A stronger choice was ${alternative}.` : ''}`;
+  }
+  return 'Strategic checkpoint: compare piece activity, king safety, and the next pawn break before choosing your plan.';
 }
 
 function boardDifferenceText(snapshot) {
@@ -227,7 +269,8 @@ class MentorPhysicalObserverService {
     emit = () => {},
     boardId = PHYSICAL_BOARD_ID,
     recoverableGuidanceDelayMs = 2000,
-    openingGuidanceDelayMs = 1500
+    openingGuidanceDelayMs = 1500,
+    coachingDelayMs = 1500
   }) {
     this.store = store;
     this.chessService = chessService;
@@ -241,8 +284,10 @@ class MentorPhysicalObserverService {
     this.activityService = null;
     this.recoverableGuidanceDelayMs = recoverableGuidanceDelayMs;
     this.openingGuidanceDelayMs = openingGuidanceDelayMs;
+    this.coachingDelayMs = coachingDelayMs;
     this.pendingGuidance = new Map();
     this.pendingOpeningGuidance = new Map();
+    this.pendingCoaching = new Map();
   }
 
   clearPendingGuidance(conversationId) {
@@ -255,6 +300,13 @@ class MentorPhysicalObserverService {
     const pending = this.pendingOpeningGuidance.get(conversationId);
     if (pending) clearTimeout(pending.timer);
     this.pendingOpeningGuidance.delete(conversationId);
+  }
+
+  clearPendingCoaching(conversationId) {
+    const pending = this.pendingCoaching.get(conversationId);
+    if (pending?.timer) clearTimeout(pending.timer);
+    pending?.controller?.abort?.();
+    this.pendingCoaching.delete(conversationId);
   }
 
   setDependencies({ textService, liveService, activityService }) {
@@ -367,7 +419,9 @@ class MentorPhysicalObserverService {
 
   resolvePhysicalOpening(conversationId, action) {
     this.requireCurrentBinding(conversationId);
-    return this.adapter?.resolveOpeningDrill?.(action) || { success: false };
+    const result = this.adapter?.resolveOpeningDrill?.(action) || { success: false };
+    if (action === 'continue') this.setCoaching(conversationId, 'selective', 'opening_continue');
+    return result;
   }
 
   resumeNormalPlay(conversationId) {
@@ -381,6 +435,7 @@ class MentorPhysicalObserverService {
 
   availability() {
     const activeBinding = this.store.getActivePhysicalBinding(this.boardId);
+    const adapterStatus = this.adapter?.getGameStatus?.() || null;
     return {
       available: Boolean(this.snapshot?.active && this.snapshot.phase !== 'idle'),
       boardId: this.boardId,
@@ -389,6 +444,8 @@ class MentorPhysicalObserverService {
       stateRevision: Number(this.snapshot?.stateRevision || 0),
       phase: this.snapshot?.phase || 'idle',
       statusText: this.snapshot?.statusText || 'Physical board unavailable.',
+      sensorFresh: Boolean(adapterStatus?.sensorFresh),
+      sensorAgeMs: adapterStatus?.sensorAgeMs ?? null,
       boundConversationId: activeBinding?.conversationId || null,
       binding: activeBinding ? {
         conversationId: activeBinding.conversationId,
@@ -427,7 +484,13 @@ class MentorPhysicalObserverService {
     return normalizeSnapshot(this.snapshot, binding);
   }
 
-  attach(conversationId, { serverInstanceId, sessionGeneration } = {}) {
+  attach(conversationId, {
+    serverInstanceId,
+    sessionGeneration,
+    allowLiveSwitch = false,
+    coachingMode = 'prompt_pending',
+    coachingOrigin = 'manual'
+  } = {}) {
     if (!this.store.getConversation(conversationId)) {
       throw new MentorPhysicalError('Conversation not found.', 'conversation_not_found', 404);
     }
@@ -441,10 +504,10 @@ class MentorPhysicalObserverService {
     if (this.activityService?.get(conversationId)) {
       throw new MentorPhysicalError('End the virtual mentor activity before attaching the physical board.', 'physical_activity_active', 409);
     }
-    if (this.textService?.hasActiveConversation(conversationId)) {
+    if (!allowLiveSwitch && this.textService?.hasActiveConversation(conversationId)) {
       throw new MentorPhysicalError('Stop the current mentor response before attaching the physical board.', 'mentor_text_active', 409);
     }
-    if (this.liveService?.isConversationActive(conversationId)) {
+    if (!allowLiveSwitch && this.liveService?.isConversationActive(conversationId)) {
       throw new MentorPhysicalError('Stop Live voice before changing the board source.', 'mentor_live_active', 409);
     }
     const virtualState = this.chessService.getState(conversationId);
@@ -453,7 +516,9 @@ class MentorPhysicalObserverService {
       serverInstanceId,
       sessionGeneration: Number(sessionGeneration),
       stateRevision: Number(this.snapshot.stateRevision || 0),
-      orientation: virtualState.orientation
+      orientation: virtualState.orientation,
+      coachingMode,
+      coachingOrigin
     });
     if (result.status === 'conflict') {
       throw new MentorPhysicalError('The physical board is already attached to another conversation.', 'physical_board_already_attached', 409, {
@@ -464,7 +529,172 @@ class MentorPhysicalObserverService {
     this.emit(conversationId, 'mentor-physical-binding-updated', { conversationId, physicalBoard: detail });
     this.emit(conversationId, 'mentor-physical-board-updated', { conversationId, state: detail.state, event: 'attached' });
     this.processGuidance(conversationId, this.snapshot, result.binding);
+    if (coachingMode === 'prompt_pending') this.promptForManualCoaching(conversationId);
+    if (allowLiveSwitch) this.liveService?.requestContextReconnect?.(conversationId, 'physical_board_attached');
     return detail;
+  }
+
+  getPhysicalGameStatus(conversationId = null) {
+    const availability = this.availability();
+    return {
+      ...availability,
+      attachedToThisConversation: Boolean(
+        conversationId && availability.boundConversationId === conversationId
+      ),
+      canStart: !availability.available && availability.sensorFresh
+    };
+  }
+
+  assertPhysicalIntent(conversationId, requestId) {
+    const messages = this.store.getRequestMessages(conversationId, requestId);
+    const current = messages.find((message) => message.role === 'user')?.content || '';
+    const explicit = /\bphysical\b|\breal (?:chess )?board\b|\bon the (?:chess )?board\b/i.test(current);
+    if (explicit) return true;
+    const conversation = this.store.getConversation(conversationId);
+    const recent = (conversation?.messages || []).slice(-4);
+    const affirmative = /^(yes|yeah|yep|physical|the physical one|board)$/i.test(current.trim());
+    const askedChoice = recent.some((message) => message.role === 'model'
+      && /physical\s+or\s+virtual|attach.{0,40}physical|physical.{0,40}attach/i.test(message.content));
+    if (affirmative && askedChoice) return true;
+    throw new MentorPhysicalError(
+      'Ask the learner whether they want a Physical or Virtual game before starting anything.',
+      'physical_game_choice_required',
+      409
+    );
+  }
+
+  startPhysicalGame(conversationId, { requestId, requireIntent = true } = {}) {
+    if (!this.store.getConversation(conversationId)) {
+      throw new MentorPhysicalError('Conversation not found.', 'conversation_not_found', 404);
+    }
+    if (requireIntent) this.assertPhysicalIntent(conversationId, requestId);
+    const existingAction = requestId && this.store.getPhysicalAction(conversationId, requestId);
+    if (existingAction?.status === 'complete') return { ...existingAction.result, duplicate: true };
+    if (existingAction?.status === 'failed') {
+      throw new MentorPhysicalError(
+        'This physical-game request already failed and will not be replayed.',
+        existingAction.errorCode || 'physical_start_failed',
+        409
+      );
+    }
+    const status = this.getPhysicalGameStatus(conversationId);
+    if (status.available) {
+      if (status.boundConversationId === conversationId) {
+        const result = { started: false, attached: true, physicalBoard: this.detail(conversationId) };
+        if (requestId) this.store.savePhysicalAction(conversationId, requestId, 'start', result);
+        return result;
+      }
+      if (status.boundConversationId) {
+        throw new MentorPhysicalError(
+          'The active physical game is attached to another conversation.',
+          'physical_board_already_attached',
+          409
+        );
+      }
+      throw new MentorPhysicalError(
+        'A physical game is already active. Ask the learner to confirm attaching to the existing game.',
+        'physical_game_attach_confirmation_required',
+        409,
+        { physicalStatus: status }
+      );
+    }
+    if (!status.sensorFresh) {
+      throw new MentorPhysicalError(
+        'The ESP32 sensor connection is stale. Reconnect the board before starting a physical game.',
+        'physical_sensor_stale',
+        409,
+        { sensorAgeMs: status.sensorAgeMs }
+      );
+    }
+    try {
+      this.adapter?.startDefaultGame?.();
+      const detail = this.attach(conversationId, {
+        serverInstanceId: this.snapshot.serverInstanceId,
+        sessionGeneration: this.snapshot.sessionGeneration,
+        allowLiveSwitch: true,
+        coachingMode: 'selective',
+        coachingOrigin: 'gemini_started'
+      });
+      const result = { started: true, attached: true, physicalBoard: detail };
+      if (requestId) this.store.savePhysicalAction(conversationId, requestId, 'start', result);
+      return result;
+    } catch (error) {
+      if (requestId) this.store.savePhysicalAction(conversationId, requestId, 'start', null, error.code || 'physical_start_failed');
+      throw error;
+    }
+  }
+
+  attachPhysicalGame(conversationId, { requestId, requireIntent = true } = {}) {
+    if (requireIntent) this.assertPhysicalIntent(conversationId, requestId);
+    const existingAction = requestId && this.store.getPhysicalAction(conversationId, requestId);
+    if (existingAction?.status === 'complete') return { ...existingAction.result, duplicate: true };
+    if (existingAction?.status === 'failed') {
+      throw new MentorPhysicalError(
+        'This physical-board attachment request already failed and will not be replayed.',
+        existingAction.errorCode || 'physical_attach_failed',
+        409
+      );
+    }
+    const status = this.getPhysicalGameStatus(conversationId);
+    if (!status.available) {
+      throw new MentorPhysicalError('There is no active physical game to attach.', 'physical_board_unavailable', 409);
+    }
+    if (status.boundConversationId === conversationId) {
+      const result = { started: false, attached: true, physicalBoard: this.detail(conversationId) };
+      if (requestId) this.store.savePhysicalAction(conversationId, requestId, 'attach', result);
+      return result;
+    }
+    const detail = this.attach(conversationId, {
+      serverInstanceId: status.serverInstanceId,
+      sessionGeneration: status.sessionGeneration,
+      allowLiveSwitch: true,
+      coachingMode: 'prompt_pending',
+      coachingOrigin: 'mentor_attach'
+    });
+    const result = { started: false, attached: true, physicalBoard: detail };
+    if (requestId) this.store.savePhysicalAction(conversationId, requestId, 'attach', result);
+    return result;
+  }
+
+  setCoaching(conversationId, mode, origin = 'user') {
+    this.requireCurrentBinding(conversationId);
+    if (!['off', 'prompt_pending', 'selective'].includes(mode)) {
+      throw new MentorPhysicalError('Coaching mode must be off or selective.', 'invalid_coaching_mode');
+    }
+    if (mode === 'off') this.clearPendingCoaching(conversationId);
+    const binding = this.store.updatePhysicalBinding(conversationId, {
+      coachingMode: mode,
+      coachingOrigin: origin,
+      coachingPromptedAt: mode === 'prompt_pending' ? Date.now() : null,
+      ...(mode === 'selective' ? { fullTurnsSinceSummary: 0 } : {})
+    });
+    const detail = this.detail(conversationId);
+    this.emit(conversationId, 'mentor-physical-binding-updated', { conversationId, physicalBoard: detail });
+    return { binding, physicalBoard: detail };
+  }
+
+  promptForManualCoaching(conversationId) {
+    const binding = this.store.getPhysicalBinding(conversationId);
+    if (!binding || binding.coachingMode !== 'prompt_pending' || binding.coachingPromptedAt) return null;
+    this.store.updatePhysicalBinding(conversationId, { coachingPromptedAt: Date.now() });
+    const requestId = `physical-coaching-prompt:${binding.sessionGeneration}`;
+    const pair = this.store.createMessagePair(conversationId, {
+      requestId,
+      text: 'Physical board attached.',
+      kind: 'physical',
+      assistantContent: 'Would you like selective coaching during this physical game? I will speak only at important moments and after every three complete turns.',
+      assistantStatus: 'complete',
+      suppressTitle: true
+    });
+    if (!pair || pair.duplicate) return pair;
+    this.emit(conversationId, 'mentor-message-start', { conversationId, requestId, message: pair.userMessage });
+    this.emit(conversationId, 'mentor-message-complete', {
+      conversationId,
+      requestId,
+      message: pair.assistantMessage,
+      conversation: this.store.touchConversation(conversationId)
+    });
+    return pair;
   }
 
   detach(conversationId) {
@@ -476,6 +706,7 @@ class MentorPhysicalObserverService {
     }
     this.clearPendingGuidance(conversationId);
     this.clearPendingOpeningGuidance(conversationId);
+    this.clearPendingCoaching(conversationId);
     const binding = this.store.detachPhysicalBinding(conversationId);
     const detail = { binding, state: null };
     this.emit(conversationId, 'mentor-physical-binding-updated', { conversationId, physicalBoard: detail });
@@ -590,6 +821,201 @@ class MentorPhysicalObserverService {
     return current;
   }
 
+  coachingTrigger(snapshot, humanMove, analysis, fullTurnsSinceSummary) {
+    if (snapshot.gameStatus?.checkmate) return 'checkmate';
+    if (snapshot.gameStatus?.draw) return 'draw';
+    if (snapshot.gameStatus?.inCheck) return 'check';
+    if (humanMove?.promotion) return 'promotion';
+    if (analysis?.mateImpact) return analysis.classification || 'mate_override';
+    if (['inaccuracy', 'mistake', 'blunder'].includes(analysis?.classification)) {
+      return analysis.classification;
+    }
+    if (humanMove?.before && Math.abs(materialScore(snapshot.fen) - materialScore(humanMove.before)) >= 3) {
+      return 'material_swing';
+    }
+    if (fullTurnsSinceSummary >= 3) return 'strategic_summary';
+    return null;
+  }
+
+  coachingStillCurrent(conversationId, expected) {
+    const binding = this.store.getPhysicalBinding(conversationId);
+    const snapshot = this.snapshot;
+    return Boolean(
+      binding?.status === 'active'
+      && binding.coachingMode === 'selective'
+      && snapshot?.active
+      && snapshot.serverInstanceId === expected.serverInstanceId
+      && Number(snapshot.sessionGeneration) === expected.sessionGeneration
+      && Number(snapshot.stateRevision || 0) === expected.stateRevision
+      && snapshot.fen === expected.fen
+      && physicalMoveIdentity(snapshot.lastMove) === expected.lastMoveId
+      && snapshot.phase === 'ready'
+      && snapshot.board?.ready
+      && !snapshot.robotBusy
+      && !snapshot.pendingRobotJob
+    );
+  }
+
+  persistCoachingMessage(conversationId, requestId, displayText, reply) {
+    const pair = this.store.createMessagePair(conversationId, {
+      requestId,
+      text: displayText,
+      kind: 'physical',
+      assistantContent: reply,
+      assistantStatus: 'complete',
+      suppressTitle: true
+    });
+    if (!pair || pair.duplicate) return pair;
+    this.emit(conversationId, 'mentor-message-start', { conversationId, requestId, message: pair.userMessage });
+    this.emit(conversationId, 'mentor-message-complete', {
+      conversationId,
+      requestId,
+      message: pair.assistantMessage,
+      conversation: this.store.touchConversation(conversationId)
+    });
+    return pair;
+  }
+
+  async runSelectiveCoaching(conversationId, expected, humanMove, nextTurnCount) {
+    if (!this.coachingStillCurrent(conversationId, expected)) return;
+    const controller = new AbortController();
+    const pending = this.pendingCoaching.get(conversationId);
+    if (pending) pending.controller = controller;
+    this.emit(conversationId, 'mentor-physical-coaching-updated', {
+      conversationId,
+      mode: 'selective',
+      analysisState: 'analyzing',
+      text: 'Analyzing your move'
+    });
+    let analysis = null;
+    try {
+      const state = this.getState(conversationId);
+      analysis = await this.analysisService.analyzeMoveState({
+        ...state,
+        history: [humanMove]
+      }, {
+        mode: 'quick',
+        signal: controller.signal,
+        assertCurrent: () => {
+          if (!this.coachingStillCurrent(conversationId, expected)) {
+            throw new MentorPhysicalError('The physical position changed during coaching analysis.', 'stale_analysis', 409);
+          }
+        }
+      });
+    } catch (error) {
+      if (error?.name === 'AbortError' || error?.code === 'stale_analysis') return;
+    }
+    if (!this.coachingStillCurrent(conversationId, expected)) return;
+    const trigger = this.coachingTrigger(this.snapshot, humanMove, analysis, nextTurnCount);
+    if (!trigger) {
+      this.store.updatePhysicalBinding(conversationId, { fullTurnsSinceSummary: nextTurnCount });
+      this.emit(conversationId, 'mentor-physical-coaching-updated', {
+        conversationId,
+        mode: 'selective',
+        analysisState: 'idle',
+        text: 'Selective coaching on'
+      });
+      return;
+    }
+
+    const binding = this.store.getPhysicalBinding(conversationId);
+    if (binding.lastCoachingFen === expected.fen && binding.lastCoachedMoveId === expected.humanMoveId) return;
+    const fallback = coachingFallback(trigger, humanMove, analysis);
+    const requestId = `physical-coaching:${expected.sessionGeneration}:${expected.humanMoveId}:${trigger}`
+      .replace(/[^A-Za-z0-9._:-]/g, '_');
+    const activity = this.activityService?.get?.(conversationId);
+    const prompt = [
+      '[PHYSICAL_SELECTIVE_COACHING]',
+      `Trigger: ${trigger}`,
+      `Learner move: ${humanMove.uci} (${humanMove.san || humanMove.uci})`,
+      `Move classification: ${analysis?.classification || 'not available'}`,
+      `Centipawn loss: ${analysis?.centipawnLoss ?? 'not available'}`,
+      `Mate impact: ${analysis?.mateImpact || 'none'}`,
+      `Best alternative: ${analysis?.bestAlternative?.san || analysis?.before?.bestMove?.san || analysis?.before?.bestMove?.uci || 'not available'}`,
+      `Recent moves: ${this.getState(conversationId).history.slice(-8).map((move) => move.san).join(' ')}`,
+      activity ? `Current lesson or opening: ${activity.title}. Goal: ${activity.goal}` : 'No structured activity is active.',
+      `Recent advice fingerprints: ${binding.adviceFingerprints.join(', ') || '(none)'}`,
+      'Explain one useful cause-and-effect lesson from this position in two or three concise spoken sentences.',
+      'Do not merely restate the move notation. Do not move or alter the physical board, and avoid repeating recent advice.'
+    ].join('\n');
+    const fingerprint = createHash('sha1').update(`${trigger}|${fallback}`).digest('hex').slice(0, 12);
+    this.store.updatePhysicalBinding(conversationId, {
+      lastCoachedRevision: expected.stateRevision,
+      lastCoachedMoveId: expected.humanMoveId,
+      lastCoachingTrigger: trigger,
+      lastCoachingFen: expected.fen,
+      fullTurnsSinceSummary: nextTurnCount >= 3 ? 0 : nextTurnCount,
+      adviceFingerprints: [...binding.adviceFingerprints, fingerprint].slice(-8)
+    });
+    this.emit(conversationId, 'mentor-physical-coaching-updated', {
+      conversationId,
+      mode: 'selective',
+      analysisState: 'explaining',
+      trigger,
+      text: 'Mentor explaining'
+    });
+    try {
+      const live = this.liveService?.requestPhysicalTurn(conversationId, {
+        requestId,
+        displayText: `Coaching after ${humanMove.san || humanMove.uci}.`,
+        prompt,
+        urgent: false,
+        fallbackAssistantText: fallback,
+        timeoutMs: 30000,
+        queueKey: 'physical-selective-coaching',
+        validateBeforeStart: () => this.coachingStillCurrent(conversationId, expected)
+      });
+      if (live) return;
+    } catch {
+      // Persist the deterministic fallback if Live cannot accept the turn.
+    }
+    this.persistCoachingMessage(
+      conversationId,
+      requestId,
+      `Coaching after ${humanMove.san || humanMove.uci}.`,
+      fallback
+    );
+  }
+
+  scheduleSelectiveCoaching(conversationId, snapshot) {
+    const binding = this.store.getPhysicalBinding(conversationId);
+    if (!binding || binding.coachingMode !== 'selective') return;
+    if (this.activityService?.get?.(conversationId)?.config?.boardSource === 'physical') return;
+    const state = normalizeSnapshot(snapshot, binding);
+    const humanMove = [...state.history].reverse().find((move) => move.side === 'human');
+    const humanMoveId = physicalMoveIdentity(humanMove);
+    const robotMoveId = physicalMoveIdentity(state.history.at(-1));
+    if (!humanMove || !humanMoveId || !robotMoveId || binding.lastObservedRobotMoveId === robotMoveId) return;
+    const updated = this.store.updatePhysicalBinding(conversationId, {
+      lastObservedRobotMoveId: robotMoveId
+    });
+    const expected = {
+      serverInstanceId: snapshot.serverInstanceId,
+      sessionGeneration: Number(snapshot.sessionGeneration),
+      stateRevision: Number(snapshot.stateRevision || 0),
+      fen: snapshot.fen,
+      lastMoveId: physicalMoveIdentity(snapshot.lastMove),
+      humanMoveId
+    };
+    this.clearPendingCoaching(conversationId);
+    const timer = setTimeout(() => {
+      const current = this.pendingCoaching.get(conversationId);
+      if (!current || current.expected.fen !== expected.fen) return;
+      this.runSelectiveCoaching(
+        conversationId,
+        expected,
+        humanMove,
+        Number(updated.fullTurnsSinceSummary || 0) + 1
+      ).finally(() => {
+        if (this.pendingCoaching.get(conversationId)?.expected.fen === expected.fen) {
+          this.pendingCoaching.delete(conversationId);
+        }
+      });
+    }, this.coachingDelayMs);
+    timer.unref?.();
+    this.pendingCoaching.set(conversationId, { timer, expected, controller: null });
+  }
+
   handleSnapshot(snapshot, event = 'physical-status') {
     this.snapshot = snapshot;
     const binding = this.store.getActivePhysicalBinding(this.boardId);
@@ -600,6 +1026,7 @@ class MentorPhysicalObserverService {
       const stale = this.store.detachPhysicalBinding(binding.conversationId, 'stale');
       this.clearPendingGuidance(binding.conversationId);
       this.clearPendingOpeningGuidance(binding.conversationId);
+      this.clearPendingCoaching(binding.conversationId);
       this.activityService?.cancelStalePhysicalActivity?.(binding.conversationId, 'physical_session_stale');
       this.emit(binding.conversationId, 'mentor-physical-binding-updated', {
         conversationId: binding.conversationId,
@@ -641,6 +1068,9 @@ class MentorPhysicalObserverService {
     }
     this.processGuidance(binding.conversationId, snapshot, updated);
     this.processOpeningGuidance(binding.conversationId, snapshot, event);
+    if (event === 'physical-move' && snapshot.side === 'engine' && snapshot.verified) {
+      this.scheduleSelectiveCoaching(binding.conversationId, snapshot);
+    }
   }
 
   processOpeningGuidance(conversationId, snapshot, event) {

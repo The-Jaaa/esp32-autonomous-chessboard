@@ -12,7 +12,9 @@ const ACTIVE_STATUSES = new Set([
   'thinking',
   'speaking',
   'interrupted',
-  'tool_running'
+  'tool_running',
+  'switching_source',
+  'reconnecting'
 ]);
 
 const LIVE_AUDIO_PREFERENCES_KEY = 'mentor-live-audio-preferences-v1';
