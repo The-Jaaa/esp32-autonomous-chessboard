@@ -429,6 +429,7 @@ class MentorActivityService {
       sessionGeneration: physical.physical.sessionGeneration
     });
     this.physicalCoordinator.syncPhysicalActivity(activity);
+    this.physicalCoordinator?.announcePhysicalOpening?.(activity);
     return this.get(conversationId);
   }
 

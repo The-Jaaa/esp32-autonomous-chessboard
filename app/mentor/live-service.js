@@ -38,6 +38,9 @@ const LIVE_SYSTEM_INSTRUCTION = [
   'When it is physical, you may read, analyze, orient, and annotate the app view, but you must never claim to move, reset, or control physical pieces.',
   'In the current physical mode the learner controls White and the physical-board robot controls Black. Never claim that you personally played either physical side.',
   'Messages beginning with [PHYSICAL_BOARD_GUIDANCE] are urgent internal safety instructions. Speak the required recovery instruction exactly and do not answer an earlier learner request in that turn.',
+  'Bracketed labels such as [BOARD_CONTEXT_UPDATE] and [PHYSICAL_BOARD_GUIDANCE] are private control markers. Never quote or speak those labels.',
+  'Board context updates are silent context, not learner requests. Never respond to a board context update by itself.',
+  'Never claim Stockfish failed unless the current Stockfish tool result explicitly reports an error.',
   'Messages beginning with [BOARD_CONTEXT_UPDATE] are silent internal state updates. Absorb them without replying unless the user is already discussing that board change.'
 ].join(' ');
 
@@ -643,6 +646,9 @@ class MentorLiveService {
       emptyCompletionsToIgnore: Number(values.emptyCompletionsToIgnore || 0),
       emptyCompletionsIgnored: 0,
       timeoutId: null,
+      timeoutRequest: null,
+      timeoutArmedAt: 0,
+      timeoutMs: 0,
       record,
       resolveCompletion: null,
       completion: null
@@ -652,10 +658,14 @@ class MentorLiveService {
   }
 
   armPhysicalTurnTimeout(record, turn, request = {}) {
+    if (turn.timeoutId) clearTimeout(turn.timeoutId);
     const requested = Number(request.timeoutMs);
     const timeoutMs = Number.isFinite(requested) && requested > 0
       ? Math.min(60000, Math.max(10, Math.round(requested)))
       : DEFAULT_PHYSICAL_TURN_TIMEOUT_MS;
+    turn.timeoutRequest = request;
+    turn.timeoutArmedAt = Date.now();
+    turn.timeoutMs = timeoutMs;
     turn.timeoutId = setTimeout(() => {
       if (record.closing || record.turn !== turn) return;
       const fallback = String(request.fallbackAssistantText || turn.expectedAssistantText || '').trim();
@@ -678,6 +688,13 @@ class MentorLiveService {
       this.emitStatus(record, 'listening', { reason: 'physical_guidance_timeout' });
     }, timeoutMs);
     turn.timeoutId.unref?.();
+  }
+
+  notePhysicalTurnProgress(record, turn) {
+    if (turn?.source !== 'physical' || !turn.timeoutRequest || record.turn !== turn) return;
+    const rearmInterval = Math.min(1000, Math.max(5, Math.floor(turn.timeoutMs / 3)));
+    if (Date.now() - turn.timeoutArmedAt < rearmInterval) return;
+    this.armPhysicalTurnTimeout(record, turn, turn.timeoutRequest);
   }
 
   createAudioTurn(record) {
@@ -808,6 +825,7 @@ class MentorLiveService {
     turn.hadTools = true;
     turn.assistantText = turn.expectedAssistantText
       || mergeTranscript(turn.assistantText, text);
+    this.notePhysicalTurnProgress(record, turn);
     const message = this.updateTurnAssistantMessage(turn);
     const status = turn.toolBusy ? 'tool_running' : 'speaking';
     this.emit(record.conversationId, 'mentor-live-assistant-transcript', {
@@ -1047,7 +1065,9 @@ class MentorLiveService {
     for (const part of audioParts(message)) {
       if (part.text && !content?.outputTranscription?.text) this.handleOutputTranscript(record, part.text);
       if (part.inlineData?.data) {
-        this.currentTurn(record, record.contextPending ? 'context' : 'audio').receivedProviderOutput = true;
+        const audioTurn = this.currentTurn(record, record.contextPending ? 'context' : 'audio');
+        audioTurn.receivedProviderOutput = true;
+        this.notePhysicalTurnProgress(record, audioTurn);
         const mimeType = part.inlineData.mimeType || 'audio/pcm;rate=24000';
         const match = /rate=(\d+)/i.exec(mimeType);
         const sampleRate = match ? Number(match[1]) : AUDIO_OUTPUT_SAMPLE_RATE;
@@ -1348,9 +1368,13 @@ class MentorLiveService {
     if (!record.pendingBoardState || record.turn || record.closing || !record.ready) return false;
     const { state } = record.pendingBoardState;
     record.pendingBoardState = null;
-    record.contextPending = true;
-    record.providerSession.sendRealtimeInput({
-      text: `[BOARD_CONTEXT_UPDATE]\n${boardContextFromState(state)}`
+    record.contextPending = false;
+    record.providerSession.sendClientContent({
+      turns: [{
+        role: 'user',
+        parts: [{ text: `[BOARD_CONTEXT_UPDATE]\n${boardContextFromState(state)}` }]
+      }],
+      turnComplete: false
     });
     return true;
   }

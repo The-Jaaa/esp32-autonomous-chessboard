@@ -169,32 +169,34 @@ function guidanceFor(snapshot) {
     urgent = true;
     eventText = snapshot.statusText || 'The castling rook still needs to be placed.';
     reply = eventText;
-  } else if (snapshot.gameStatus?.checkmate) {
+  } else if (!snapshot.robotBusy && !snapshot.pendingRobotJob && snapshot.gameStatus?.checkmate) {
     type = 'checkmate';
     eventText = snapshot.gameStatus.resultText || 'Checkmate.';
     reply = eventText;
-  } else if (snapshot.gameStatus?.draw) {
+  } else if (!snapshot.robotBusy && !snapshot.pendingRobotJob && snapshot.gameStatus?.draw) {
     type = 'draw';
     eventText = snapshot.gameStatus.resultText || 'The physical game is drawn.';
     reply = eventText;
-  } else if (snapshot.gameStatus?.inCheck) {
+  } else if (!snapshot.robotBusy && !snapshot.pendingRobotJob && snapshot.gameStatus?.inCheck) {
     type = 'check';
     eventText = `${snapshot.gameStatus.resultText || 'Check.'}${snapshot.gameStatus.checkedKingSquare ? ` King on ${snapshot.gameStatus.checkedKingSquare}.` : ''}`;
     reply = eventText;
   }
 
   if (!type) return null;
-  const keyParts = [
-    snapshot.serverInstanceId,
-    snapshot.sessionGeneration,
-    type,
-    snapshot.phase,
-    snapshot.fen,
-    diff,
-    snapshot.pendingRobotJob?.id || '',
-    snapshot.pendingUndo?.id || '',
-    snapshot.statusText || ''
-  ];
+  const keyParts = ['check', 'checkmate', 'draw'].includes(type)
+    ? [snapshot.serverInstanceId, snapshot.sessionGeneration, type, snapshot.fen]
+    : [
+        snapshot.serverInstanceId,
+        snapshot.sessionGeneration,
+        type,
+        snapshot.phase,
+        snapshot.fen,
+        diff,
+        snapshot.pendingRobotJob?.id || '',
+        snapshot.pendingUndo?.id || '',
+        snapshot.statusText || ''
+      ];
   return {
     type,
     urgent,
@@ -218,7 +220,15 @@ function isRecoverableGuidanceKey(key) {
 }
 
 class MentorPhysicalObserverService {
-  constructor({ store, chessService, analysisService, emit = () => {}, boardId = PHYSICAL_BOARD_ID }) {
+  constructor({
+    store,
+    chessService,
+    analysisService,
+    emit = () => {},
+    boardId = PHYSICAL_BOARD_ID,
+    recoverableGuidanceDelayMs = 2000,
+    openingGuidanceDelayMs = 1500
+  }) {
     this.store = store;
     this.chessService = chessService;
     this.analysisService = analysisService;
@@ -229,6 +239,22 @@ class MentorPhysicalObserverService {
     this.textService = null;
     this.liveService = null;
     this.activityService = null;
+    this.recoverableGuidanceDelayMs = recoverableGuidanceDelayMs;
+    this.openingGuidanceDelayMs = openingGuidanceDelayMs;
+    this.pendingGuidance = new Map();
+    this.pendingOpeningGuidance = new Map();
+  }
+
+  clearPendingGuidance(conversationId) {
+    const pending = this.pendingGuidance.get(conversationId);
+    if (pending) clearTimeout(pending.timer);
+    this.pendingGuidance.delete(conversationId);
+  }
+
+  clearPendingOpeningGuidance(conversationId) {
+    const pending = this.pendingOpeningGuidance.get(conversationId);
+    if (pending) clearTimeout(pending.timer);
+    this.pendingOpeningGuidance.delete(conversationId);
   }
 
   setDependencies({ textService, liveService, activityService }) {
@@ -277,6 +303,61 @@ class MentorPhysicalObserverService {
     const policy = this.activityService?.getPhysicalPolicy?.(activity.conversationId) || null;
     this.adapter?.setOpeningDrill?.(policy);
     return policy;
+  }
+
+  announcePhysicalOpening(activity) {
+    if (!activity || activity.config?.boardSource !== 'physical') return null;
+    const firstMove = activity.config.line?.[0] || null;
+    const firstHint = activity.config.hints?.[0] || '';
+    const displayText = `${activity.title} lesson started.`;
+    const reply = [
+      `We will practice the ${activity.title}, where the main plan is to ${String(activity.goal || 'develop with purpose').replace(/\.$/, '')}.`,
+      firstHint,
+      firstMove ? `You are White; begin with ${firstMove}.` : null
+    ].filter(Boolean).join(' ');
+    const requestId = `physical-opening-start:${activity.id}:${activity.generation}`;
+    const prompt = [
+      '[PHYSICAL_OPENING_START]',
+      `Opening: ${activity.title}`,
+      `Main strategic goal: ${activity.goal}`,
+      `First reviewed move: ${firstMove}`,
+      `Teaching cue: ${firstHint || '(none)'}`,
+      'Introduce the opening before play begins. Explain its central strategic idea, what White is trying to achieve, and one technique the learner should watch for.',
+      `Finish by clearly asking the learner to play ${firstMove}.`,
+      'Use three or four concise spoken sentences. Do not call tools or claim that a move has already been played.'
+    ].join('\n');
+    const live = this.liveService?.requestPhysicalTurn(activity.conversationId, {
+      requestId,
+      displayText,
+      prompt,
+      urgent: false,
+      fallbackAssistantText: reply,
+      timeoutMs: 30000,
+      queueKey: 'physical-opening'
+    });
+    if (live) return live;
+    const pair = this.store.createMessagePair(activity.conversationId, {
+      requestId,
+      text: displayText,
+      kind: 'physical',
+      assistantContent: reply,
+      assistantStatus: 'complete',
+      suppressTitle: true
+    });
+    if (!pair || pair.duplicate) return pair;
+    const conversation = this.store.touchConversation(activity.conversationId);
+    this.emit(activity.conversationId, 'mentor-message-start', {
+      conversationId: activity.conversationId,
+      requestId,
+      message: pair.userMessage
+    });
+    this.emit(activity.conversationId, 'mentor-message-complete', {
+      conversationId: activity.conversationId,
+      requestId,
+      message: pair.assistantMessage,
+      conversation
+    });
+    return pair;
   }
 
   retryPhysicalOpening(conversationId) {
@@ -393,6 +474,8 @@ class MentorPhysicalObserverService {
     if (this.liveService?.isConversationActive(conversationId)) {
       throw new MentorPhysicalError('Stop Live voice before changing the board source.', 'mentor_live_active', 409);
     }
+    this.clearPendingGuidance(conversationId);
+    this.clearPendingOpeningGuidance(conversationId);
     const binding = this.store.detachPhysicalBinding(conversationId);
     const detail = { binding, state: null };
     this.emit(conversationId, 'mentor-physical-binding-updated', { conversationId, physicalBoard: detail });
@@ -515,6 +598,8 @@ class MentorPhysicalObserverService {
       || binding.serverInstanceId !== snapshot.serverInstanceId
       || binding.sessionGeneration !== Number(snapshot.sessionGeneration)) {
       const stale = this.store.detachPhysicalBinding(binding.conversationId, 'stale');
+      this.clearPendingGuidance(binding.conversationId);
+      this.clearPendingOpeningGuidance(binding.conversationId);
       this.activityService?.cancelStalePhysicalActivity?.(binding.conversationId, 'physical_session_stale');
       this.emit(binding.conversationId, 'mentor-physical-binding-updated', {
         conversationId: binding.conversationId,
@@ -545,7 +630,15 @@ class MentorPhysicalObserverService {
       state,
       event
     });
-    if (meaningfulChange) this.liveService?.notifyPhysicalBoardUpdated(binding.conversationId, state);
+    if (!['ready', 'mentor_drill_complete'].includes(snapshot.phase)) {
+      this.clearPendingOpeningGuidance(binding.conversationId);
+    }
+    const committedBoardChange = event === 'physical-move'
+      && snapshot.planned !== true
+      && (snapshot.side === 'human' || snapshot.side === 'engine' || snapshot.undo || snapshot.redo);
+    if (meaningfulChange && committedBoardChange) {
+      this.liveService?.notifyPhysicalBoardUpdated(binding.conversationId, state);
+    }
     this.processGuidance(binding.conversationId, snapshot, updated);
     this.processOpeningGuidance(binding.conversationId, snapshot, event);
   }
@@ -557,30 +650,101 @@ class MentorPhysicalObserverService {
     const nextUci = activity.config.line?.[activity.stepIndex] || null;
     const complete = activity.state?.pauseReason === 'line_complete';
     const moveText = snapshot.san || snapshot.move || 'the reviewed reply';
+    const completedPairIndex = Math.max(0, Math.floor(activity.stepIndex / 2) - 1);
+    const teachingCue = activity.config.hints?.[completedPairIndex] || activity.goal || '';
+    const nextPairIndex = Math.floor(activity.stepIndex / 2);
+    const nextCue = activity.config.hints?.[nextPairIndex] || '';
     const displayText = `Black played ${moveText}.`;
     const reply = complete
-      ? `Black played ${moveText}. You completed the reviewed ${activity.title} line. Choose Repeat, Continue, or Finish.`
-      : `Black played ${moveText}. Your reviewed move is ${nextUci}.`;
+      ? `Black played ${moveText}. You completed the reviewed ${activity.title} line: ${activity.goal} Choose Repeat, Continue, or simply make a legal move to continue the game.`
+      : `Black played ${moveText}. ${teachingCue} Next, play ${nextUci}. ${nextCue}`.trim();
     const requestId = `physical-opening:${activity.id}:${snapshot.lastMove?.at || snapshot.stateRevision}:${activity.stepIndex}`;
     const prompt = [
       '[PHYSICAL_OPENING_STEP]',
       `Opening: ${activity.title}`,
       `Black just completed the reviewed move ${snapshot.move} (${moveText}).`,
       complete
-        ? 'The ten-ply reviewed line is complete. Briefly summarize its main idea and ask the learner to choose Repeat, Continue, or Finish.'
-        : `The required next learner move is ${nextUci}. Briefly explain the purpose of Black's move, then clearly ask the learner to play ${nextUci}.`,
-      'Use at most three concise spoken sentences. Do not call a board-changing tool and do not suggest a different move.'
+        ? 'The ten-ply reviewed line is complete. Summarize the opening structure, the main technique the learner practiced, and the usual middlegame plan. Explain that they may choose Repeat or Finish, or simply make any legal move to continue the game.'
+        : `The required next learner move is ${nextUci}. Teaching cue for the completed move pair: ${teachingCue}. Teaching cue for the next step: ${nextCue || activity.goal}. Explain why both the learner's previous move and Black's reply belong to the opening, connect them to a technique such as central control, development, king safety, pawn structure, or piece coordination, then clearly ask for ${nextUci}.`,
+      'Use three or four concise spoken sentences. Teach the idea and cause-and-effect, not merely the move notation. Do not call a board-changing tool and do not suggest a different move.'
     ].join('\n');
+    const deliver = () => {
+      try {
+        const live = this.liveService?.requestPhysicalTurn(conversationId, {
+          requestId,
+          displayText,
+          prompt,
+          urgent: false,
+          fallbackAssistantText: reply,
+          timeoutMs: 30000,
+          queueKey: 'physical-opening'
+        });
+        if (live) return;
+      } catch {
+        // Fall through to the persisted deterministic guidance.
+      }
+      const pair = this.store.createMessagePair(conversationId, {
+        requestId,
+        text: displayText,
+        kind: 'physical',
+        assistantContent: reply,
+        assistantStatus: 'complete',
+        suppressTitle: true
+      });
+      if (!pair || pair.duplicate) return;
+      const conversation = this.store.touchConversation(conversationId);
+      this.emit(conversationId, 'mentor-message-start', {
+        conversationId,
+        requestId,
+        message: pair.userMessage
+      });
+      this.emit(conversationId, 'mentor-message-complete', {
+        conversationId,
+        requestId,
+        message: pair.assistantMessage,
+        conversation
+      });
+    };
+
+    if (!this.liveService?.isConversationActive?.(conversationId)) {
+      deliver();
+      return;
+    }
+
+    this.clearPendingOpeningGuidance(conversationId);
+    const expectedMoveAt = snapshot.lastMove?.at || snapshot.stateRevision;
+    const timer = setTimeout(() => {
+      this.pendingOpeningGuidance.delete(conversationId);
+      const current = this.snapshot;
+      const currentActivity = this.activityService?.get?.(conversationId);
+      const stable = current?.active
+        && current.serverInstanceId === snapshot.serverInstanceId
+        && Number(current.sessionGeneration) === Number(snapshot.sessionGeneration)
+        && current.fen === snapshot.fen
+        && (current.lastMove?.at || current.stateRevision) === expectedMoveAt
+        && ['ready', 'mentor_drill_complete'].includes(current.phase)
+        && currentActivity?.id === activity.id
+        && currentActivity.stepIndex === activity.stepIndex;
+      if (stable) deliver();
+    }, this.openingGuidanceDelayMs);
+    timer.unref?.();
+    this.pendingOpeningGuidance.set(conversationId, { requestId, timer });
+  }
+
+  deliverGuidance(conversationId, snapshot, guidance) {
+    const binding = this.store.getPhysicalBinding(conversationId);
+    if (!binding || binding.status !== 'active' || binding.lastEventKey === guidance.key) return;
+    this.store.updatePhysicalBinding(conversationId, { lastEventKey: guidance.key });
+    const occurrenceKey = `${guidance.key}|${Number(snapshot.stateRevision || 0)}`;
+    const digest = createHash('sha1').update(occurrenceKey).digest('hex').slice(0, 16);
+    const requestId = `physical:${snapshot.sessionGeneration}:${digest}`;
     try {
       const live = this.liveService?.requestPhysicalTurn(conversationId, {
         requestId,
-        displayText,
-        prompt,
-        urgent: false,
-        expectedAssistantText: reply,
-        fallbackAssistantText: reply,
-        timeoutMs: 15000,
-        queueKey: 'physical-opening'
+        displayText: guidance.eventText,
+        prompt: guidance.prompt,
+        urgent: guidance.urgent,
+        expectedAssistantText: guidance.urgent ? guidance.reply : null
       });
       if (live) return;
     } catch {
@@ -588,9 +752,9 @@ class MentorPhysicalObserverService {
     }
     const pair = this.store.createMessagePair(conversationId, {
       requestId,
-      text: displayText,
+      text: guidance.eventText,
       kind: 'physical',
-      assistantContent: reply,
+      assistantContent: guidance.reply,
       assistantStatus: 'complete',
       suppressTitle: true
     });
@@ -612,6 +776,7 @@ class MentorPhysicalObserverService {
   processGuidance(conversationId, snapshot, binding) {
     const guidance = guidanceFor(snapshot);
     if (!guidance) {
+      this.clearPendingGuidance(conversationId);
       const previousKey = binding.lastEventKey;
       if (isRecoverableGuidanceKey(previousKey) && snapshot.phase !== 'ready') return;
       if (previousKey) this.store.updatePhysicalBinding(conversationId, { lastEventKey: null });
@@ -636,43 +801,24 @@ class MentorPhysicalObserverService {
       return;
     }
     if (binding.lastEventKey === guidance.key) return;
-    this.store.updatePhysicalBinding(conversationId, { lastEventKey: guidance.key });
-    const occurrenceKey = `${guidance.key}|${Number(snapshot.stateRevision || 0)}`;
-    const digest = createHash('sha1').update(occurrenceKey).digest('hex').slice(0, 16);
-    const requestId = `physical:${snapshot.sessionGeneration}:${digest}`;
-    try {
-      const live = this.liveService?.requestPhysicalTurn(conversationId, {
-        requestId,
-        displayText: guidance.eventText,
-        prompt: guidance.prompt,
-        urgent: guidance.urgent,
-        expectedAssistantText: guidance.urgent ? guidance.reply : null
-      });
-      if (live) return;
-    } catch {
-      // Fall through to a deterministic text-only response.
+    if (guidance.type === 'error') {
+      this.clearPendingGuidance(conversationId);
+      this.deliverGuidance(conversationId, snapshot, guidance);
+      return;
     }
-    const pair = this.store.createMessagePair(conversationId, {
-      requestId,
-      text: guidance.eventText,
-      kind: 'physical',
-      assistantContent: guidance.reply,
-      assistantStatus: 'complete',
-      suppressTitle: true
-    });
-    if (!pair || pair.duplicate) return;
-    const conversation = this.store.touchConversation(conversationId);
-    this.emit(conversationId, 'mentor-message-start', {
-      conversationId,
-      requestId,
-      message: pair.userMessage
-    });
-    this.emit(conversationId, 'mentor-message-complete', {
-      conversationId,
-      requestId,
-      message: pair.assistantMessage,
-      conversation
-    });
+    const pending = this.pendingGuidance.get(conversationId);
+    if (pending?.key === guidance.key) return;
+    this.clearPendingGuidance(conversationId);
+    const timer = setTimeout(() => {
+      this.pendingGuidance.delete(conversationId);
+      const current = this.snapshot;
+      const currentGuidance = guidanceFor(current);
+      if (currentGuidance?.key === guidance.key) {
+        this.deliverGuidance(conversationId, current, currentGuidance);
+      }
+    }, this.recoverableGuidanceDelayMs);
+    timer.unref?.();
+    this.pendingGuidance.set(conversationId, { key: guidance.key, timer });
   }
 }
 

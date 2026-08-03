@@ -294,8 +294,15 @@ async function socketRegressions() {
     body: JSON.stringify({ uci: 'e2e4', expectedRevision: 0, actionId: 'live-board-1' })
   });
   assert.strictEqual(boardResponse.status, 200);
-  assert.ok(connector.sessions[0].realtimeInputs.some((input) =>
-    input.text?.startsWith('[BOARD_CONTEXT_UPDATE]') && input.text.includes(' b ')));
+  assert.ok(connector.sessions[0].clientContent.some((input) =>
+    input.turnComplete === false
+      && input.turns?.[0]?.parts?.[0]?.text?.startsWith('[BOARD_CONTEXT_UPDATE]')
+      && input.turns[0].parts[0].text.includes(' b ')));
+  assert.strictEqual(
+    connector.sessions[0].realtimeInputs.some((input) => input.text?.startsWith('[BOARD_CONTEXT_UPDATE]')),
+    false,
+    'silent board context must not use the response-triggering realtime text channel'
+  );
 
   const interruptedFinal = waitForEvent(client, 'mentor-live-assistant-transcript', (payload) =>
     payload.isFinal && payload.message?.requestId === 'live-interrupt-1');
@@ -314,6 +321,42 @@ async function socketRegressions() {
   assert.ok(interrupted.message.content.length > 0);
 
   const liveSession = connector.sessions[0];
+  const progressiveRealtimeInput = liveSession.sendRealtimeInput.bind(liveSession);
+  liveSession.sendRealtimeInput = (payload) => {
+    if (payload.text === '[PHYSICAL_OPENING_STEP]\nExplain the strategic idea.') {
+      liveSession.realtimeInputs.push(payload);
+      return;
+    }
+    progressiveRealtimeInput(payload);
+  };
+  const progressiveFinal = waitForEvent(client, 'mentor-live-assistant-transcript', (payload) =>
+    payload.isFinal && payload.message?.requestId === 'physical:progressive-speech');
+  feature.liveService.requestPhysicalTurn(first.id, {
+    requestId: 'physical:progressive-speech',
+    displayText: 'Black played a reviewed move.',
+    prompt: '[PHYSICAL_OPENING_STEP]\nExplain the strategic idea.',
+    fallbackAssistantText: 'Fallback opening guidance.',
+    timeoutMs: 60,
+    queueKey: 'physical-opening'
+  });
+  await new Promise((resolve) => setTimeout(resolve, 35));
+  liveSession.callbacks.onmessage({
+    serverContent: { outputTranscription: { text: 'The actual spoken strategic explanation' } }
+  });
+  await new Promise((resolve) => setTimeout(resolve, 35));
+  liveSession.callbacks.onmessage({
+    serverContent: {
+      outputTranscription: { text: ' connects development with central control.' },
+      turnComplete: true
+    }
+  });
+  const progressive = await progressiveFinal;
+  assert.strictEqual(progressive.message.status, 'complete');
+  assert.match(progressive.message.content, /actual spoken strategic explanation/i);
+  assert.match(progressive.message.content, /development with central control/i);
+  assert.doesNotMatch(progressive.message.content, /fallback opening guidance/i);
+  liveSession.sendRealtimeInput = progressiveRealtimeInput;
+
   const sendRealtimeInput = liveSession.sendRealtimeInput.bind(liveSession);
   liveSession.sendRealtimeInput = (payload) => {
     if (payload.text === '[PHYSICAL_OPENING_STEP]\nSimulate a stalled provider response.') {

@@ -711,6 +711,31 @@ export default function GameBoard() {
   useEffect(() => {
     let cancelled = false;
 
+    const loadPhysicalState = async () => {
+      try {
+        const response = await fetch('/api/physical/status');
+        const data = await response.json();
+        if (!cancelled && response.ok && data.success && data.state) {
+          applyPhysicalState(data.state);
+        }
+      } catch (err) {
+        console.error('Failed to load physical board state:', err);
+      }
+    };
+
+    loadPhysicalState();
+    const refreshTimer = window.setInterval(loadPhysicalState, 2000);
+    socket?.on('connect', loadPhysicalState);
+    return () => {
+      cancelled = true;
+      window.clearInterval(refreshTimer);
+      socket?.off('connect', loadPhysicalState);
+    };
+  }, [socket, applyPhysicalState]);
+
+  useEffect(() => {
+    let cancelled = false;
+
     const loadPhysicalLogs = async () => {
       try {
         const response = await fetch('/api/physical/logs?limit=120');
@@ -1345,6 +1370,29 @@ export default function GameBoard() {
           </div>
           <div className="board-square-wrapper" ref={boardSlotRef}>
             <div className="chessboard-stage" style={boardSize ? { width: `${boardSize}px`, height: `${boardSize}px` } : undefined}>
+              {physicalState.active && physicalState.phase === 'sync_warning' && (
+                <div
+                  role="alert"
+                  style={{
+                    position: 'absolute',
+                    top: '10px',
+                    left: '10px',
+                    right: '10px',
+                    zIndex: 20,
+                    padding: '10px 12px',
+                    borderRadius: '6px',
+                    border: '1px solid var(--warning-color)',
+                    background: 'rgba(15, 23, 42, 0.94)',
+                    color: 'var(--warning-color)',
+                    fontSize: '0.9rem',
+                    fontWeight: 700,
+                    lineHeight: 1.35,
+                    pointerEvents: 'none'
+                  }}
+                >
+                  {physicalState.statusText || 'Restore the highlighted piece to continue.'}
+                </div>
+              )}
               <Chessboard options={boardOptions} />
               
               {/* Game Over Overlay */}

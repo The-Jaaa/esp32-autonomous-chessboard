@@ -16,6 +16,7 @@ const {
     occupancyFromGame,
     occupancyFromFen,
     squareToIndex,
+    openingAutoContinueLift,
     normalizeProfile,
     clampLevel
   },
@@ -49,6 +50,9 @@ function resetPhysicalSession(fen = PHYSICAL_START_FEN) {
   physicalSession.redoStack = [];
   physicalSession.pendingRedo = null;
   physicalSession.autoRobotReply = false;
+  physicalSession.mentorOpeningDrill = null;
+  physicalSession.mentorOpeningLock = false;
+  physicalSession.mentorOpeningRestoreCandidateAt = null;
   physicalSession.commands = [];
   physicalSession.lastCalibrationKey = '';
   physicalSession.lastError = null;
@@ -114,7 +118,25 @@ function occupancyWithSquare(fen, square, occupied) {
   return occupancy;
 }
 
+function verifyOpeningAutoContinueLift() {
+  const game = new Chess(PHYSICAL_START_FEN);
+  for (const uci of ['d2d4', 'g8f6', 'c2c4', 'g7g6', 'b1c3', 'f8g7', 'e2e4', 'd7d6', 'g1f3', 'e8g8']) {
+    assert(game.move(parseUci(uci)), `${uci} should build the completed opening position`);
+  }
+  const legalLift = occupancyFromGame(game);
+  legalLift[squareToIndex('f1')] = false;
+  const continuation = openingAutoContinueLift(game, 'mentor_drill_complete', legalLift);
+  assert.strictEqual(continuation?.sourceSquare, 'f1');
+  assert(continuation.legalMoves.length > 0, 'a legal post-line lift should continue normal play');
+
+  const blackLift = occupancyFromGame(game);
+  blackLift[squareToIndex('a7')] = false;
+  assert.strictEqual(openingAutoContinueLift(game, 'mentor_drill_complete', blackLift), null);
+  assert.strictEqual(openingAutoContinueLift(game, 'ready', legalLift), null);
+}
+
 async function run() {
+  verifyOpeningAutoContinueLift();
   const fen = 'rnbqkbnr/2pppppp/p7/1p6/6P1/2P5/PP1PPP1P/RNBQKBNR w KQkq - 0 3';
   resetPhysicalSession(fen);
 
@@ -241,6 +263,26 @@ async function run() {
   assert.strictEqual(state.phase, 'sync_warning', 'robot planning should pause when sensor occupancy is stale');
   assert.strictEqual(state.syncWarningReason?.type, 'robot_planning_stale_snapshot');
   assert.strictEqual(state.pendingRobotJob, null, 'stale snapshot should not queue a robot job');
+
+  const openingGame = new Chess();
+  for (const uci of ['e2e4', 'e7e5', 'g1f3', 'b8c6', 'f1c4']) {
+    assert(openingGame.move(parseUci(uci)), `${uci} should build the Italian Game recovery position`);
+  }
+  resetPhysicalSession(openingGame.fen());
+  physicalSession.mentorOpeningDrill = {
+    activityId: 'italian-recovery-regression',
+    title: 'Italian Game',
+    expectedActor: 'mentor',
+    expectedUci: 'f8c5'
+  };
+  physicalSession.phase = 'sync_warning';
+  physicalSession.syncWarningReason = { type: 'robot_planning_stale_snapshot' };
+  await processPhysicalSnapshot(occupancyFromGame(physicalSession.game), { source: 'regression-test' });
+  assert.strictEqual(physicalSession.phase, 'robot_thinking', 'restoring an opening position should immediately re-arm the forced robot reply');
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  state = serializePhysicalState();
+  assert.strictEqual(state.phase, 'robot_busy', 'restored opening reply should be planned automatically');
+  assert.strictEqual(state.pendingRobotJob?.move, 'f8c5', 'recovery must retain the reviewed opening move');
 
   const settleFen = 'rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2';
   resetPhysicalSession(settleFen);
@@ -427,6 +469,8 @@ async function run() {
       'human castling waits for rook and commits O-O',
       'pending human castling can be cancelled by returning the king',
       'robot planning pauses when latest sensor snapshot is stale',
+      'restoring a stale opening position resumes the same reviewed robot reply',
+      'a legal lift after a completed opening automatically continues normal play',
       'post-robot one-piece miss asks for centering instead of legal move LEDs',
       'partial robot castling failure enters recoverable sync warning',
       'physical undo turn reverses robot and human non-captures',

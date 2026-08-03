@@ -81,6 +81,7 @@ function createActivityHarness() {
   const store = new MentorStore({ dbPath: path.join(tempDir, 'mentor.sqlite') });
   const synchronized = [];
   const resolved = [];
+  const announced = [];
   let service;
   const coordinator = {
     isAttached: () => true,
@@ -92,6 +93,7 @@ function createActivityHarness() {
       };
     },
     syncPhysicalActivity: (activity) => synchronized.push(service.getPhysicalPolicy(activity.conversationId)),
+    announcePhysicalOpening: (activity) => announced.push(activity.id),
     retryPhysicalOpening: () => ({ success: true, move: 'e7e5' }),
     resolvePhysicalOpening: (_conversationId, action) => resolved.push(action),
     resumeNormalPlay: () => ({ success: true, action: 'resume' })
@@ -104,7 +106,7 @@ function createActivityHarness() {
     emitGlobal: () => {}
   });
   service.setPhysicalCoordinator(coordinator);
-  return { tempDir, store, service, synchronized, resolved };
+  return { tempDir, store, service, synchronized, resolved, announced };
 }
 
 function commitLine(service, conversationId, item) {
@@ -141,6 +143,7 @@ function verifyActivityTransaction() {
     });
     assert.strictEqual(activity.phase, 'learner_turn');
     assert.strictEqual(activity.config.boardSource, 'physical');
+    assert.deepStrictEqual(harness.announced, [activity.id]);
     assert.strictEqual(harness.service.getPhysicalPolicy(conversation.id).expectedUci, 'd2d4');
     assert.throws(
       () => harness.service.validatePhysicalLearnerMove(conversation.id, 'e2e4'),

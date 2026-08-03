@@ -66,6 +66,8 @@ function analysisResult(fen) {
   };
 }
 
+const waitForObserver = () => new Promise((resolve) => setTimeout(resolve, 25));
+
 async function run() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mentor-physical-'));
   const dbPath = path.join(tempDir, 'mentor.sqlite');
@@ -83,6 +85,8 @@ async function run() {
     store,
     chessService,
     analysisService,
+    recoverableGuidanceDelayMs: 10,
+    openingGuidanceDelayMs: 10,
     emit: (conversationId, event, payload) => emitted.push({ conversationId, event, payload })
   });
   observer.setDependencies({
@@ -231,6 +235,7 @@ async function run() {
     syncWarningReason: { type: 'missing_piece' }
   });
   observer.handleSnapshot(currentSnapshot, 'physical-board');
+  await waitForObserver();
   let physicalMessages = store.listMessages(first.id).filter((message) => message.kind === 'physical');
   assert.strictEqual(physicalMessages.length, 2, 'one warning should persist one event/reply pair');
   assert.match(physicalMessages[1].content, /e2/i);
@@ -244,6 +249,26 @@ async function run() {
   assert.strictEqual(warningGuidance.urgent, true);
   assert.match(warningGuidance.prompt, /Speak this exact recovery instruction now:/);
   assert.match(warningGuidance.prompt, /Do not answer an earlier learner request/);
+
+  const plannedCheck = guidanceFor(snapshot({
+    stateRevision: 4,
+    phase: 'robot_busy',
+    robotBusy: true,
+    pendingRobotJob: { id: 'robot-check' },
+    gameStatus: { inCheck: true, checkmate: false, draw: false, resultText: 'White is in check.', checkedKingSquare: 'e1' }
+  }));
+  assert.strictEqual(plannedCheck, null, 'a pre-verified robot check must remain silent');
+  const stableCheckA = guidanceFor(snapshot({
+    stateRevision: 5,
+    statusText: 'Robot move committed.',
+    gameStatus: { inCheck: true, checkmate: false, draw: false, resultText: 'White is in check.', checkedKingSquare: 'e1' }
+  }));
+  const stableCheckB = guidanceFor(snapshot({
+    stateRevision: 6,
+    statusText: 'Waiting for your move.',
+    gameStatus: { inCheck: true, checkmate: false, draw: false, resultText: 'White is in check.', checkedKingSquare: 'e1' }
+  }));
+  assert.strictEqual(stableCheckA.key, stableCheckB.key, 'one verified checking position must have one guidance identity');
 
   liveActive = true;
   currentSnapshot = snapshot({
@@ -291,11 +316,14 @@ async function run() {
     lastMove: { side: 'engine', move: 'e7e5', san: 'e5', at: 1000 }
   });
   observer.handleSnapshot(currentSnapshot, 'physical-move');
+  await waitForObserver();
   assert.strictEqual(physicalTurns.length, 3, 'verified scripted Black reply should offer Live guidance');
   assert.match(physicalTurns[2].request.prompt, /required next learner move is g1f3/i);
   assert.strictEqual(physicalTurns[2].request.queueKey, 'physical-opening');
-  assert.strictEqual(physicalTurns[2].request.timeoutMs, 15000);
-  assert.match(physicalTurns[2].request.expectedAssistantText, /reviewed move is g1f3/i);
+  assert.strictEqual(physicalTurns[2].request.timeoutMs, 30000);
+  assert.strictEqual(physicalTurns[2].request.expectedAssistantText, undefined);
+  assert.match(physicalTurns[2].request.fallbackAssistantText, /next, play g1f3/i);
+  assert.match(physicalTurns[2].request.prompt, /central control, development, king safety/i);
   activePhysicalActivity = null;
   liveActive = false;
   currentSnapshot = snapshot({
@@ -305,8 +333,26 @@ async function run() {
     board: { ready: false, missingSquares: ['e2'], extraSquares: [] }
   });
   observer.handleSnapshot(currentSnapshot, 'physical-board');
+  await waitForObserver();
   physicalMessages = store.listMessages(first.id).filter((message) => message.kind === 'physical');
   assert.strictEqual(physicalMessages.length, 4, 'a resolved warning may be announced again if it recurs');
+
+  const beforeTransientWarning = physicalMessages.length;
+  currentSnapshot = snapshot({
+    stateRevision: 8,
+    phase: 'sync_warning',
+    statusText: 'Restore or center f2.',
+    board: { ready: false, missingSquares: ['f2'], extraSquares: [] }
+  });
+  observer.handleSnapshot(currentSnapshot, 'physical-board');
+  currentSnapshot = snapshot({ stateRevision: 9, statusText: 'Waiting for your move.' });
+  observer.handleSnapshot(currentSnapshot, 'physical-board');
+  await waitForObserver();
+  assert.strictEqual(
+    store.listMessages(first.id).filter((message) => message.kind === 'physical').length,
+    beforeTransientWarning,
+    'a warning restored inside the grace period must remain silent and leave no recovery chatter'
+  );
 
   currentSnapshot = snapshot({
     stateRevision: 1,

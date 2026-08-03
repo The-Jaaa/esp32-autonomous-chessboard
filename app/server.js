@@ -4885,10 +4885,39 @@ function processSyncWarningSnapshot(occupancy) {
       return;
     }
 
-    physicalSession.phase = 'ready';
     physicalSession.lastError = null;
     physicalSession.syncWarningReason = null;
     const opening = physicalSession.mentorOpeningDrill;
+    const shouldResumeOpeningReply = physicalSession.game.turn() === 'b'
+      && opening?.expectedActor === 'mentor'
+      && opening.expectedUci;
+    const shouldResumeEngineReply = physicalSession.game.turn() === 'b'
+      && !opening
+      && physicalSession.autoRobotReply !== false;
+
+    if (shouldResumeOpeningReply || shouldResumeEngineReply) {
+      physicalSession.phase = 'robot_thinking';
+      physicalSession.statusText = shouldResumeOpeningReply
+        ? `Board restored. Preparing reviewed opening reply ${opening.expectedUci}.`
+        : 'Board restored. Engine will choose a physical reply.';
+      logPhysicalEvent('sync_restored_robot_resumed', physicalSession.statusText, {
+        actualOccupancy: occupancy,
+        details: shouldResumeOpeningReply
+          ? { forcedUci: opening.expectedUci, activityId: opening.activityId || null }
+          : { forcedUci: null }
+      });
+      clearPhysicalLeds();
+      emitPhysicalState('physical-board');
+      setTimeout(() => {
+        const options = shouldResumeOpeningReply
+          ? { forcedUci: opening.expectedUci, activityId: opening.activityId }
+          : {};
+        queueRobotReply(options).catch((error) => setPhysicalError(error.message || String(error)));
+      }, 0);
+      return;
+    }
+
+    physicalSession.phase = 'ready';
     physicalSession.statusText = opening?.expectedActor === 'learner'
       ? `Board restored. ${opening.title}: play ${opening.expectedUci}.`
       : physicalSession.game.turn() === 'w'
@@ -4940,6 +4969,17 @@ function resetPhysicalOpeningForRepeat(occupancy) {
   emitPhysicalState('physical-board');
 }
 
+function openingAutoContinueLift(game, phase, occupancy) {
+  if (phase !== 'mentor_drill_complete' || game.turn() !== 'w') return null;
+  const liftDiff = diffOccupancy(occupancyFromGame(game), occupancy);
+  if (liftDiff.missing.length !== 1 || liftDiff.extra.length !== 0) return null;
+  const sourceSquare = indexToSquare(liftDiff.missing[0]);
+  const piece = sourceSquare ? game.get(sourceSquare) : null;
+  if (piece?.color !== 'w') return null;
+  const legalMoves = legalMovesForSource(game, sourceSquare);
+  return legalMoves.length > 0 ? { sourceSquare, legalMoves } : null;
+}
+
 function processOpeningGateSnapshot(occupancy) {
   physicalSession.occupancy = occupancy;
   if (physicalSession.phase === 'mentor_drill_restore') {
@@ -4965,6 +5005,22 @@ function processOpeningGateSnapshot(occupancy) {
     }
     emitPhysicalState('physical-board');
     return;
+  }
+
+  if (physicalSession.phase === 'mentor_drill_complete') {
+    const continuation = openingAutoContinueLift(physicalSession.game, physicalSession.phase, occupancy);
+    if (continuation) {
+      const conversationId = activePhysicalMentorConversationId();
+      if (conversationId) {
+        mentorFeature.activityService.resolvePhysicalOpening(conversationId, 'continue');
+        logPhysicalEvent('mentor_opening_auto_continue', `A legal lift from ${continuation.sourceSquare} continued normal play after the reviewed line.`, {
+            actualOccupancy: occupancy,
+            details: { sourceSquare: continuation.sourceSquare }
+        });
+        processReadySnapshot(occupancy);
+        return;
+      }
+    }
   }
 
   const diff = diffOccupancy(occupancyFromGame(physicalSession.game), occupancy);
@@ -5911,6 +5967,7 @@ module.exports = {
     occupancyFromGame,
     occupancyFromFen,
     squareToIndex,
+    openingAutoContinueLift,
     normalizeProfile,
     clampLevel
   },
