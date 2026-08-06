@@ -163,3 +163,42 @@ idempotency, Live source refresh, silent lifts, three-turn cadence, all mentor
 regressions and desktop browser checks, existing physical planner/state tests,
 zero-warning client lint, and production client build. Firmware source and the
 accepted `1,079,947` flash / `48,456` static RAM baseline are unchanged.
+
+## Unified Physical Transfer Planner
+
+Companion games, reviewed Mentor openings, undo, redo, captures, en passant,
+castling, and robot-owned graveyard restoration now use the same physical
+transfer-planning boundary. Each transfer tries the normal board route, then
+Z/I lane routing, and only then considers moving one same-color pawn out of the
+way. The pawn uses a legal one-square push or a legal two-square starting push,
+stays on the board, and is restored before the next choreography phase.
+
+Temporary clearance is represented as three explicit phases:
+`temporary-clearance-stage`, the original transfer phase, and
+`temporary-clearance-restore`. Back-rank knight moves retain the accepted rook
+pawn behavior: queenside uses the a-pawn and kingside uses the h-pawn. This now
+applies equally to normal play and reviewed openings; the old opening-only
+`b8c6`/`g8f6` exception was removed.
+
+Robot motion is transactional. The backend sends one phase at a time with a
+unique transaction, phase, and attempt ID. Chess state and move history commit
+only after every phase verifies. A failed phase keeps earlier verified phases,
+requires the board to match that phase's exact start occupancy, and retries
+only that phase. Stale, duplicate, and out-of-order results cannot advance the
+transaction.
+
+Robot graveyard slots now transition from `Free` to `Pending` when a capture is
+staged and to `Occupied` only after captured-piece removal verifies. A later
+attacker failure keeps the slot occupied. Undo restoration releases the slot
+when the captured piece is verified back on the board.
+
+The settings API remains authoritative. A client that reaches an old backend
+without `/api/game-settings` now reports `Backend update required; restart the
+ChessProject server` instead of silently creating independent browser settings.
+
+Automated checks cover shared normal/Mentor knight planning, white and black
+rook-pawn clearance, undo/redo, deterministic selection, pending graveyard
+state, phase-only retries, stale/out-of-order/duplicate reports, logical-state
+immutability, and existing capture/castling behavior. Firmware and
+`offline_core` are unchanged. Real-board acceptance of the Human Black settings
+gate and the new phased clearance sequence remains pending.

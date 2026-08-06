@@ -1,12 +1,14 @@
 const assert = require('assert');
 const { Chess } = require('chess.js');
 const {
+  physicalBoardTest: { physicalSession },
   physicalPlanner: {
     PHYSICAL_START_FEN,
     DEFAULT_Z_GRAVEYARD_SLOTS,
     DEFAULT_GRAVEYARD_SLOTS,
     withPhysicalPlanningContext,
     buildRobotMoveCommand,
+    planPhysicalTransfer,
     summarizeMotionPlan,
     legalMoveMatchesUci,
     moveToUci
@@ -82,6 +84,36 @@ function assertBlocked(fen, uci) {
   );
 }
 
+function assertTemporaryClearance(fen, uci, pawnFrom, pawnTemp, phase = 'quiet-transfer') {
+  const plan = planMove(fen, uci);
+  assert.strictEqual(plan.routeMode, 'temporary-clearance', `${uci} should use temporary pawn clearance`);
+  assert.strictEqual(plan.temporaryClearance?.pawnFrom, pawnFrom);
+  assert.strictEqual(plan.temporaryClearance?.pawnTemp, pawnTemp);
+  assert.deepStrictEqual(plan.temporaryClearance?.phases, [
+    'temporary-clearance-stage',
+    phase,
+    'temporary-clearance-restore'
+  ]);
+  assert(plan.routeCost > 0, `${uci} should include combined stage, transfer, and restore cost`);
+}
+
+function assertSharedPhaseConsumers(fen, uci) {
+  withPhysicalPlanningContext(fen, DEFAULT_GRAVEYARD_SLOTS, (game) => {
+    const move = game.moves({ verbose: true })
+      .find((candidate) => legalMoveMatchesUci(candidate, uci));
+    assert(move, `${uci} must be legal in shared phase consumer fixture`);
+    for (const phase of ['attacker-stage', 'attacker-final', 'castle-king', 'castle-rook', 'undo-attacker']) {
+      const plan = planPhysicalTransfer(game, move, move.from, move.to, { phase });
+      assert.strictEqual(plan.routeMode, 'temporary-clearance');
+      assert.deepStrictEqual(plan.temporaryClearance.phases, [
+        'temporary-clearance-stage',
+        phase,
+        'temporary-clearance-restore'
+      ]);
+    }
+  });
+}
+
 function assertNoBlockedLaneLabels(plans) {
   for (const result of plans.filter((item) => item.success)) {
     const targets = routeTargets(result.command);
@@ -153,6 +185,8 @@ function assertCaptureGraveyardOrder(fen, uci) {
     assert(move, `${uci} must be legal in ${fen}`);
 
     const first = summarizeMotionPlan(buildRobotMoveCommand(move));
+    assert.deepStrictEqual(physicalSession.robotGraveyardOccupied, [], 'planning must not mark an unverified slot occupied');
+    assert.deepStrictEqual(physicalSession.robotGraveyardPending, ['Z4'], 'the selected slot should remain pending until removal verifies');
     const second = summarizeMotionPlan(buildRobotMoveCommand(move));
     assert(routeTargets(first).includes('Z4'), 'first robot capture should reserve Z4');
     assert(routeTargets(second).includes('Z5'), 'second robot capture should reserve Z5');
@@ -180,7 +214,10 @@ function run() {
   assertDirect(afterF4, 'e7e6');
   assertDirect(afterF4, 'e7e5');
   assertDirect(afterF4, 'b7b6');
-  assertBlocked(afterF4, 'g8h6');
+  assertTemporaryClearance(afterF4, 'g8h6', 'h7', 'h5');
+  assertSharedPhaseConsumers(afterF4, 'g8f6');
+  const noSameColorPawnClearance = 'rnbqkbnr/bbbbbbbb/8/8/8/8/P7/4K3 b kq - 0 1';
+  assertBlocked(noSameColorPawnClearance, 'g8f6');
 
   const afterQd4 = 'rnbqkbnr/2p1pppp/p7/1p1p4/3QP3/2P5/PP1P1PPP/RNB1KBNR b KQkq - 1 4';
   assertOneStepRoute(afterQd4, 'a8a7');
@@ -233,15 +270,32 @@ function run() {
   const knightPlans = openingPlans.filter((item) => /^(b8|g8)/.test(item.move));
   assert.strictEqual(knightPlans.length, 4, 'black should have 4 opening knight replies');
   for (const result of knightPlans) {
-    assert.strictEqual(result.success, false, `${result.move} should be blocked until an exit path is clear`);
+    assert.strictEqual(result.success, true, `${result.move} should be routable through shared temporary clearance`);
+    assert.strictEqual(result.command.routeMode, 'temporary-clearance');
   }
+  assert.strictEqual(knightPlans.find((item) => item.move === 'b8c6').command.temporaryClearance.pawnFrom, 'a7');
+  assert.strictEqual(knightPlans.find((item) => item.move === 'b8c6').command.temporaryClearance.pawnTemp, 'a5');
+  assert.strictEqual(knightPlans.find((item) => item.move === 'g8f6').command.temporaryClearance.pawnFrom, 'h7');
+  assert.strictEqual(knightPlans.find((item) => item.move === 'g8f6').command.temporaryClearance.pawnTemp, 'h5');
+
+  assertTemporaryClearance(PHYSICAL_START_FEN, 'b1c3', 'a2', 'a4');
+  assertTemporaryClearance(PHYSICAL_START_FEN, 'g1f3', 'h2', 'h4');
+  const afterNf3AndD5 = 'rnbqkbnr/ppp1pppp/8/3p4/8/5N2/PPPPPPPP/RNBQKB1R w KQkq - 0 2';
+  assertTemporaryClearance(afterNf3AndD5, 'f3g1', 'h2', 'h4');
+  const deterministicFirst = planMove(PHYSICAL_START_FEN, 'g1f3');
+  const deterministicSecond = planMove(PHYSICAL_START_FEN, 'g1f3');
+  assert.deepStrictEqual(
+    { ...deterministicFirst, id: null },
+    { ...deterministicSecond, id: null },
+    'identical transfer requests should select identical clearance choreography'
+  );
 
   assertNoBlockedLaneLabels(openingPlans);
 
   console.log(JSON.stringify({
     success: true,
     checked: {
-      afterF4: ['e7e6 direct', 'e7e5 direct', 'b7b6 direct', 'g8h6 blocked while boxed in'],
+      afterF4: ['e7e6 direct', 'e7e5 direct', 'b7b6 direct', 'g8h6 temporary clearance'],
       shortQuietMoves: ['a8a7 direct', 'a7a8 direct', 'd8d7 direct'],
       finalLoggedKnightReplies: ['g8h6 board path', 'g8f6 board path', 'g8e7 board path'],
       clearRookLane: 'a1a8 compressed board-line path',
@@ -252,7 +306,9 @@ function run() {
       graveyardOrder: ['Z4 first', 'Z5 second', 'full graveyard rejects'],
       promotionsDisabled: true,
       openingPawnReplies: pawnPlans.length,
-      openingKnightRepliesBlocked: knightPlans.length
+      openingKnightRepliesWithClearance: knightPlans.length,
+      whiteKnightClearance: ['a2-a4 for queenside', 'h2-h4 for kingside and undo'],
+      deterministicClearance: true
     }
   }, null, 2));
 }

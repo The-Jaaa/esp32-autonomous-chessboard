@@ -25,6 +25,7 @@ function setPlanningPosition(game) {
   physicalSession.occupancy = occupancyFromGame(physicalSession.game);
   physicalSession.graveyardSlots = normalizeGraveyardSlots(DEFAULT_GRAVEYARD_SLOTS);
   physicalSession.robotGraveyardOccupied = [];
+  physicalSession.robotGraveyardPending = [];
   physicalSession.nextGraveyardSlot = 0;
   physicalSession.lastSnapshotAt = Date.now();
 }
@@ -52,9 +53,9 @@ function verifyCatalogAndPlans() {
         if (command.temporaryClearance && uci === 'b8c6') {
           temporaryClearances.add(uci);
           assert.deepStrictEqual(command.temporaryClearance?.phases, [
-            'opening-clearance-stage',
-            'opening-clearance-knight',
-            'opening-clearance-restore'
+            'temporary-clearance-stage',
+            'quiet-transfer',
+            'temporary-clearance-restore'
           ]);
           assert.strictEqual(command.temporaryClearance.pawnFrom, 'a7');
           assert.strictEqual(command.temporaryClearance.pawnTemp, 'a5');
@@ -62,9 +63,9 @@ function verifyCatalogAndPlans() {
         if (command.temporaryClearance && uci === 'g8f6') {
           temporaryClearances.add(uci);
           assert.deepStrictEqual(command.temporaryClearance?.phases, [
-            'opening-clearance-stage',
-            'opening-clearance-knight',
-            'opening-clearance-restore'
+            'temporary-clearance-stage',
+            'quiet-transfer',
+            'temporary-clearance-restore'
           ]);
           assert.strictEqual(command.temporaryClearance.pawnFrom, 'h7');
           assert.strictEqual(command.temporaryClearance.pawnTemp, 'h5');

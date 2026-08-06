@@ -900,6 +900,7 @@ const physicalSession = {
   graveyardSlots: [],
   nextGraveyardSlot: 0,
   robotGraveyardOccupied: [],
+  robotGraveyardPending: [],
   pendingRobotJob: null,
   moveLog: [],
   pendingUndo: null,
@@ -951,6 +952,16 @@ const PHYSICAL_LOG_MEMORY_LIMIT = 500;
 let physicalLogCounter = 1;
 const physicalLogs = [];
 const completedRobotJobs = new Map();
+const completedMotionPhaseCommands = new Set();
+
+function rememberCompletedMotionPhase(commandId) {
+  if (!commandId) return;
+  completedMotionPhaseCommands.add(commandId);
+  if (completedMotionPhaseCommands.size > 100) {
+    const staleIds = [...completedMotionPhaseCommands].slice(0, completedMotionPhaseCommands.size - 100);
+    for (const staleId of staleIds) completedMotionPhaseCommands.delete(staleId);
+  }
+}
 
 function indexToSquare(index) {
   const normalized = Number(index);
@@ -1055,7 +1066,8 @@ function summarizePendingRobotJob(job = physicalSession.pendingRobotJob) {
     engineLevel: job.engineLevel ?? null,
     engineProfile: job.engineProfile || null,
     routeMode: job.command?.routeMode || null,
-    planStepCount: Array.isArray(job.command?.plan) ? job.command.plan.length : 0
+    planStepCount: Array.isArray(job.command?.plan) ? job.command.plan.length : 0,
+    motionTransaction: summarizeMotionTransaction(job.motionTransaction)
   };
 }
 
@@ -1081,6 +1093,12 @@ function summarizePhysicalCommand(command = {}) {
     summary.captureStrategy = command.captureStrategy || null;
     summary.captureStrategyRejected = command.captureStrategyRejected || [];
     summary.graveyardRouteScore = command.graveyardRouteScore ?? null;
+    summary.temporaryClearance = command.temporaryClearance || null;
+    summary.motionTransactionId = command.motionTransactionId || null;
+    summary.motionPhaseIndex = command.motionPhaseIndex ?? null;
+    summary.motionPhaseCount = command.motionPhaseCount ?? null;
+    summary.motionPhaseKind = command.motionPhaseKind || null;
+    summary.motionAttempt = command.motionAttempt ?? null;
     summary.planStepCount = Array.isArray(command.plan) ? command.plan.length : 0;
     summary.plan = Array.isArray(command.plan)
       ? command.plan.map((step) => ({
@@ -1127,6 +1145,8 @@ function summarizeMotionPlan(command = {}) {
     captureStrategyRejected: command.captureStrategyRejected || [],
     graveyardRouteScore: command.graveyardRouteScore ?? null,
     graveyardRouteCandidates: command.graveyardRouteCandidates || [],
+    temporaryClearance: command.temporaryClearance || null,
+    temporaryClearances: command.temporaryClearances || (command.temporaryClearance ? [command.temporaryClearance] : []),
     capture: Boolean(command.capture),
     planStepCount: Array.isArray(command.plan) ? command.plan.length : 0,
     plan: Array.isArray(command.plan)
@@ -1159,6 +1179,7 @@ function withPhysicalPlanningContext(fen, graveyardSlots, callback) {
     graveyardSlots: physicalSession.graveyardSlots,
     nextGraveyardSlot: physicalSession.nextGraveyardSlot,
     robotGraveyardOccupied: [...physicalSession.robotGraveyardOccupied],
+    robotGraveyardPending: [...physicalSession.robotGraveyardPending],
     active: physicalSession.active
   };
 
@@ -1167,6 +1188,7 @@ function withPhysicalPlanningContext(fen, graveyardSlots, callback) {
     physicalSession.graveyardSlots = normalizeGraveyardSlots(graveyardSlots);
     physicalSession.nextGraveyardSlot = 0;
     physicalSession.robotGraveyardOccupied = [];
+    physicalSession.robotGraveyardPending = [];
     physicalSession.active = false;
     return callback(physicalSession.game);
   } finally {
@@ -1174,6 +1196,7 @@ function withPhysicalPlanningContext(fen, graveyardSlots, callback) {
     physicalSession.graveyardSlots = previous.graveyardSlots;
     physicalSession.nextGraveyardSlot = previous.nextGraveyardSlot;
     physicalSession.robotGraveyardOccupied = previous.robotGraveyardOccupied;
+    physicalSession.robotGraveyardPending = previous.robotGraveyardPending;
     physicalSession.active = previous.active;
   }
 }
@@ -1453,7 +1476,9 @@ function serializePhysicalState() {
     profile: physicalSession.profile,
     graveyardSlotCount: physicalSession.graveyardSlots.length,
     nextGraveyardSlot: physicalSession.nextGraveyardSlot,
-    robotGraveyardOccupied: physicalSession.robotGraveyardOccupied
+    robotGraveyardOccupied: physicalSession.robotGraveyardOccupied,
+    robotGraveyardPending: physicalSession.robotGraveyardPending,
+    motionTransaction: summarizeMotionTransaction(physicalSession.pendingRobotJob?.motionTransaction)
   };
 }
 
@@ -1741,6 +1766,258 @@ function clearPostRobotSettleGuard(message) {
     details: physicalSession.postRobotSettleGuard
   });
   physicalSession.postRobotSettleGuard = null;
+}
+
+function isLedMotionStep(step) {
+  return String(step?.action || '').startsWith('led-');
+}
+
+function buildMotionTransactionPhases(command, beforeOccupancy) {
+  const groups = [];
+  let pendingLedSteps = [];
+  const defaultPhase = command.capture ? 'attacker-final' : 'quiet-transfer';
+
+  for (const step of command.plan || []) {
+    if (isLedMotionStep(step)) {
+      pendingLedSteps.push(step);
+      continue;
+    }
+    const phaseKind = step.phase || defaultPhase;
+    let group = groups[groups.length - 1];
+    if (!group || group.kind !== phaseKind) {
+      group = { kind: phaseKind, steps: pendingLedSteps };
+      pendingLedSteps = [];
+      groups.push(group);
+    } else if (pendingLedSteps.length > 0) {
+      group.steps.push(...pendingLedSteps);
+      pendingLedSteps = [];
+    }
+    group.steps.push(step);
+  }
+  if (pendingLedSteps.length > 0 && groups.length > 0) {
+    groups[groups.length - 1].steps.push(...pendingLedSteps);
+  }
+  if (groups.length === 0) {
+    groups.push({ kind: defaultPhase, steps: [...(command.plan || [])] });
+  }
+
+  let expected = beforeOccupancy.slice();
+  return groups.map((group, index) => {
+    const before = expected.slice();
+    for (const step of group.steps) {
+      if (step.action !== 'verify') continue;
+      if (Number.isInteger(step.sourceEmpty)) expected[step.sourceEmpty] = false;
+      if (Number.isInteger(step.targetOccupied)) expected[step.targetOccupied] = true;
+    }
+    return {
+      index,
+      kind: group.kind,
+      steps: group.steps,
+      beforeOccupancy: before,
+      afterOccupancy: expected.slice(),
+      attempt: 1,
+      verified: false,
+      graveyardTransition: group.kind === 'captured-removal' && command.graveyardSlot
+        ? { type: 'occupy', slot: command.graveyardSlot }
+        : group.kind === 'undo-captured-restore' && command.graveyardSlot
+          ? { type: 'release', slot: command.graveyardSlot }
+          : null
+    };
+  });
+}
+
+function summarizeMotionTransaction(transaction) {
+  if (!transaction) return null;
+  const phase = transaction.phases[transaction.phaseIndex] || null;
+  return {
+    id: transaction.id,
+    phaseIndex: transaction.phaseIndex,
+    phaseCount: transaction.phases.length,
+    phaseKind: phase?.kind || null,
+    attempt: phase?.attempt || null,
+    activeCommandId: transaction.activeCommandId || null,
+    verifiedPhases: transaction.phases.filter((item) => item.verified).map((item) => item.kind),
+    temporaryClearance: transaction.temporaryClearance || null,
+    temporaryClearances: transaction.temporaryClearances || [],
+    paused: Boolean(transaction.paused)
+  };
+}
+
+function currentMotionPhase(pending = physicalSession.pendingRobotJob) {
+  const transaction = pending?.motionTransaction;
+  return transaction?.phases?.[transaction.phaseIndex] || null;
+}
+
+function motionPhaseStatus(phase, transaction) {
+  if (!phase) return 'Robot motion is pending.';
+  if (phase.kind === 'temporary-clearance-stage' || phase.kind === 'temporary-clearance-restore') {
+    const travelSquare = phase.steps.find((step) => step.action === 'travel' && step.to?.square)?.to?.square;
+    const dragSquares = phase.steps
+      .filter((step) => step.action === 'drag' && step.to?.square)
+      .map((step) => step.to.square);
+    const targetSquare = dragSquares.at(-1);
+    const action = phase.kind === 'temporary-clearance-stage' ? 'moving' : 'restoring';
+    return `Temporary clearance: ${action} pawn ${travelSquare || '?'} to ${targetSquare || '?'}.`;
+  }
+  return `Robot phase ${phase.index + 1}/${transaction.phases.length}: ${phase.kind}.`;
+}
+
+function queueCurrentMotionPhase(pending = physicalSession.pendingRobotJob) {
+  const transaction = pending?.motionTransaction;
+  const phase = currentMotionPhase(pending);
+  if (!transaction || !phase) throw new Error('No physical motion phase is ready.');
+  const phaseCommand = {
+    ...pending.command,
+    id: `${transaction.id}:p${phase.index}:a${phase.attempt}`,
+    plan: phase.steps,
+    motionTransactionId: transaction.id,
+    motionPhaseIndex: phase.index,
+    motionPhaseCount: transaction.phases.length,
+    motionPhaseKind: phase.kind,
+    motionAttempt: phase.attempt
+  };
+  transaction.activeCommandId = phaseCommand.id;
+  transaction.paused = false;
+  pending.activeCommand = phaseCommand;
+  queuePhysicalCommand(phaseCommand);
+  physicalSession.statusText = motionPhaseStatus(phase, transaction);
+  logPhysicalEvent('motion_phase_queued', physicalSession.statusText, {
+    commandId: phaseCommand.id,
+    details: summarizeMotionTransaction(transaction)
+  });
+  return phaseCommand;
+}
+
+function startPendingMotionTransaction(pending, beforeOccupancy = physicalSession.occupancy) {
+  if (!pending?.command?.plan?.length) {
+    queuePhysicalCommand(pending.command);
+    return null;
+  }
+  if (pending.command.graveyardSlot) {
+    reservePendingRobotGraveyardSlot(pending.command.graveyardSlot);
+  }
+  pending.motionTransaction = {
+    id: `motion-${Date.now()}-${physicalSession.nextCommandId++}`,
+    phaseIndex: 0,
+    activeCommandId: null,
+    paused: false,
+    temporaryClearance: pending.command.temporaryClearance || null,
+    temporaryClearances: pending.command.temporaryClearances || [],
+    phases: buildMotionTransactionPhases(pending.command, beforeOccupancy)
+  };
+  return queueCurrentMotionPhase(pending);
+}
+
+function pauseCurrentMotionPhase(error, occupancy = null) {
+  const pending = physicalSession.pendingRobotJob;
+  const transaction = pending?.motionTransaction;
+  const phase = currentMotionPhase(pending);
+  if (!transaction || !phase) return { success: false, error: 'No motion phase is pending.' };
+  const actual = occupancy || physicalSession.occupancy;
+  const diff = diffOccupancy(phase.beforeOccupancy, actual);
+  transaction.paused = true;
+  transaction.activeCommandId = null;
+  physicalSession.occupancy = actual;
+  setPhysicalSyncWarning(`Motion paused during ${phase.kind}: ${error}. Restore the highlighted squares to the phase start, then retry.`, {
+    ...diff,
+    commandId: pending.activeCommand?.id || null,
+    reason: {
+      type: 'motion_phase_failed',
+      transactionId: transaction.id,
+      phaseIndex: phase.index,
+      phaseKind: phase.kind,
+      attempt: phase.attempt,
+      error
+    }
+  });
+  logPhysicalEvent('motion_phase_failed', physicalSession.statusText, {
+    level: 'warning',
+    commandId: pending.activeCommand?.id || null,
+    expectedOccupancy: phase.beforeOccupancy,
+    actualOccupancy: actual,
+    diff,
+    details: summarizeMotionTransaction(transaction)
+  });
+  return { success: true, recoverable: true, diff };
+}
+
+function completeCurrentMotionPhase(occupancy = null) {
+  const pending = physicalSession.pendingRobotJob;
+  const transaction = pending?.motionTransaction;
+  const phase = currentMotionPhase(pending);
+  if (!transaction || !phase) return { success: false, error: 'No motion phase is pending.' };
+  const actual = occupancy || physicalSession.occupancy;
+  const diff = diffOccupancy(phase.afterOccupancy, actual);
+  if (diff.missing.length > 0 || diff.extra.length > 0) {
+    const paused = pauseCurrentMotionPhase('reported success but occupancy did not match the phase result', actual);
+    return {
+      success: false,
+      recoverable: true,
+      error: 'Reported phase success did not match the expected occupancy.',
+      diff: paused.diff
+    };
+  }
+
+  const completedCommandId = transaction.activeCommandId;
+  rememberCompletedMotionPhase(completedCommandId);
+  phase.verified = true;
+  transaction.activeCommandId = null;
+  transaction.paused = false;
+  physicalSession.occupancy = actual;
+  if (phase.graveyardTransition?.type === 'occupy') {
+    confirmRobotGraveyardSlot(phase.graveyardTransition.slot);
+  } else if (phase.graveyardTransition?.type === 'release') {
+    releaseRobotGraveyardSlot(phase.graveyardTransition.slot);
+  }
+  logPhysicalEvent('motion_phase_verified', `Verified motion phase ${phase.index + 1}/${transaction.phases.length}: ${phase.kind}.`, {
+    commandId: completedCommandId,
+    expectedOccupancy: phase.afterOccupancy,
+    actualOccupancy: actual,
+    diff: { missing: [], extra: [] },
+    details: summarizeMotionTransaction(transaction)
+  });
+
+  transaction.phaseIndex += 1;
+  if (transaction.phaseIndex < transaction.phases.length) {
+    queueCurrentMotionPhase(pending);
+    emitPhysicalState();
+    return { success: true, complete: false };
+  }
+  pending.activeCommand = null;
+  return { success: true, complete: true };
+}
+
+function retryCurrentMotionPhase(pending = physicalSession.pendingRobotJob) {
+  const transaction = pending?.motionTransaction;
+  const phase = currentMotionPhase(pending);
+  if (!transaction || !phase) {
+    return { success: false, status: 400, error: 'No motion phase is pending.' };
+  }
+  if (!transaction.paused) {
+    return { success: false, status: 409, error: 'The current motion phase has not failed.' };
+  }
+  const diff = diffOccupancy(phase.beforeOccupancy, physicalSession.occupancy);
+  if (diff.missing.length > 0 || diff.extra.length > 0) {
+    return {
+      success: false,
+      status: 409,
+      error: 'Restore/center the board to the current phase start before retrying.',
+      diff
+    };
+  }
+
+  phase.attempt += 1;
+  transaction.paused = false;
+  physicalSession.syncWarningReason = null;
+  physicalSession.phase = pending.kind === 'undo'
+    ? 'undo_robot_busy'
+    : pending.kind === 'redo'
+      ? 'redo_robot_busy'
+      : 'robot_busy';
+  clearPhysicalLeds();
+  const command = queueCurrentMotionPhase(pending);
+  emitPhysicalState();
+  return { success: true, command };
 }
 
 function queueLedCommand(mode, squares) {
@@ -2362,20 +2639,39 @@ function sortedRobotGraveyardSlots() {
 
 function isRobotGraveyardSlotOccupied(slot) {
   const key = graveyardSlotKey(slot);
-  return key && physicalSession.robotGraveyardOccupied.includes(key);
+  return key && (
+    physicalSession.robotGraveyardOccupied.includes(key)
+    || physicalSession.robotGraveyardPending.includes(key)
+  );
+}
+
+function reservePendingRobotGraveyardSlot(slot) {
+  const key = graveyardSlotKey(slot);
+  if (key
+    && !physicalSession.robotGraveyardOccupied.includes(key)
+    && !physicalSession.robotGraveyardPending.includes(key)) {
+    physicalSession.robotGraveyardPending.push(key);
+  }
+}
+
+function confirmRobotGraveyardSlot(slot) {
+  const key = graveyardSlotKey(slot);
+  if (!key) return;
+  physicalSession.robotGraveyardPending = physicalSession.robotGraveyardPending.filter((item) => item !== key);
+  if (!physicalSession.robotGraveyardOccupied.includes(key)) {
+    physicalSession.robotGraveyardOccupied.push(key);
+  }
 }
 
 function reserveRobotGraveyardSlot(slot) {
-  const key = graveyardSlotKey(slot);
-  if (key && !physicalSession.robotGraveyardOccupied.includes(key)) {
-    physicalSession.robotGraveyardOccupied.push(key);
-  }
+  reservePendingRobotGraveyardSlot(slot);
 }
 
 function releaseRobotGraveyardSlot(slot) {
   const key = graveyardSlotKey(slot);
   if (!key) return;
   physicalSession.robotGraveyardOccupied = physicalSession.robotGraveyardOccupied.filter((item) => item !== key);
+  physicalSession.robotGraveyardPending = physicalSession.robotGraveyardPending.filter((item) => item !== key);
 }
 
 function squareFileIndex(square) {
@@ -3058,13 +3354,125 @@ function planCapturedPieceRemoval(game, capturedSquare, ignoredSquares = [], opt
 }
 
 function combineRouteMetadata(parts, routeMode) {
+  const temporaryClearances = parts.flatMap((part) => (
+    part?.temporaryClearances || (part?.temporaryClearance ? [part.temporaryClearance] : [])
+  ));
   return {
     routeMode,
     routeCost: parts.reduce((sum, part) => sum + (part?.routeCost || 0), 0),
     pathSquares: parts.flatMap((part) => part?.pathSquares || []),
     rawPathSquares: parts.flatMap((part) => part?.rawPathSquares || part?.pathSquares || []),
     compressedPathSquares: parts.flatMap((part) => part?.compressedPathSquares || part?.pathSquares || []),
-    blockedReason: parts.flatMap((part) => part?.failures || []).map((failure) => `${failure.slot || 'route'}: ${failure.error}`).join(' | ') || null
+    blockedReason: parts.flatMap((part) => part?.failures || []).map((failure) => `${failure.slot || 'route'}: ${failure.error}`).join(' | ') || null,
+    temporaryClearance: temporaryClearances[0] || null,
+    temporaryClearances
+  };
+}
+
+function capturedRemovalTransferSteps(removal, capturedSquare) {
+  if (Array.isArray(removal?.steps)) return removal.steps;
+  return makeTransferSteps(squareTarget(capturedSquare), removal.targets, {
+    sourceEmpty: squareToIndex(capturedSquare)
+  }, {
+    phase: 'captured-removal'
+  });
+}
+
+function planCapturedPieceRemovalWithClearance(game, capturedSquare, ignoredSquares = []) {
+  const direct = planCapturedPieceRemoval(game, capturedSquare, ignoredSquares, { reserve: false });
+  if (direct.slot) {
+    return {
+      ...direct,
+      steps: capturedRemovalTransferSteps(direct, capturedSquare)
+    };
+  }
+
+  const capturedPiece = game.get(capturedSquare);
+  if (!capturedPiece) return direct;
+  const reserved = new Set([capturedSquare, ...ignoredSquares].filter(Boolean));
+  const candidates = [];
+  const rejected = [];
+  const pawnSquares = game.board()
+    .flat()
+    .filter((entry) => entry?.type === 'p' && entry.color === capturedPiece.color)
+    .map((entry) => entry.square)
+    .sort();
+
+  for (const pawnFrom of pawnSquares) {
+    if (reserved.has(pawnFrom)) continue;
+    for (const pawnTemp of pawnTemporarySquares(game, pawnFrom, capturedPiece.color)) {
+      if (reserved.has(pawnTemp)) continue;
+      const simulated = new Chess(game.fen());
+      const pawnMove = {
+        piece: 'p',
+        color: capturedPiece.color,
+        from: pawnFrom,
+        to: pawnTemp,
+        flags: '',
+        captured: null
+      };
+      try {
+        const stage = withSimulatedPhysicalOccupancy(simulated, () => buildBoardTransferPlan(
+          simulated,
+          pawnMove,
+          pawnFrom,
+          pawnTemp,
+          { phase: 'temporary-clearance-stage' }
+        ));
+        movePieceForPhysicalPlanning(simulated, pawnFrom, pawnTemp);
+        const removal = withSimulatedPhysicalOccupancy(simulated, () => (
+          planCapturedPieceRemoval(simulated, capturedSquare, ignoredSquares, { reserve: false })
+        ));
+        if (!removal.slot) throw new Error(removal.failures?.[0]?.error || 'No graveyard route after clearance.');
+        simulated.remove(capturedSquare);
+        const restoreMove = { ...pawnMove, from: pawnTemp, to: pawnFrom };
+        const restore = withSimulatedPhysicalOccupancy(simulated, () => buildBoardTransferPlan(
+          simulated,
+          restoreMove,
+          pawnTemp,
+          pawnFrom,
+          { phase: 'temporary-clearance-restore' }
+        ));
+        candidates.push({ pawnFrom, pawnTemp, stage, removal, restore });
+      } catch (error) {
+        rejected.push({ pawnFrom, pawnTemp, reason: error.message });
+      }
+    }
+  }
+
+  candidates.sort((left, right) => (
+    left.stage.routeCost + left.removal.routeCost + left.restore.routeCost
+    - right.stage.routeCost - right.removal.routeCost - right.restore.routeCost
+    || left.pawnFrom.localeCompare(right.pawnFrom)
+    || left.pawnTemp.localeCompare(right.pawnTemp)
+  ));
+  const selected = candidates[0];
+  if (!selected) {
+    return {
+      ...direct,
+      temporaryClearanceRejected: rejected
+    };
+  }
+  const temporaryClearance = {
+    pawnFrom: selected.pawnFrom,
+    pawnTemp: selected.pawnTemp,
+    movingColor: capturedPiece.color,
+    originalPhase: 'captured-removal',
+    originalBlockedReason: direct.failures?.[0]?.error || 'No graveyard route.',
+    phases: ['temporary-clearance-stage', 'captured-removal', 'temporary-clearance-restore'],
+    rejectedCandidates: rejected
+  };
+  return {
+    ...selected.removal,
+    routeMode: 'temporary-clearance',
+    routeCost: selected.stage.routeCost + selected.removal.routeCost + selected.restore.routeCost,
+    temporaryClearance,
+    temporaryClearances: [temporaryClearance],
+    steps: [
+      ...selected.stage.steps,
+      ...capturedRemovalTransferSteps(selected.removal, capturedSquare),
+      ...selected.restore.steps
+    ]
   };
 }
 
@@ -3183,11 +3591,7 @@ function buildCaptureBoardStagingFallback(
         fallbackRemoval.compressedPathSquares || fallbackRemoval.pathSquares || [],
         'special'
       ),
-      ...makeTransferSteps(squareTarget(capturedSquare), fallbackRemoval.targets, {
-        sourceEmpty: capturedIndex
-      }, {
-        phase: 'captured-removal'
-      }),
+      ...capturedRemovalTransferSteps(fallbackRemoval, capturedSquare),
       makeRunwayMotionStep(
         'attacker-final',
         stagingToTarget.compressedPathSquares || stagingToTarget.pathSquares || [],
@@ -3200,8 +3604,14 @@ function buildCaptureBoardStagingFallback(
 
 function buildCaptureMotionPlan(game, move, capturedSquare, staging) {
   const capturedIndex = squareToIndex(capturedSquare);
-  const directRemoval = planCapturedPieceRemoval(game, capturedSquare, [capturedSquare].filter(Boolean), { reserve: false });
-  const stagedRemoval = planCapturedPieceRemoval(game, capturedSquare, [move.from, capturedSquare].filter(Boolean), { reserve: false });
+  const directRemoval = planPhysicalTransfer(game, null, capturedSquare, null, {
+    operation: 'graveyard-removal',
+    ignoredSquares: [capturedSquare].filter(Boolean)
+  });
+  const stagedRemoval = planPhysicalTransfer(game, null, capturedSquare, null, {
+    operation: 'graveyard-removal',
+    ignoredSquares: [move.from, capturedSquare].filter(Boolean)
+  });
   const rejectedStrategies = [];
 
   const capturelessMove = {
@@ -3212,9 +3622,12 @@ function buildCaptureMotionPlan(game, move, capturedSquare, staging) {
 
   if (directRemoval.slot) {
     try {
-      const attackerPlan = buildBoardTransferPlan(game, capturelessMove, move.from, move.to, {
+      const afterRemovalGame = new Chess(game.fen());
+      afterRemovalGame.remove(capturedSquare);
+      const attackerPlan = planPhysicalTransfer(afterRemovalGame, capturelessMove, move.from, move.to, {
         ignoredSquares: [capturedSquare, move.to],
-        phase: 'attacker-final'
+        phase: 'attacker-final',
+        reservedSquares: [move.from, move.to, capturedSquare]
       });
       const metadata = combineRouteMetadata([directRemoval, attackerPlan], 'capture-direct-after-removal');
       reserveRobotGraveyardSlot(directRemoval.slot);
@@ -3236,11 +3649,7 @@ function buildCaptureMotionPlan(game, move, capturedSquare, staging) {
         steps: compactSteps([
           makeCaptureStartLedStep(move.from, capturedSquare),
           makeRunwayMotionStep('captured-graveyard', directRemoval.compressedPathSquares || directRemoval.pathSquares || [], 'special'),
-          ...makeTransferSteps(squareTarget(capturedSquare), directRemoval.targets, {
-            sourceEmpty: capturedIndex
-          }, {
-            phase: 'captured-removal'
-          }),
+          ...capturedRemovalTransferSteps(directRemoval, capturedSquare),
           makeRunwayMotionStep('attacker-final', attackerPlan.compressedPathSquares || attackerPlan.pathSquares || [], 'source'),
           ...attackerPlan.steps
         ])
@@ -3270,13 +3679,19 @@ function buildCaptureMotionPlan(game, move, capturedSquare, staging) {
     if (!candidate?.square || stagedRemovalPath.has(candidate.square)) continue;
 
     try {
-      const approachPlan = buildBoardTransferPlan(game, capturelessMove, move.from, candidate.square, {
+      const approachPlan = planPhysicalTransfer(game, capturelessMove, move.from, candidate.square, {
         ignoredSquares: [],
-        phase: 'attacker-stage'
+        phase: 'attacker-stage',
+        reservedSquares: [move.from, move.to, capturedSquare, candidate.square]
       });
-      const finalPlan = buildBoardTransferPlan(game, capturelessMove, candidate.square, move.to, {
+      const afterStageGame = new Chess(game.fen());
+      afterStageGame.remove(move.from);
+      afterStageGame.remove(capturedSquare);
+      afterStageGame.put({ type: move.piece, color: move.color }, candidate.square);
+      const finalPlan = planPhysicalTransfer(afterStageGame, capturelessMove, candidate.square, move.to, {
         ignoredSquares: [move.from, capturedSquare, move.to].filter(Boolean),
-        phase: 'attacker-final'
+        phase: 'attacker-final',
+        reservedSquares: [move.from, move.to, capturedSquare, candidate.square]
       });
       if (!stagedRemoval.slot) {
         const reason = stagedRemoval.failures?.[0]?.error || 'No robot graveyard slot is available.';
@@ -3307,11 +3722,7 @@ function buildCaptureMotionPlan(game, move, capturedSquare, staging) {
           makeRunwayMotionStep('attacker-stage', approachPlan.compressedPathSquares || approachPlan.pathSquares || [], 'quiet'),
           ...approachPlan.steps,
           makeRunwayMotionStep('captured-graveyard', stagedRemoval.compressedPathSquares || stagedRemoval.pathSquares || [], 'special'),
-          ...makeTransferSteps(squareTarget(capturedSquare), stagedRemoval.targets, {
-            sourceEmpty: capturedIndex
-          }, {
-            phase: 'captured-removal'
-          }),
+          ...capturedRemovalTransferSteps(stagedRemoval, capturedSquare),
           makeRunwayMotionStep('attacker-final', finalPlan.compressedPathSquares || finalPlan.pathSquares || [], 'source'),
           ...finalPlan.steps
         ])
@@ -3332,8 +3743,12 @@ function buildCaptureMotionPlan(game, move, capturedSquare, staging) {
   }
 
   try {
-    const attackerPlan = buildBoardTransferPlan(game, capturelessMove, move.from, move.to, {
-      ignoredSquares: [capturedSquare, move.to]
+    const afterRemovalGame = new Chess(game.fen());
+    afterRemovalGame.remove(capturedSquare);
+    const attackerPlan = planPhysicalTransfer(afterRemovalGame, capturelessMove, move.from, move.to, {
+      ignoredSquares: [capturedSquare, move.to],
+      phase: 'attacker-final',
+      reservedSquares: [move.from, move.to, capturedSquare]
     });
     const metadata = combineRouteMetadata([fallbackRemoval, attackerPlan], attackerPlan.routeMode === 'lane'
       ? 'capture-remove-first-lane'
@@ -3357,11 +3772,7 @@ function buildCaptureMotionPlan(game, move, capturedSquare, staging) {
       steps: compactSteps([
         makeCaptureStartLedStep(move.from, capturedSquare),
         makeRunwayMotionStep('captured-graveyard', fallbackRemoval.compressedPathSquares || fallbackRemoval.pathSquares || [], 'special'),
-        ...makeTransferSteps(squareTarget(capturedSquare), fallbackRemoval.targets, {
-          sourceEmpty: capturedIndex
-        }, {
-          phase: 'captured-removal'
-        }),
+        ...capturedRemovalTransferSteps(fallbackRemoval, capturedSquare),
         makeRunwayMotionStep('attacker-final', attackerPlan.compressedPathSquares || attackerPlan.pathSquares || [], 'source'),
         ...attackerPlan.steps
       ])
@@ -3375,18 +3786,24 @@ function buildCaptureMotionPlan(game, move, capturedSquare, staging) {
 
   const ignoredAfterPickup = [move.from, move.to, capturedSquare, staging?.square].filter(Boolean);
   const safeBoardStaging = staging
-    ? buildBoardTransferPlan(game, { ...move, captured: null, flags: '' }, move.from, staging.square, {
+    ? planPhysicalTransfer(game, { ...move, captured: null, flags: '' }, move.from, staging.square, {
       ignoredSquares: ignoredAfterPickup,
-      phase: 'attacker-stage'
+      phase: 'attacker-stage',
+      reservedSquares: ignoredAfterPickup
     })
     : null;
   if (!safeBoardStaging) {
     throw new Error(`No safe capture route was found for ${moveToUci(move)}.`);
   }
 
-  const stagingToTarget = buildBoardTransferPlan(game, { ...move, captured: null, flags: '' }, staging.square, move.to, {
+  const afterStageGame = new Chess(game.fen());
+  afterStageGame.remove(move.from);
+  afterStageGame.remove(capturedSquare);
+  afterStageGame.put({ type: move.piece, color: move.color }, staging.square);
+  const stagingToTarget = planPhysicalTransfer(afterStageGame, { ...move, captured: null, flags: '' }, staging.square, move.to, {
     ignoredSquares: ignoredAfterPickup,
-    phase: 'attacker-final'
+    phase: 'attacker-final',
+    reservedSquares: ignoredAfterPickup
   });
   return buildCaptureBoardStagingFallback(
     move,
@@ -3404,20 +3821,13 @@ function buildCastleMotionPlan(game, move) {
     return buildBoardTransferPlan(game, move, move.from, move.to);
   }
 
-  const planPart = (planningGame, from, to, moveForPart, phase, ignoredSquares = []) => {
-    try {
-      return buildBoardTransferPlan(planningGame, moveForPart, from, to, {
-        phase,
-        ignoredSquares
-      });
-    } catch (err) {
-      return buildBoardTransferPlan(planningGame, moveForPart, from, to, {
-        forceLane: true,
-        phase,
-        ignoredSquares
-      });
-    }
-  };
+  const planPart = (planningGame, from, to, moveForPart, phase, ignoredSquares = []) => (
+    planPhysicalTransfer(planningGame, moveForPart, from, to, {
+      phase,
+      ignoredSquares,
+      reservedSquares: [move.from, move.to, rookMove.from, rookMove.to]
+    })
+  );
   const kingPlan = planPart(game, move.from, move.to, move, 'castle-king');
   const afterKingGame = new Chess(game.fen());
   const kingPiece = afterKingGame.get(move.from) || { type: 'k', color: move.color };
@@ -3461,7 +3871,9 @@ function buildRobotMoveCommand(move) {
     ? buildCastleMotionPlan(physicalSession.game, move)
     : capturedSquare
       ? buildCaptureMotionPlan(physicalSession.game, move, capturedSquare, staging)
-      : buildBoardTransferPlan(physicalSession.game, move, move.from, move.to);
+      : planPhysicalTransfer(physicalSession.game, move, move.from, move.to, {
+        phase: 'quiet-transfer'
+      });
 
   return {
     id: jobId,
@@ -3492,6 +3904,8 @@ function buildRobotMoveCommand(move) {
     captureStrategyRejected: motionPlan.captureStrategyRejected || [],
     graveyardRouteScore: motionPlan.graveyardRouteScore ?? null,
     graveyardRouteCandidates: motionPlan.graveyardRouteCandidates || [],
+    temporaryClearance: motionPlan.temporaryClearance || null,
+    temporaryClearances: motionPlan.temporaryClearances || [],
     plan: motionPlan.steps,
     speedProfile: {
       travel: 'fast',
@@ -3522,122 +3936,14 @@ function withSimulatedPhysicalOccupancy(game, callback) {
   }
 }
 
-function buildOpeningKnightClearanceCommand(move) {
-  const configuration = moveToUci(move) === 'b8c6'
-    ? { pawnFrom: 'a7', pawnTemp: 'a5' }
-    : moveToUci(move) === 'g8f6'
-      ? { pawnFrom: 'h7', pawnTemp: 'h5' }
-      : null;
-  if (!configuration || move.piece !== 'n' || move.captured) {
-    throw new Error(`No temporary opening clearance is defined for ${moveToUci(move)}.`);
-  }
-  const game = new Chess(physicalSession.game.fen());
-  const pawn = game.get(configuration.pawnFrom);
-  if (!pawn || pawn.type !== 'p' || pawn.color !== move.color || game.get(configuration.pawnTemp)) {
-    throw new Error(`Temporary knight clearance is blocked at ${configuration.pawnFrom}/${configuration.pawnTemp}.`);
-  }
-
-  const pawnMove = {
-    piece: 'p',
-    color: move.color,
-    from: configuration.pawnFrom,
-    to: configuration.pawnTemp,
-    flags: '',
-    captured: null
-  };
-  const stage = withSimulatedPhysicalOccupancy(game, () => buildBoardTransferPlan(
-    game,
-    pawnMove,
-    pawnMove.from,
-    pawnMove.to,
-    { phase: 'opening-clearance-stage' }
-  ));
-  if (!movePieceForPhysicalPlanning(game, pawnMove.from, pawnMove.to)) {
-    throw new Error('Could not stage the temporary clearance pawn.');
-  }
-  const knight = withSimulatedPhysicalOccupancy(game, () => buildBoardTransferPlan(
-    game,
-    move,
-    move.from,
-    move.to,
-    { phase: 'opening-clearance-knight' }
-  ));
-  if (!movePieceForPhysicalPlanning(game, move.from, move.to)) {
-    throw new Error('Could not simulate the opening knight transfer.');
-  }
-  const restoreMove = {
-    ...pawnMove,
-    from: configuration.pawnTemp,
-    to: configuration.pawnFrom
-  };
-  const restore = withSimulatedPhysicalOccupancy(game, () => buildBoardTransferPlan(
-    game,
-    restoreMove,
-    restoreMove.from,
-    restoreMove.to,
-    { phase: 'opening-clearance-restore' }
-  ));
-
-  const uci = moveToUci(move);
-  return {
-    id: `robot-${Date.now()}`,
-    type: 'move',
-    move: uci,
-    san: move.san,
-    color: move.color,
-    from: move.from,
-    to: move.to,
-    fromIndex: squareToIndex(move.from),
-    toIndex: squareToIndex(move.to),
-    promotion: null,
-    capture: false,
-    capturedSquare: null,
-    capturedIndex: null,
-    stagingSquare: null,
-    stagingIndex: null,
-    graveyardSlot: null,
-    castleRookMove: null,
-    routeMode: 'temporary-clearance',
-    pathSquares: [...stage.pathSquares, ...knight.pathSquares, ...restore.pathSquares],
-    rawPathSquares: [...stage.rawPathSquares, ...knight.rawPathSquares, ...restore.rawPathSquares],
-    compressedPathSquares: [
-      ...stage.compressedPathSquares,
-      ...knight.compressedPathSquares,
-      ...restore.compressedPathSquares
-    ],
-    routeCost: stage.routeCost + knight.routeCost + restore.routeCost,
-    blockedReason: null,
-    capturePreview: null,
-    captureStrategy: null,
-    captureStrategyRejected: [],
-    graveyardRouteScore: null,
-    graveyardRouteCandidates: [],
-    temporaryClearance: {
-      pawnFrom: configuration.pawnFrom,
-      pawnTemp: configuration.pawnTemp,
-      knightPath: knight.compressedPathSquares,
-      phases: ['opening-clearance-stage', 'opening-clearance-knight', 'opening-clearance-restore']
-    },
-    plan: [...stage.steps, ...knight.steps, ...restore.steps],
-    speedProfile: { travel: 'fast', drag: 'slow' },
-    verify: {
-      sourceEmpty: squareToIndex(move.from),
-      targetOccupied: squareToIndex(move.to)
-    }
-  };
-}
-
 function buildStrictOpeningRobotMoveCommand(move) {
-  try {
-    return buildRobotMoveCommand(move);
-  } catch (error) {
-    if (!['b8c6', 'g8f6'].includes(moveToUci(move))) throw error;
-    const command = buildOpeningKnightClearanceCommand(move);
+  const command = buildRobotMoveCommand(move);
+  if (command.temporaryClearance) {
     logPhysicalEvent('mentor_opening_temporary_clearance', `Using temporary pawn clearance for ${move.san}.`, {
       details: command.temporaryClearance
     });
-    return command;
   }
+  return command;
 }
 
 function buildSafeBoardTransferPlan(game, move, fromSquare, toSquare, options = {}) {
@@ -3693,22 +3999,139 @@ function restoreCapturedPieceTargets(entry) {
   return dedupePlanTargets(reversed.map(squareTarget));
 }
 
+function buildGraveyardRestorePlan(game, entry) {
+  if (!entry?.robotGraveyardSlot || !entry?.capturedSquare) {
+    throw new Error('Captured-piece restoration requires a recorded graveyard slot and board square.');
+  }
+  const restoreTargets = restoreCapturedPieceTargets(entry);
+  const blockedSquares = restoreTargets
+    .map((target) => target.square)
+    .filter((square) => square && square !== entry.capturedSquare && game.get(square));
+  if (blockedSquares.length > 0 || game.get(entry.capturedSquare)) {
+    const blockers = [...blockedSquares, ...(game.get(entry.capturedSquare) ? [entry.capturedSquare] : [])];
+    throw new Error(`Captured-piece restore route is blocked on ${[...new Set(blockers)].join(', ')}.`);
+  }
+  const restorePathSquares = restoreTargets.map((target) => target.square).filter(Boolean);
+  return {
+    routeMode: 'undo-restore-captured',
+    routeCost: 500 + restoreTargets.length * 100,
+    pathSquares: restorePathSquares,
+    rawPathSquares: restorePathSquares,
+    compressedPathSquares: restorePathSquares,
+    steps: makeTransferSteps(
+      coordinateTarget(entry.robotGraveyardSlot, 'graveyard'),
+      restoreTargets,
+      { targetOccupied: squareToIndex(entry.capturedSquare) },
+      { phase: 'undo-captured-restore' }
+    )
+  };
+}
+
+function buildGraveyardRestorePlanWithClearance(game, entry) {
+  try {
+    return buildGraveyardRestorePlan(game, entry);
+  } catch (originalError) {
+    const capturedColor = entry.color === 'w' ? 'b' : 'w';
+    const capturedType = entry.capturedPiece || 'p';
+    const candidates = [];
+    const rejected = [];
+    const reserved = new Set([entry.from, entry.to, entry.capturedSquare].filter(Boolean));
+    const pawnSquares = game.board()
+      .flat()
+      .filter((piece) => piece?.type === 'p' && piece.color === capturedColor)
+      .map((piece) => piece.square)
+      .sort();
+
+    for (const pawnFrom of pawnSquares) {
+      if (reserved.has(pawnFrom)) continue;
+      for (const pawnTemp of pawnTemporarySquares(game, pawnFrom, capturedColor)) {
+        if (reserved.has(pawnTemp)) continue;
+        const simulated = new Chess(game.fen());
+        const pawnMove = {
+          piece: 'p',
+          color: capturedColor,
+          from: pawnFrom,
+          to: pawnTemp,
+          flags: '',
+          captured: null
+        };
+        try {
+          const stage = withSimulatedPhysicalOccupancy(simulated, () => buildBoardTransferPlan(
+            simulated,
+            pawnMove,
+            pawnFrom,
+            pawnTemp,
+            { phase: 'temporary-clearance-stage' }
+          ));
+          if (!movePieceForPhysicalPlanning(simulated, pawnFrom, pawnTemp)) {
+            throw new Error('Could not simulate restore-route clearance staging.');
+          }
+          const restore = buildGraveyardRestorePlan(simulated, entry);
+          simulated.put({ type: capturedType, color: capturedColor }, entry.capturedSquare);
+          const restorePawnMove = { ...pawnMove, from: pawnTemp, to: pawnFrom };
+          const restorePawn = withSimulatedPhysicalOccupancy(simulated, () => buildBoardTransferPlan(
+            simulated,
+            restorePawnMove,
+            pawnTemp,
+            pawnFrom,
+            { phase: 'temporary-clearance-restore' }
+          ));
+          candidates.push({ pawnFrom, pawnTemp, stage, restore, restorePawn });
+        } catch (error) {
+          rejected.push({ pawnFrom, pawnTemp, reason: error.message });
+        }
+      }
+    }
+
+    candidates.sort((left, right) => {
+      const leftCost = left.stage.routeCost + left.restore.routeCost + left.restorePawn.routeCost;
+      const rightCost = right.stage.routeCost + right.restore.routeCost + right.restorePawn.routeCost;
+      return leftCost - rightCost
+        || left.pawnFrom.localeCompare(right.pawnFrom)
+        || left.pawnTemp.localeCompare(right.pawnTemp);
+    });
+    const selected = candidates[0];
+    if (!selected) {
+      originalError.temporaryClearanceRejected = rejected;
+      throw originalError;
+    }
+
+    const temporaryClearance = {
+      pawnFrom: selected.pawnFrom,
+      pawnTemp: selected.pawnTemp,
+      movingColor: capturedColor,
+      originalPhase: 'undo-captured-restore',
+      originalBlockedReason: originalError.message,
+      phases: ['temporary-clearance-stage', 'undo-captured-restore', 'temporary-clearance-restore'],
+      rejectedCandidates: rejected
+    };
+    return {
+      ...combineRouteMetadata([selected.stage, selected.restore, selected.restorePawn], 'temporary-clearance'),
+      temporaryClearance,
+      temporaryClearances: [temporaryClearance],
+      steps: [...selected.stage.steps, ...selected.restore.steps, ...selected.restorePawn.steps]
+    };
+  }
+}
+
 function buildUndoCastlePlan(entry) {
   const rook = entry.castleRookMove;
   if (!rook) throw new Error(`Move ${entry.san} is not castling.`);
 
   const currentGame = new Chess(entry.afterFen);
   const kingMove = makeUndoMoveLike(entry, entry.to, entry.from, 'k');
-  const kingPlan = buildSafeBoardTransferPlan(currentGame, kingMove, entry.to, entry.from, {
-    phase: 'undo-castle-king'
+  const kingPlan = planPhysicalTransfer(currentGame, kingMove, entry.to, entry.from, {
+    phase: 'undo-castle-king',
+    reservedSquares: [entry.to, entry.from, rook.from, rook.to]
   });
 
   const afterKingGame = new Chess(entry.afterFen);
   afterKingGame.remove(entry.to);
   afterKingGame.put({ type: 'k', color: entry.color }, entry.from);
   const rookMove = makeUndoMoveLike(entry, rook.to, rook.from, 'r');
-  const rookPlan = buildSafeBoardTransferPlan(afterKingGame, rookMove, rook.to, rook.from, {
-    phase: 'undo-castle-rook'
+  const rookPlan = planPhysicalTransfer(afterKingGame, rookMove, rook.to, rook.from, {
+    phase: 'undo-castle-rook',
+    reservedSquares: [entry.to, entry.from, rook.from, rook.to]
   });
 
   return {
@@ -3728,9 +4151,10 @@ function buildUndoMovePlan(entry) {
 
   const currentGame = new Chess(entry.afterFen);
   const reverseMove = makeUndoMoveLike(entry, entry.to, entry.from);
-  const attackerPlan = buildSafeBoardTransferPlan(currentGame, reverseMove, entry.to, entry.from, {
+  const attackerPlan = planPhysicalTransfer(currentGame, reverseMove, entry.to, entry.from, {
     ignoredSquares: entry.capturedSquare ? [entry.capturedSquare] : [],
-    phase: 'undo-attacker'
+    phase: 'undo-attacker',
+    reservedSquares: [entry.from, entry.to, entry.capturedSquare]
   });
 
   if (!entry.capturedSquare) {
@@ -3763,32 +4187,20 @@ function buildUndoMovePlan(entry) {
     throw new Error(`Cannot undo robot capture ${entry.san}; no robot graveyard slot was recorded.`);
   }
 
-  const restoreTargets = restoreCapturedPieceTargets(entry);
-  const capturedIndex = squareToIndex(entry.capturedSquare);
-  const restoreSteps = makeTransferSteps(
-    coordinateTarget(entry.robotGraveyardSlot, 'graveyard'),
-    restoreTargets,
-    { targetOccupied: capturedIndex },
-    { phase: 'undo-captured-restore' }
-  );
-  const restorePathSquares = restoreTargets
-    .map((target) => target.square)
-    .filter(Boolean);
+  const afterAttackerGame = gameAfterUndoAttackerBack(entry);
+  const capturedRestorePlan = planPhysicalTransfer(afterAttackerGame, null, null, entry.capturedSquare, {
+    operation: 'graveyard-restore',
+    entry
+  });
   const metadata = combineRouteMetadata([
     attackerPlan,
-    {
-      routeMode: 'undo-restore-captured',
-      routeCost: 500 + restoreTargets.length * 100,
-      pathSquares: restorePathSquares,
-      rawPathSquares: restorePathSquares,
-      compressedPathSquares: restorePathSquares
-    }
+    capturedRestorePlan
   ], entry.side === 'human' ? 'undo-human-capture-restore' : 'undo-robot-capture');
 
   return {
     plan: {
       ...metadata,
-      steps: [...attackerPlan.steps, ...restoreSteps]
+      steps: [...attackerPlan.steps, ...capturedRestorePlan.steps]
     },
     expectedOccupancyAfter: occupancyFromFen(entry.beforeFen),
     completeFen: entry.beforeFen,
@@ -3809,12 +4221,15 @@ function buildPhysicalUndoCommand(entry) {
     fromIndex: squareToIndex(entry.to),
     toIndex: squareToIndex(entry.from),
     capture: false,
+    graveyardSlot: undoPlan.freeGraveyardSlot || null,
     routeMode: undoPlan.plan.routeMode,
     pathSquares: undoPlan.plan.pathSquares || [],
     rawPathSquares: undoPlan.plan.rawPathSquares || undoPlan.plan.pathSquares || [],
     compressedPathSquares: undoPlan.plan.compressedPathSquares || undoPlan.plan.pathSquares || [],
     routeCost: undoPlan.plan.routeCost ?? null,
     blockedReason: undoPlan.plan.blockedReason || null,
+    temporaryClearance: undoPlan.plan.temporaryClearance || null,
+    temporaryClearances: undoPlan.plan.temporaryClearances || [],
     plan: undoPlan.plan.steps,
     speedProfile: {
       travel: 'fast',
@@ -3832,21 +4247,26 @@ function planPhysicalRobotCandidates(candidateMoves) {
   for (const candidate of candidateMoves) {
     const graveyardSlotBefore = physicalSession.nextGraveyardSlot;
     const robotGraveyardBefore = [...physicalSession.robotGraveyardOccupied];
+    const robotGraveyardPendingBefore = [...physicalSession.robotGraveyardPending];
     try {
       const command = buildRobotMoveCommand(candidate);
       const nextGraveyardSlot = physicalSession.nextGraveyardSlot;
       const robotGraveyardOccupied = [...physicalSession.robotGraveyardOccupied];
+      const robotGraveyardPending = [...physicalSession.robotGraveyardPending];
       physicalSession.nextGraveyardSlot = graveyardSlotBefore;
       physicalSession.robotGraveyardOccupied = robotGraveyardBefore;
+      physicalSession.robotGraveyardPending = robotGraveyardPendingBefore;
       planned.push({
         move: candidate,
         command,
         nextGraveyardSlot,
-        robotGraveyardOccupied
+        robotGraveyardOccupied,
+        robotGraveyardPending
       });
     } catch (err) {
       physicalSession.nextGraveyardSlot = graveyardSlotBefore;
       physicalSession.robotGraveyardOccupied = robotGraveyardBefore;
+      physicalSession.robotGraveyardPending = robotGraveyardPendingBefore;
       failures.push({
         move: moveToUci(candidate),
         san: candidate.san,
@@ -4032,6 +4452,7 @@ async function queueRobotReply(options = {}) {
 
     if (Number.isInteger(selectedPlan.nextGraveyardSlot)) physicalSession.nextGraveyardSlot = selectedPlan.nextGraveyardSlot;
     physicalSession.robotGraveyardOccupied = selectedPlan.robotGraveyardOccupied || physicalSession.robotGraveyardOccupied;
+    physicalSession.robotGraveyardPending = selectedPlan.robotGraveyardPending || physicalSession.robotGraveyardPending;
 
     if (!forcedUci && !legalMoveMatchesUci(legalMove, result.move)) {
       const preferredFailure = planningFailures.find((failure) => failure.move === result.move) || null;
@@ -4068,12 +4489,8 @@ async function queueRobotReply(options = {}) {
     };
     physicalSession.phase = 'robot_busy';
     physicalSession.statusText = `Robot moving: ${legalMove.san}`;
-    const appliedMove = applyPendingRobotMoveToGame(physicalSession.pendingRobotJob);
-    if (!appliedMove) {
-      throw new Error(`Robot move ${moveToUci(legalMove)} is no longer legal.`);
-    }
     clearPhysicalLeds();
-    logPhysicalEvent('robot_move_planned', `Robot move planned and shown in app: ${legalMove.san}.`, {
+    logPhysicalEvent('robot_move_planned', `Robot move planned for physical execution: ${legalMove.san}.`, {
       commandId: command.id,
       details: {
         move: moveToUci(legalMove),
@@ -4102,7 +4519,7 @@ async function queueRobotReply(options = {}) {
       san: legalMove.san,
       planned: true
     });
-    queuePhysicalCommand(command);
+    startPendingMotionTransaction(physicalSession.pendingRobotJob, physicalSession.occupancy);
     logPhysicalEvent('robot_job_queued', `Robot job queued for ${legalMove.san}.`, {
       commandId: command.id,
       details: {
@@ -4122,6 +4539,163 @@ async function queueRobotReply(options = {}) {
     physicalSession.activeSearchLevel = null;
     emitPhysicalState();
   }
+}
+
+function pawnTemporarySquares(game, square, color) {
+  const file = square?.[0];
+  const rank = squareRank(square);
+  const direction = color === 'w' ? 1 : -1;
+  const startRank = color === 'w' ? 2 : 7;
+  const candidates = [];
+  const one = `${file}${rank + direction}`;
+  if (squareToIndex(one) !== null && !game.get(one)) {
+    candidates.push(one);
+    const two = `${file}${rank + direction * 2}`;
+    if (rank === startRank && squareToIndex(two) !== null && !game.get(two)) {
+      candidates.push(two);
+    }
+  }
+  return candidates;
+}
+
+function buildTemporaryPawnClearancePlan(game, move, fromSquare, toSquare, options, originalError) {
+  const reserved = new Set([
+    fromSquare,
+    toSquare,
+    ...(options.reservedSquares || []),
+    ...(options.ignoredSquares || [])
+  ].filter(Boolean));
+  const candidates = [];
+  const rejected = [];
+  const squares = game.board()
+    .flat()
+    .filter((entry) => entry?.type === 'p' && entry.color === move.color)
+    .map((entry) => entry.square)
+    .sort();
+
+  for (const pawnFrom of squares) {
+    if (reserved.has(pawnFrom)) continue;
+    for (const pawnTemp of pawnTemporarySquares(game, pawnFrom, move.color)) {
+      if (reserved.has(pawnTemp)) continue;
+      const simulated = new Chess(game.fen());
+      const pawnMove = {
+        piece: 'p',
+        color: move.color,
+        from: pawnFrom,
+        to: pawnTemp,
+        flags: '',
+        captured: null
+      };
+      try {
+        const stage = withSimulatedPhysicalOccupancy(simulated, () => buildBoardTransferPlan(
+          simulated,
+          pawnMove,
+          pawnFrom,
+          pawnTemp,
+          { phase: 'temporary-clearance-stage' }
+        ));
+        if (!movePieceForPhysicalPlanning(simulated, pawnFrom, pawnTemp)) {
+          throw new Error('Could not simulate clearance staging.');
+        }
+        const primary = withSimulatedPhysicalOccupancy(simulated, () => buildSafeBoardTransferPlan(
+          simulated,
+          move,
+          fromSquare,
+          toSquare,
+          {
+            ...options,
+            allowTemporaryClearance: false,
+            phase: options.phase || 'primary-transfer'
+          }
+        ));
+        if (!movePieceForPhysicalPlanning(simulated, fromSquare, toSquare)) {
+          throw new Error('Could not simulate the primary transfer.');
+        }
+        const restoreMove = { ...pawnMove, from: pawnTemp, to: pawnFrom };
+        const restore = withSimulatedPhysicalOccupancy(simulated, () => buildBoardTransferPlan(
+          simulated,
+          restoreMove,
+          pawnTemp,
+          pawnFrom,
+          { phase: 'temporary-clearance-restore' }
+        ));
+        candidates.push({ pawnFrom, pawnTemp, stage, primary, restore });
+      } catch (error) {
+        rejected.push({ pawnFrom, pawnTemp, reason: error.message });
+      }
+    }
+  }
+
+  const cornerKnightSquare = [fromSquare, toSquare].find((square) => ['b1', 'b8', 'g1', 'g8'].includes(square));
+  const preferredPawn = move.piece === 'n' && cornerKnightSquare
+    ? `${cornerKnightSquare[0] === 'b' ? 'a' : 'h'}${move.color === 'w' ? '2' : '7'}`
+    : null;
+  candidates.sort((left, right) => {
+    const preferredDelta = Number(right.pawnFrom === preferredPawn) - Number(left.pawnFrom === preferredPawn);
+    if (preferredDelta !== 0) return preferredDelta;
+    const leftCost = left.stage.routeCost + left.primary.routeCost + left.restore.routeCost;
+    const rightCost = right.stage.routeCost + right.primary.routeCost + right.restore.routeCost;
+    return leftCost - rightCost
+      || left.pawnFrom.localeCompare(right.pawnFrom)
+      || left.pawnTemp.localeCompare(right.pawnTemp);
+  });
+  const selected = candidates[0];
+  if (!selected) {
+    const error = new Error(originalError?.message || `No safe route from ${fromSquare} to ${toSquare}.`);
+    error.temporaryClearanceRejected = rejected;
+    throw error;
+  }
+
+  const routeCost = selected.stage.routeCost + selected.primary.routeCost + selected.restore.routeCost;
+  const candidateScores = candidates.map((candidate) => ({
+    pawnFrom: candidate.pawnFrom,
+    pawnTemp: candidate.pawnTemp,
+    preferred: candidate.pawnFrom === preferredPawn,
+    totalCost: candidate.stage.routeCost + candidate.primary.routeCost + candidate.restore.routeCost
+  }));
+  return {
+    ...combineRouteMetadata([selected.stage, selected.primary, selected.restore], 'temporary-clearance'),
+    routeCost,
+    blockedReason: originalError?.message || null,
+    temporaryClearance: {
+      pawnFrom: selected.pawnFrom,
+      pawnTemp: selected.pawnTemp,
+      movingColor: move.color,
+      originalPhase: options.phase || 'primary-transfer',
+      originalBlockedReason: originalError?.message || null,
+      phases: ['temporary-clearance-stage', options.phase || 'primary-transfer', 'temporary-clearance-restore'],
+      candidateScores,
+      rejectedCandidates: rejected
+    },
+    steps: [...selected.stage.steps, ...selected.primary.steps, ...selected.restore.steps]
+  };
+}
+
+function buildSharedTransferPlan(game, move, fromSquare, toSquare, options = {}) {
+  try {
+    return buildSafeBoardTransferPlan(game, move, fromSquare, toSquare, options);
+  } catch (error) {
+    if (options.allowTemporaryClearance === false) throw error;
+    return buildTemporaryPawnClearancePlan(game, move, fromSquare, toSquare, options, error);
+  }
+}
+
+function planPhysicalTransfer(game, move, fromSquare, toSquare, options = {}) {
+  const operation = options.operation || 'board';
+  if (operation === 'graveyard-removal') {
+    return planCapturedPieceRemovalWithClearance(
+      game,
+      fromSquare,
+      options.ignoredSquares || []
+    );
+  }
+  if (operation === 'graveyard-restore') {
+    return buildGraveyardRestorePlanWithClearance(game, options.entry);
+  }
+  if (operation !== 'board') {
+    throw new Error(`Unsupported physical transfer operation ${operation}.`);
+  }
+  return buildSharedTransferPlan(game, move, fromSquare, toSquare, options);
 }
 
 function expectedDiffForPendingRobotMove(occupancy) {
@@ -4536,16 +5110,8 @@ function queueNextPhysicalRedoStep() {
   physicalSession.phase = 'redo_robot_busy';
   physicalSession.statusText = `Redoing ${entry.san}. Robot is replaying the move.`;
 
-  const appliedMove = applyPendingRobotMoveToGame(physicalSession.pendingRobotJob);
-  if (!appliedMove) {
-    physicalSession.pendingRobotJob = null;
-    pendingRedo.entries.unshift(entry);
-    setPhysicalError(`Redo move ${entry.uci} is no longer legal.`);
-    return { success: false, error: `Redo move ${entry.uci} is no longer legal.`, state: serializePhysicalState() };
-  }
-
   clearPhysicalLeds();
-  queuePhysicalCommand(command);
+  startPendingMotionTransaction(physicalSession.pendingRobotJob, physicalSession.occupancy);
   logPhysicalEvent('physical_redo_step_queued', physicalSession.statusText, {
     commandId: command.id,
     details: {
@@ -4696,7 +5262,7 @@ function queueNextPhysicalUndoStep() {
   physicalSession.phase = 'undo_robot_busy';
   physicalSession.statusText = `Undoing ${entry.san}. Robot is moving pieces back.`;
   clearPhysicalLeds();
-  queuePhysicalCommand(command);
+  startPendingMotionTransaction(physicalSession.pendingRobotJob, physicalSession.occupancy);
   logPhysicalEvent('physical_undo_step_queued', physicalSession.statusText, {
     commandId: command.id,
     details: {
@@ -5028,7 +5594,10 @@ function processUndoRobotBusySnapshot(occupancy) {
 }
 
 function processSyncWarningSnapshot(occupancy) {
-  const expected = occupancyFromGame(physicalSession.game);
+  const motionPhase = currentMotionPhase();
+  const expected = physicalSession.pendingRobotJob?.motionTransaction?.paused && motionPhase
+    ? motionPhase.beforeOccupancy
+    : occupancyFromGame(physicalSession.game);
   const diff = diffOccupancy(expected, occupancy);
 
   if (diff.missing.length === 0 && diff.extra.length === 0) {
@@ -5036,7 +5605,9 @@ function processSyncWarningSnapshot(occupancy) {
     if (physicalSession.pendingRobotJob) {
       physicalSession.statusText = physicalSession.syncWarningReason?.message
         || `Board is restored. Retry robot move ${physicalSession.pendingRobotJob.san} when the piece is centered.`;
-      logPhysicalEvent('sync_restored_pending_robot', 'Board matches the pre-robot position; pending robot job is waiting for user retry.', {
+      logPhysicalEvent('sync_restored_pending_robot', motionPhase
+        ? 'Board matches the current motion phase start; pending phase is waiting for user retry.'
+        : 'Board matches the pre-robot position; pending robot job is waiting for user retry.', {
         actualOccupancy: occupancy,
         commandId: physicalSession.pendingRobotJob.id,
         details: {
@@ -5114,6 +5685,7 @@ function resetPhysicalOpeningForRepeat(occupancy) {
   physicalSession.pendingRedo = null;
   physicalSession.nextGraveyardSlot = 0;
   physicalSession.robotGraveyardOccupied = [];
+  physicalSession.robotGraveyardPending = [];
   physicalSession.lastError = null;
   physicalSession.syncWarningReason = null;
   physicalSession.postRobotSettleGuard = null;
@@ -5578,6 +6150,7 @@ function startPhysicalSession({ humanColor = 'white', level = 1, profile = 'bala
   physicalSession.graveyardSlots = normalizeGraveyardSlots(graveyardSlots);
   physicalSession.nextGraveyardSlot = 0;
   physicalSession.robotGraveyardOccupied = [];
+  physicalSession.robotGraveyardPending = [];
   physicalSession.pendingRobotJob = null;
   physicalSession.moveLog = [];
   physicalSession.pendingUndo = null;
@@ -5725,10 +6298,12 @@ app.post('/api/physical/planner-check', (req, res) => {
         .map((move) => {
           const graveyardSlotBefore = physicalSession.nextGraveyardSlot;
           const robotGraveyardBefore = [...physicalSession.robotGraveyardOccupied];
+          const robotGraveyardPendingBefore = [...physicalSession.robotGraveyardPending];
           try {
             const command = buildRobotMoveCommand(move);
             physicalSession.nextGraveyardSlot = graveyardSlotBefore;
             physicalSession.robotGraveyardOccupied = robotGraveyardBefore;
+            physicalSession.robotGraveyardPending = robotGraveyardPendingBefore;
             return {
               move: moveToUci(move),
               san: move.san,
@@ -5738,6 +6313,7 @@ app.post('/api/physical/planner-check', (req, res) => {
           } catch (err) {
             physicalSession.nextGraveyardSlot = graveyardSlotBefore;
             physicalSession.robotGraveyardOccupied = robotGraveyardBefore;
+            physicalSession.robotGraveyardPending = robotGraveyardPendingBefore;
             return {
               move: moveToUci(move),
               san: move.san,
@@ -5768,6 +6344,26 @@ app.post('/api/physical/retry-robot', (req, res) => {
   const pending = physicalSession.pendingRobotJob;
   if (!pending) {
     return res.status(400).json({ success: false, error: 'No robot job is pending.' });
+  }
+
+  const transaction = pending.motionTransaction;
+  const phase = currentMotionPhase(pending);
+  if (transaction && phase) {
+    const retry = retryCurrentMotionPhase(pending);
+    const response = {
+      success: retry.success,
+      error: retry.error,
+      diff: retry.diff
+        ? {
+            missing: retry.diff.missing,
+            extra: retry.diff.extra,
+            missingSquares: retry.diff.missing.map(indexToSquare).filter(Boolean),
+            extraSquares: retry.diff.extra.map(indexToSquare).filter(Boolean)
+          }
+        : undefined,
+      state: serializePhysicalState()
+    };
+    return res.status(retry.status || 200).json(response);
   }
 
   const expected = occupancyFromGame(physicalSession.game);
@@ -5929,6 +6525,9 @@ app.post('/api/physical/job-result', (req, res) => {
   const pending = physicalSession.pendingRobotJob;
 
   if (!pending) {
+    if (id && completedMotionPhaseCommands.has(id)) {
+      return res.json({ success: true, alreadyCompleted: true, phaseOnly: true, state: serializePhysicalState() });
+    }
     if (id && completedRobotJobs.has(id)) {
       const completed = completedRobotJobs.get(id);
       logPhysicalEvent('robot_job_result_late', `Late robot job result accepted for already completed move ${completed.san || completed.move}.`, {
@@ -5936,7 +6535,7 @@ app.post('/api/physical/job-result', (req, res) => {
         commandId: id,
         actualOccupancy: occupancy || physicalSession.occupancy,
         diff: { missing: [], extra: [] },
-      details: { id, success, error, failedPhase, failedStep, completed }
+        details: { id, success, error, failedPhase, failedStep, completed }
       });
       return res.json({ success: true, alreadyCompleted: true, state: serializePhysicalState() });
     }
@@ -5950,14 +6549,18 @@ app.post('/api/physical/job-result', (req, res) => {
     return res.status(400).json({ success: false, error: 'No robot job is pending.' });
   }
 
-  if (id && id !== pending.id) {
-    logPhysicalEvent('robot_job_result_unexpected', `Unexpected robot job id ${id}; expected ${pending.id}.`, {
+  const expectedCommandId = pending.motionTransaction?.activeCommandId || pending.id;
+  if (id && completedMotionPhaseCommands.has(id)) {
+    return res.json({ success: true, alreadyCompleted: true, phaseOnly: true, state: serializePhysicalState() });
+  }
+  if (id && id !== expectedCommandId) {
+    logPhysicalEvent('robot_job_result_unexpected', `Unexpected robot job id ${id}; expected ${expectedCommandId}.`, {
       level: 'warning',
       commandId: id,
       actualOccupancy: occupancy || physicalSession.occupancy,
-      details: { expectedId: pending.id, receivedId: id }
+      details: { expectedId: expectedCommandId, receivedId: id }
     });
-    return res.status(409).json({ success: false, error: `Unexpected robot job id ${id}; expected ${pending.id}.` });
+    return res.status(409).json({ success: false, error: `Unexpected robot job id ${id}; expected ${expectedCommandId}.` });
   }
 
   logPhysicalEvent('robot_job_result', success
@@ -5974,6 +6577,16 @@ app.post('/api/physical/job-result', (req, res) => {
     const phaseText = failedPhase ? ` during ${failedPhase}` : '';
     const stepText = failedStep !== null && failedStep !== undefined && Number.isInteger(Number(failedStep)) ? ` at step ${failedStep}` : '';
     const enrichedError = `${error || `Robot job ${pending.id} failed.`}${phaseText}${stepText}`;
+    if (pending.motionTransaction) {
+      const paused = pauseCurrentMotionPhase(enrichedError, occupancy);
+      return res.json({
+        success: false,
+        recoverable: true,
+        error: enrichedError,
+        reason: paused.diff || null,
+        state: serializePhysicalState()
+      });
+    }
     if (pending.kind === 'undo') {
       pausePendingUndoAfterFailure(enrichedError, occupancy);
       return res.json({
@@ -6005,6 +6618,25 @@ app.post('/api/physical/job-result', (req, res) => {
       reason: paused.reason,
       state: serializePhysicalState()
     });
+  }
+
+  if (pending.motionTransaction) {
+    const phaseResult = completeCurrentMotionPhase(occupancy);
+    if (!phaseResult.success) {
+      return res.json({
+        success: false,
+        recoverable: true,
+        error: phaseResult.error,
+        state: serializePhysicalState()
+      });
+    }
+    if (!phaseResult.complete) {
+      return res.json({
+        success: true,
+        phaseComplete: true,
+        state: serializePhysicalState()
+      });
+    }
   }
 
   if (pending.kind === 'undo') {
@@ -6166,6 +6798,8 @@ module.exports = {
     normalizeGraveyardSlots,
     withPhysicalPlanningContext,
     buildBoardTransferPlan,
+    buildSharedTransferPlan,
+    planPhysicalTransfer,
     planCapturedPieceRemoval,
     buildCaptureMotionPlan,
     buildCaptureBoardStagingFallback,
@@ -6189,6 +6823,12 @@ module.exports = {
     startPhysicalRedoTurn,
     completePendingUndoRobotJob,
     completePendingRedoRobotJob,
+    completePendingRobotMove,
+    startPendingMotionTransaction,
+    completeCurrentMotionPhase,
+    pauseCurrentMotionPhase,
+    retryCurrentMotionPhase,
+    currentMotionPhase,
     serializePhysicalState,
     occupancyFromGame,
     occupancyFromFen,

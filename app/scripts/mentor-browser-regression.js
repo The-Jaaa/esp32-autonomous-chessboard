@@ -605,6 +605,22 @@ async function runViewport(browser, viewport) {
   await context.close();
 }
 
+async function verifyStaleBackendSettingsMessage(browser) {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const page = await context.newPage();
+  await page.route('**/api/game-settings', (route) => route.fulfill({
+    status: 404,
+    contentType: 'application/json',
+    body: JSON.stringify({ error: 'Not found' })
+  }));
+  await page.goto('http://127.0.0.1:3010/');
+  await expectText(
+    page.locator('.shared-setting-note'),
+    'Backend update required; restart the ChessProject server.'
+  );
+  await context.close();
+}
+
 async function main() {
   const { chromium } = loadPlaywright();
   const viewports = process.env.MENTOR_BROWSER_VIEWPORT === '1920'
@@ -629,6 +645,7 @@ async function main() {
         args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream']
       });
       await runViewport(browser, viewport);
+      await verifyStaleBackendSettingsMessage(browser);
     } catch (error) {
       if (serverOutput) console.error(serverOutput);
       throw error;

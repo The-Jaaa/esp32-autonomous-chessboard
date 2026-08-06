@@ -12,7 +12,12 @@ async function request(path, options = {}) {
     ...options
   });
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error || `Settings request failed (${response.status}).`);
+  if (!response.ok) {
+    const message = response.status === 404
+      ? 'Backend update required; restart the ChessProject server.'
+      : body.error || `Settings request failed (${response.status}).`;
+    throw new Error(message);
+  }
   return body;
 }
 

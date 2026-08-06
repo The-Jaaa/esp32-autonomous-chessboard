@@ -3,6 +3,7 @@ process.env.PHYSICAL_LOG_DISABLE = '1';
 const assert = require('assert');
 const { Chess } = require('chess.js');
 const {
+  server,
   physicalBoardTest: {
     physicalSession,
     processPhysicalSnapshot,
@@ -13,6 +14,12 @@ const {
     startPhysicalRedoTurn,
     completePendingUndoRobotJob,
     completePendingRedoRobotJob,
+    completePendingRobotMove,
+    startPendingMotionTransaction,
+    completeCurrentMotionPhase,
+    pauseCurrentMotionPhase,
+    retryCurrentMotionPhase,
+    currentMotionPhase,
     serializePhysicalState,
     occupancyFromGame,
     occupancyFromFen,
@@ -48,6 +55,7 @@ function resetPhysicalSession(fen = PHYSICAL_START_FEN) {
   physicalSession.graveyardSlots = normalizeGraveyardSlots(DEFAULT_Z_GRAVEYARD_SLOTS);
   physicalSession.nextGraveyardSlot = 0;
   physicalSession.robotGraveyardOccupied = [];
+  physicalSession.robotGraveyardPending = [];
   physicalSession.pendingRobotJob = null;
   physicalSession.moveLog = [];
   physicalSession.pendingUndo = null;
@@ -133,6 +141,16 @@ async function waitFor(predicate, timeoutMs = 5000) {
   throw new Error('Timed out waiting for physical-state regression condition.');
 }
 
+function verifyAllCurrentMotionPhases() {
+  let finalOccupancy = null;
+  while (currentMotionPhase()) {
+    finalOccupancy = currentMotionPhase().afterOccupancy;
+    const result = completeCurrentMotionPhase(finalOccupancy);
+    if (result.complete) break;
+  }
+  return finalOccupancy;
+}
+
 function verifyOpeningAutoContinueLift() {
   const game = new Chess(PHYSICAL_START_FEN);
   for (const uci of ['d2d4', 'g8f6', 'c2c4', 'g7g6', 'b1c3', 'f8g7', 'e2e4', 'd7d6', 'g1f3', 'e8g8']) {
@@ -148,6 +166,85 @@ function verifyOpeningAutoContinueLift() {
   blackLift[squareToIndex('a7')] = false;
   assert.strictEqual(openingAutoContinueLift(game, 'mentor_drill_complete', blackLift), null);
   assert.strictEqual(openingAutoContinueLift(game, 'ready', legalLift), null);
+}
+
+async function verifyMotionTransactionEndpoint() {
+  resetPhysicalSession(PHYSICAL_START_FEN);
+  const move = physicalSession.game.moves({ verbose: true })
+    .find((candidate) => legalMoveMatchesUci(candidate, 'g1f3'));
+  const command = buildRobotMoveCommand(move);
+  physicalSession.phase = 'robot_busy';
+  physicalSession.pendingRobotJob = {
+    id: command.id,
+    uci: 'g1f3',
+    san: move.san,
+    command,
+    preMoveFen: physicalSession.game.fen(),
+    applied: false,
+    appliedMove: null,
+    engineLevel: 1,
+    engineProfile: 'balanced'
+  };
+  startPendingMotionTransaction(physicalSession.pendingRobotJob, physicalSession.occupancy);
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const report = (id, occupancy, success = true) => fetch(`${base}/api/physical/job-result`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, success, occupancy })
+  });
+
+  try {
+    const transaction = physicalSession.pendingRobotJob.motionTransaction;
+    const firstPhase = currentMotionPhase();
+    const firstId = transaction.activeCommandId;
+    let response = await report(`${transaction.id}:p2:a1`, firstPhase.afterOccupancy);
+    assert.strictEqual(response.status, 409, 'out-of-order phase result must be rejected');
+    assert.strictEqual(transaction.phaseIndex, 0);
+
+    response = await report(firstId, firstPhase.beforeOccupancy);
+    let body = await response.json();
+    assert.strictEqual(response.status, 200);
+    assert.strictEqual(body.success, false, 'a success report with wrong occupancy must remain recoverable');
+    assert.strictEqual(body.recoverable, true);
+    assert.strictEqual(transaction.phaseIndex, 0);
+    assert.strictEqual(transaction.paused, true);
+
+    response = await fetch(`${base}/api/physical/retry-robot`, { method: 'POST' });
+    body = await response.json();
+    assert.strictEqual(response.status, 200);
+    assert.strictEqual(body.success, true);
+    assert.strictEqual(currentMotionPhase().attempt, 2);
+    const retryId = transaction.activeCommandId;
+    assert.notStrictEqual(retryId, firstId);
+
+    response = await report(retryId, firstPhase.afterOccupancy);
+    assert.strictEqual(response.status, 200);
+    body = await response.json();
+    assert.strictEqual(body.phaseComplete, true);
+    assert.strictEqual(transaction.phaseIndex, 1);
+
+    response = await report(retryId, firstPhase.afterOccupancy);
+    body = await response.json();
+    assert.strictEqual(response.status, 200);
+    assert.strictEqual(body.alreadyCompleted, true, 'duplicate verified phase must be idempotent');
+    assert.strictEqual(transaction.phaseIndex, 1);
+
+    while (physicalSession.pendingRobotJob) {
+      const phase = currentMotionPhase();
+      response = await report(
+        physicalSession.pendingRobotJob.motionTransaction.activeCommandId,
+        phase.afterOccupancy
+      );
+      assert.strictEqual(response.status, 200);
+      await response.json();
+    }
+    assert.strictEqual(physicalSession.game.history().at(-1), 'Nf3');
+    assert.strictEqual(physicalSession.phase, 'ready');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 }
 
 async function run() {
@@ -269,6 +366,42 @@ async function run() {
   state = serializePhysicalState();
   assert.strictEqual(state.phase, 'robot_busy', 'mid-capture binary occupancy match must not complete robot job');
   assert.strictEqual(state.pendingRobotJob?.move, 'd5e4', 'robot job must stay pending until job-result');
+
+  resetPhysicalSession(beforeCaptureFen);
+  const captureMove = physicalSession.game.moves({ verbose: true })
+    .find((candidate) => legalMoveMatchesUci(candidate, 'd5e4'));
+  const captureCommand = buildRobotMoveCommand(captureMove);
+  const capturePreFen = physicalSession.game.fen();
+  physicalSession.phase = 'robot_busy';
+  physicalSession.pendingRobotJob = {
+    id: captureCommand.id,
+    uci: 'd5e4',
+    san: captureMove.san,
+    command: captureCommand,
+    preMoveFen: capturePreFen,
+    applied: false,
+    appliedMove: null,
+    engineLevel: 1,
+    engineProfile: 'balanced'
+  };
+  startPendingMotionTransaction(physicalSession.pendingRobotJob, physicalSession.occupancy);
+  assert.deepStrictEqual(physicalSession.robotGraveyardOccupied, [], 'capture slot must not become occupied during planning');
+  assert.deepStrictEqual(physicalSession.robotGraveyardPending, ['Z4']);
+  assert.strictEqual(currentMotionPhase().kind, 'captured-removal');
+  assert.strictEqual(physicalSession.game.fen(), capturePreFen, 'capture must remain logically uncommitted before removal');
+  let capturePhase = currentMotionPhase();
+  let capturePhaseResult = completeCurrentMotionPhase(capturePhase.afterOccupancy);
+  assert.strictEqual(capturePhaseResult.complete, false);
+  assert.deepStrictEqual(physicalSession.robotGraveyardPending, []);
+  assert.deepStrictEqual(physicalSession.robotGraveyardOccupied, ['Z4'], 'verified removal must occupy the selected slot');
+  assert.strictEqual(currentMotionPhase().kind, 'attacker-final');
+  assert.strictEqual(physicalSession.game.fen(), capturePreFen, 'capture must remain uncommitted between phases');
+  capturePhase = currentMotionPhase();
+  capturePhaseResult = completeCurrentMotionPhase(capturePhase.afterOccupancy);
+  assert.strictEqual(capturePhaseResult.complete, true);
+  const captureCommitted = completePendingRobotMove(capturePhase.afterOccupancy);
+  assert.strictEqual(captureCommitted.success, true);
+  assert.strictEqual(physicalSession.game.history().at(-1), 'dxe4');
 
   const promotionFen = '4k3/6P1/8/8/8/8/8/4K3 w - - 0 1';
   resetPhysicalSession(promotionFen);
@@ -459,14 +592,58 @@ async function run() {
   assert.strictEqual(undoResult.success, true, 'undo turn should start after opening knight move');
   completePendingUndoRobotJob(occupancyFromFen(robotD5.beforeFen));
   state = serializePhysicalState();
-  assert.strictEqual(state.phase, 'undo_waiting_human_restore', 'blocked human knight undo should ask for manual restore');
-  assert.strictEqual(state.pendingRobotJob, null, 'manual human undo restore should not leave a robot job pending');
-  assert.strictEqual(state.pendingUndo?.waitingForHumanRestore?.manualMoveBack, true);
-  assert(state.pendingUndo?.waitingForHumanRestore?.restoreSquares?.includes('g1'), 'manual restore should highlight the knight home square');
-  await processPhysicalSnapshot(occupancyFromFen(humanNf3.beforeFen), { source: 'regression-test' });
+  assert.strictEqual(state.phase, 'undo_robot_busy', 'blocked human knight undo should use temporary clearance');
+  assert.strictEqual(state.motionTransaction?.phaseCount, 3);
+  assert.deepStrictEqual(state.motionTransaction?.temporaryClearance?.phases, [
+    'temporary-clearance-stage',
+    'undo-attacker',
+    'temporary-clearance-restore'
+  ]);
+  assert.strictEqual(state.motionTransaction?.temporaryClearance?.pawnFrom, 'h2');
+  assert.strictEqual(state.motionTransaction?.temporaryClearance?.pawnTemp, 'h4');
+  assert.strictEqual(physicalSession.game.fen(), humanNf3.afterFen, 'human undo must not commit before all physical phases verify');
+  const firstPhase = currentMotionPhase();
+  const firstAttemptId = physicalSession.pendingRobotJob.motionTransaction.activeCommandId;
+  const partialOccupancy = firstPhase.beforeOccupancy.slice();
+  partialOccupancy[squareToIndex('h2')] = false;
+  const pausedPhase = pauseCurrentMotionPhase('simulated partial clearance', partialOccupancy);
+  assert.strictEqual(pausedPhase.recoverable, true);
+  assert.strictEqual(physicalSession.phase, 'sync_warning');
+  let retryResult = retryCurrentMotionPhase();
+  assert.strictEqual(retryResult.success, false, 'partial occupancy must block phase retry');
+  assert.strictEqual(retryResult.status, 409);
+  physicalSession.occupancy = firstPhase.beforeOccupancy.slice();
+  retryResult = retryCurrentMotionPhase();
+  assert.strictEqual(retryResult.success, true, 'exact phase-before occupancy should permit retry');
+  assert.strictEqual(currentMotionPhase().attempt, 2);
+  assert.notStrictEqual(physicalSession.pendingRobotJob.motionTransaction.activeCommandId, firstAttemptId);
+  let lastPhaseOccupancy = null;
+  while (currentMotionPhase()) {
+    lastPhaseOccupancy = currentMotionPhase().afterOccupancy;
+    const phaseResult = completeCurrentMotionPhase(lastPhaseOccupancy);
+    if (phaseResult.complete) break;
+  }
+  completePendingUndoRobotJob(lastPhaseOccupancy);
   state = serializePhysicalState();
-  assert.strictEqual(state.phase, 'ready', 'manual knight restore should complete undo');
-  assert.strictEqual(physicalSession.moveLog.length, 0, 'manual knight restore should remove both move-log entries');
+  assert.strictEqual(state.phase, 'ready', 'temporary-clearance knight restore should complete undo');
+  assert.strictEqual(physicalSession.moveLog.length, 0, 'temporary-clearance undo should remove both move-log entries');
+  redoResult = startPhysicalRedoTurn();
+  assert.strictEqual(redoResult.success, true);
+  state = serializePhysicalState();
+  assert.strictEqual(state.motionTransaction?.temporaryClearance?.pawnFrom, 'h2');
+  assert.strictEqual(state.motionTransaction?.temporaryClearance?.pawnTemp, 'h4');
+  assert.deepStrictEqual(state.motionTransaction?.temporaryClearance?.phases, [
+    'temporary-clearance-stage',
+    'quiet-transfer',
+    'temporary-clearance-restore'
+  ]);
+  let redoFinalOccupancy = verifyAllCurrentMotionPhases();
+  completePendingRedoRobotJob(redoFinalOccupancy);
+  assert.strictEqual(physicalSession.pendingRobotJob?.uci, 'd7d5');
+  redoFinalOccupancy = verifyAllCurrentMotionPhases();
+  completePendingRedoRobotJob(redoFinalOccupancy);
+  assert.strictEqual(physicalSession.phase, 'ready');
+  assert.strictEqual(physicalSession.game.fen(), robotD5.afterFen);
 
   const robotCaptureFen = 'rnbqkbnr/ppp1pppp/8/3p4/4PP2/8/PPPP2PP/RNBQKBNR b KQkq - 0 2';
   const graveyardSlot = normalizeGraveyardSlots(DEFAULT_Z_GRAVEYARD_SLOTS).find((slot) => slot.label === 'Z4');
@@ -567,7 +744,10 @@ async function run() {
   await waitFor(() => Boolean(physicalSession.pendingRobotJob));
   const queuedOpeningMoves = physicalSession.commands.filter((command) => command.type === 'move');
   assert.strictEqual(queuedOpeningMoves.length, 1, 'Human Black calibration should queue exactly one White robot opener');
-  assert.strictEqual(physicalSession.pendingRobotJob.appliedMove.color, 'w');
+  assert.strictEqual(physicalSession.pendingRobotJob.command.color, 'w');
+  assert.strictEqual(physicalSession.pendingRobotJob.applied, false, 'robot opener must remain uncommitted until all motion phases verify');
+
+  await verifyMotionTransactionEndpoint();
 
   console.log(JSON.stringify({
     success: true,
@@ -593,7 +773,9 @@ async function run() {
       'partial robot castling failure enters recoverable sync warning',
       'physical undo turn reverses robot and human non-captures',
       'physical redo turn replays undone human and robot moves',
-      'blocked human knight undo falls back to manual restore',
+      'blocked human knight undo uses shared temporary pawn clearance',
+      'motion transaction rejects out-of-order results and ignores verified duplicates',
+      'capture graveyard changes Pending to Occupied only after verified removal',
       'physical undo restores robot-captured piece from graveyard',
       'physical undo waits for human-captured piece restore',
       'physical undo residual mismatch waits for board restore instead of retrying completed job',
