@@ -3,6 +3,8 @@ import { Chess } from 'chess.js';
 import { Chessboard } from 'react-chessboard';
 import { useSocket } from '../context/useSocket';
 import { Link } from 'react-router-dom';
+import { GameSettingsControls } from '../features/game-settings/GameSettingsControls';
+import { useGameSettings } from '../features/game-settings/useGameSettings';
 
 const PROFILE_OPTIONS = [
   { value: 'balanced', label: 'Balanced', description: 'Mixed human-like play for the selected level.' },
@@ -137,6 +139,7 @@ function physicalLogDiffSummary(entry) {
 
 export default function GameBoard() {
   const socket = useSocket();
+  const gameSettings = useGameSettings();
 
   // ── Authoritative game state lives in a ref, NEVER in useState ──
   // This is the key architectural decision that eliminates all stale-closure bugs.
@@ -147,7 +150,7 @@ export default function GameBoard() {
   const [fen, setFen] = useState(gameRef.current.fen());
   const [history, setHistory] = useState([]);
   const [undoStack, setUndoStack] = useState([]);
-  const [depth, setDepth] = useState(1);
+  const [activeVirtualHumanColor, setActiveVirtualHumanColor] = useState('white');
   const [opponentProfile, setOpponentProfile] = useState('balanced');
   const [evalScore, setEvalScore] = useState('0.0');
   const [percentFill, setPercentFill] = useState(50);
@@ -196,6 +199,9 @@ export default function GameBoard() {
   const isThinkingRef = useRef(false); // sync guard — updated immediately, not async
   const physicalModeRef = useRef(false);
   const lastPhysicalFenRef = useRef('');
+  const activeHumanColorRef = useRef('white');
+  const gameGenerationRef = useRef(1);
+  const settingsInitializedRef = useRef(false);
 
   // ── Audio refs ──
   const canvasRef = useRef(null);
@@ -212,15 +218,6 @@ export default function GameBoard() {
   }, []);
 
   // ── Difficulty label ──
-  const depthLabel = (d) => {
-    if (d === 1) return 'Complete Beginner';
-    if (d === 2) return 'Beginner';
-    if (d <= 5) return 'Casual';
-    if (d <= 8) return 'Intermediate';
-    if (d <= 11) return 'Advanced';
-    return 'Expert';
-  };
-
   // ── Evaluation via Stockfish ──
   const updateEvaluation = useCallback(async (fen, overrideDepth) => {
     const d = overrideDepth ?? depthRef.current;
@@ -261,7 +258,7 @@ export default function GameBoard() {
   }, []);
 
   // ── Engine move ──
-  const makeEngineMove = useCallback(async () => {
+  const makeEngineMove = useCallback(async (expectedGeneration = gameGenerationRef.current) => {
     if (physicalModeRef.current) {
       isThinkingRef.current = false;
       setIsEngineThinking(false);
@@ -269,8 +266,9 @@ export default function GameBoard() {
     }
 
     const g = gameRef.current;
+    const engineColor = activeHumanColorRef.current === 'white' ? 'b' : 'w';
 
-    if (g.turn() !== 'b' || g.isGameOver()) {
+    if (expectedGeneration !== gameGenerationRef.current || g.turn() !== engineColor || g.isGameOver()) {
       isThinkingRef.current = false;
       setIsEngineThinking(false);
       return;
@@ -298,17 +296,25 @@ export default function GameBoard() {
       return false;
     };
 
+    const requestedFen = g.fen();
     try {
       const response = await fetch('/api/engine-move', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          fen: g.fen(),
+          fen: requestedFen,
           level: depthRef.current,
           profile: opponentProfileRef.current
         })
       });
       const data = await response.json();
+
+      if (expectedGeneration !== gameGenerationRef.current
+        || physicalModeRef.current
+        || gameRef.current !== g
+        || g.fen() !== requestedFen) {
+        return;
+      }
 
       if (!response.ok || !data.success || !data.move) {
         throw new Error(data.error || 'Engine move selection failed');
@@ -320,7 +326,14 @@ export default function GameBoard() {
       console.log(`[Engine Move] ${data.move} (${data.difficultyLabel}, ${data.profile}, ${data.selectionStyle})`);
     } catch (err) {
       console.error('Engine move selection error:', err);
-      playFallbackMove();
+      if (expectedGeneration === gameGenerationRef.current
+        && !physicalModeRef.current
+        && gameRef.current === g
+        && g.fen() === requestedFen) {
+        playFallbackMove();
+      } else {
+        return;
+      }
     }
 
     syncDisplay();
@@ -360,15 +373,50 @@ export default function GameBoard() {
       return;
     }
 
-    if (g.turn() === 'b') {
+    const humanColorCode = activeHumanColorRef.current === 'white' ? 'w' : 'b';
+    if (g.turn() !== humanColorCode) {
       console.log('[onUserMove] Scheduling engine move');
-      setTimeout(makeEngineMove, 600);
+      const generation = gameGenerationRef.current;
+      setTimeout(() => makeEngineMove(generation), 600);
     } else {
       console.log('[onUserMove] Not black turn? Turn is:', g.turn());
       isThinkingRef.current = false;
       setIsEngineThinking(false);
     }
   }, [updateEvaluation, makeEngineMove]);
+
+  const startNewVirtualGame = useCallback((humanColor = gameSettings.defaults.humanColor) => {
+    if (physicalModeRef.current) return;
+    gameGenerationRef.current += 1;
+    const generation = gameGenerationRef.current;
+    const normalizedColor = humanColor === 'black' ? 'black' : 'white';
+    activeHumanColorRef.current = normalizedColor;
+    setActiveVirtualHumanColor(normalizedColor);
+    gameRef.current = new Chess();
+    isThinkingRef.current = normalizedColor === 'black';
+    setIsEngineThinking(normalizedColor === 'black');
+    setUndoStack([]);
+    setOptionSquares({});
+    setCoachAdvice('');
+    setIsSpeaking(false);
+    setEvalScore('0.0');
+    setPercentFill(50);
+    setClassification('Waiting for move...');
+    syncDisplay();
+    updateEvaluation(gameRef.current.fen());
+    if (normalizedColor === 'black') {
+      setTimeout(() => makeEngineMove(generation), 400);
+    }
+  }, [gameSettings.defaults.humanColor, makeEngineMove, syncDisplay, updateEvaluation]);
+
+  useEffect(() => {
+    const level = gameSettings.defaults.difficultyLevel;
+    depthRef.current = level;
+    if (!gameSettings.loading && !settingsInitializedRef.current) {
+      settingsInitializedRef.current = true;
+      startNewVirtualGame(gameSettings.defaults.humanColor);
+    }
+  }, [gameSettings.defaults.difficultyLevel, gameSettings.defaults.humanColor, gameSettings.loading, startNewVirtualGame]);
 
   // ── Drag & drop handler ──
   const getKingSquare = useCallback(() => {
@@ -397,8 +445,8 @@ export default function GameBoard() {
     console.log(`[onDrop] Attempting ${sourceSquare} -> ${targetSquare}`);
     console.log(`[onDrop] isThinking: ${isThinkingRef.current}, gameOver: ${g.isGameOver()}, turn: ${g.turn()}`);
 
-    // Block if engine is thinking or it's not white's turn
-    if (isThinkingRef.current || g.isGameOver() || g.turn() !== 'w') {
+    const humanColorCode = activeHumanColorRef.current === 'white' ? 'w' : 'b';
+    if (isThinkingRef.current || g.isGameOver() || g.turn() !== humanColorCode) {
       console.log('[onDrop] Blocked by state check');
       return false;
     }
@@ -444,7 +492,8 @@ export default function GameBoard() {
 
     // Otherwise, generate options for the clicked square
     const piece = g.get(square);
-    if (piece && piece.color === g.turn() && g.turn() === 'w') {
+    const humanColorCode = activeHumanColorRef.current === 'white' ? 'w' : 'b';
+    if (piece && piece.color === g.turn() && g.turn() === humanColorCode) {
       const moves = g.moves({ square, verbose: true });
       if (moves.length === 0) {
         setOptionSquares({});
@@ -479,6 +528,9 @@ export default function GameBoard() {
     setPhysicalState(prev => ({ ...prev, ...nextState }));
     const active = Boolean(nextState.active);
     physicalModeRef.current = active;
+    if (active && nextState.humanColor) {
+      activeHumanColorRef.current = nextState.humanColor;
+    }
 
     if (nextState.fen && nextState.fen !== lastPhysicalFenRef.current) {
       try {
@@ -503,7 +555,8 @@ export default function GameBoard() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            level: depthRef.current,
+            humanColor: gameSettings.defaults.humanColor,
+            level: gameSettings.defaults.difficultyLevel,
             profile: opponentProfileRef.current,
             setupMode: physicalSetupMode,
             graveyardSlots
@@ -521,7 +574,7 @@ export default function GameBoard() {
         lastError: { message: err.message }
       }));
     }
-  }, [applyPhysicalState, graveyardText, physicalSetupMode]);
+  }, [applyPhysicalState, gameSettings.defaults.difficultyLevel, gameSettings.defaults.humanColor, graveyardText, physicalSetupMode]);
 
   const handleRetryRobotMove = useCallback(async () => {
     try {
@@ -570,8 +623,8 @@ export default function GameBoard() {
     const undoneMoves = [];
     const m1 = g.undo();
     if (m1) undoneMoves.push(m1);
-    // If we ended up on black's turn, undo one more so it's always white's turn
-    if (g.turn() !== 'w') {
+    const humanColorCode = activeHumanColorRef.current === 'white' ? 'w' : 'b';
+    if (g.turn() !== humanColorCode) {
       const m2 = g.undo();
       if (m2) undoneMoves.push(m2);
     }
@@ -629,7 +682,8 @@ export default function GameBoard() {
   // ── Coach Me ──
   const handleCoachMe = useCallback(async () => {
     const g = gameRef.current;
-    if (isThinkingRef.current || g.turn() !== 'w') return;
+    const humanColorCode = activeHumanColorRef.current === 'white' ? 'w' : 'b';
+    if (isThinkingRef.current || g.turn() !== humanColorCode) return;
     setIsCoachLoading(true);
     setCoachAdvice('');
 
@@ -956,6 +1010,22 @@ export default function GameBoard() {
 
   // ── JSX ──
   const selectedProfile = PROFILE_OPTIONS.find((profile) => profile.value === opponentProfile) || PROFILE_OPTIONS[0];
+  const currentHumanColor = physicalState.active
+    ? physicalState.humanColor || 'white'
+    : activeVirtualHumanColor;
+  const handleSharedColorChange = (humanColor) => {
+    gameSettings.updateDefaults({ humanColor }).catch((error) => {
+      console.error('Failed to update game side:', error);
+    });
+  };
+  const handleSharedLevelChange = (difficultyLevel) => {
+    depthRef.current = difficultyLevel;
+    updateEvaluation(gameRef.current.fen(), difficultyLevel);
+    const generation = physicalState.active ? physicalState.sessionGeneration : null;
+    gameSettings.updateDifficulty(difficultyLevel, generation).catch((error) => {
+      console.error('Failed to update game difficulty:', error);
+    });
+  };
   const calibration = physicalState.calibration || { ready: false, missingSquares: [], extraSquares: [] };
   const boardSync = physicalState.phase === 'setup'
     ? calibration
@@ -971,7 +1041,11 @@ export default function GameBoard() {
     : undoStack.length === 0 || isEngineThinking;
   const displayedMoveLog = physicalState.active
     ? (Array.isArray(physicalState.physicalMoveLog) ? physicalState.physicalMoveLog : [])
-    : history.map((move, index) => ({ id: `virtual-${index}`, san: move, side: index % 2 === 0 ? 'human' : 'engine' }));
+    : history.map((move, index) => ({
+        id: `virtual-${index}`,
+        san: move,
+        side: (index % 2 === 0 ? 'white' : 'black') === activeVirtualHumanColor ? 'human' : 'engine'
+      }));
 
   const boardOptions = useMemo(() => {
     const styles = { ...optionSquares };
@@ -1004,6 +1078,7 @@ export default function GameBoard() {
     }
     return {
       position: fen,
+      boardOrientation: currentHumanColor,
       onPieceDrop: onDrop,
       onPieceDrag: onPieceDrag,
       onSquareClick: onSquareClick,
@@ -1011,7 +1086,7 @@ export default function GameBoard() {
       lightSquareStyle: { backgroundColor: '#e2e8f0' },
       squareStyles: styles
     };
-  }, [fen, getKingSquare, onDrop, onPieceDrag, onSquareClick, optionSquares, physicalState]);
+  }, [currentHumanColor, fen, getKingSquare, onDrop, onPieceDrag, onSquareClick, optionSquares, physicalState]);
 
   return (
     <div className="app-container">
@@ -1026,26 +1101,24 @@ export default function GameBoard() {
 
           <div className="mode-toggle">
             <div className="mode-info" style={{ width: '100%' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <h3>Difficulty</h3>
-                <span style={{ fontSize: '0.8rem', color: 'var(--accent-color)', fontWeight: '600' }}>
-                  {depthLabel(depth)}&nbsp;
-                  <span style={{ opacity: 0.6 }}>(Level {depth})</span>
-                </span>
-              </div>
-              <input
-                type="range" min="1" max="15" value={depth}
-                onChange={(e) => {
-                  const d = parseInt(e.target.value);
-                  setDepth(d);
-                  depthRef.current = d;
-                  updateEvaluation(gameRef.current.fen(), d);
-                }}
-                style={{ width: '100%', marginTop: '10px', cursor: 'pointer', accentColor: 'var(--accent-color)' }}
+              <GameSettingsControls
+                defaults={gameSettings.defaults}
+                activeHumanColor={currentHumanColor}
+                activeGame
+                activeSearch={Boolean(physicalState.active && (physicalState.activeSearchLevel || physicalState.difficultyPending))}
+                onColorChange={handleSharedColorChange}
+                onLevelChange={handleSharedLevelChange}
               />
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                <span>Beginner</span><span>Expert</span>
-              </div>
+              {gameSettings.error && <p className="shared-setting-note">{gameSettings.error}</p>}
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => startNewVirtualGame(gameSettings.defaults.humanColor)}
+                disabled={physicalState.active}
+                style={{ width: '100%', marginTop: '12px' }}
+              >
+                New Virtual Game
+              </button>
               <div style={{ marginTop: '14px' }}>
                 <label htmlFor="opponentProfile" style={{ display: 'block', fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '6px', fontWeight: 600 }}>
                   Opponent Style

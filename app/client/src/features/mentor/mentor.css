@@ -843,6 +843,7 @@
   display: grid;
   grid-template-columns: 1fr 1fr;
   height: 31px;
+  flex: 0 0 31px;
   margin: 10px 22px 0;
   overflow: hidden;
   border: 1px solid var(--mentor-border);

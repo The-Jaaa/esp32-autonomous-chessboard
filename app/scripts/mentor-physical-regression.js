@@ -196,6 +196,7 @@ async function run() {
   assert.deepStrictEqual(
     toolService.declarations(first.id).map((tool) => tool.name),
     [
+      'set_game_preferences',
       'get_physical_game_status',
       'start_physical_game',
       'attach_physical_game',

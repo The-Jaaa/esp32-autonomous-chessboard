@@ -35,6 +35,8 @@ import {
 import { useSocket } from '../../context/useSocket';
 import { mentorApi } from './mentor-api';
 import { useMentorLive } from './useMentorLive';
+import { GameSettingsControls } from '../game-settings/GameSettingsControls';
+import { useGameSettings } from '../game-settings/useGameSettings';
 import './mentor.css';
 
 const SUGGESTIONS = [
@@ -160,6 +162,7 @@ function toolLabel(toolCall) {
     reset_board: 'Reset board',
     set_orientation: `Show ${args.orientation || ''} perspective`.trim(),
     annotate_board: 'Annotate board',
+    set_game_preferences: 'Update game preferences',
     get_activity_state: 'Read activity state',
     propose_activity: 'Validate activity',
     start_activity: 'Start activity',
@@ -583,6 +586,7 @@ function Message({ message }) {
 
 export default function MentorWorkspace() {
   const socket = useSocket();
+  const gameSettings = useGameSettings();
   const navigate = useNavigate();
   const { conversationId } = useParams();
   const [conversations, setConversations] = useState([]);
@@ -616,6 +620,7 @@ export default function MentorWorkspace() {
   const stickToBottomRef = useRef(true);
   const streamPollRef = useRef(null);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const manualOrientationRef = useRef(false);
 
   const scrollToLatest = useCallback((behavior = 'auto') => {
     const scrollArea = messageScrollRef.current;
@@ -1163,6 +1168,7 @@ export default function MentorWorkspace() {
 
   const flipBoard = () => {
     if (!workspaceState || mentorRequestBusy || pendingBoardAction || activityBusy) return;
+    manualOrientationRef.current = true;
     if (physicalAttached) {
       setPhysicalBusy(true);
       mentorApi.setPhysicalOrientation(
@@ -1187,6 +1193,38 @@ export default function MentorWorkspace() {
       boardState.revision,
       actionId
     ));
+  };
+
+  const updateSharedColor = async (humanColor) => {
+    try {
+      await gameSettings.updateDefaults({ humanColor });
+      if (manualOrientationRef.current || !workspaceState) return;
+      if (physicalAttached) {
+        const result = await mentorApi.setPhysicalOrientation(
+          conversationId,
+          humanColor,
+          workspaceState.revision
+        );
+        setPhysicalBoard(result.physicalBoard);
+      } else if (boardState?.orientation !== humanColor) {
+        const actionId = crypto.randomUUID();
+        const result = await mentorApi.setOrientation(conversationId, humanColor, boardState.revision, actionId);
+        setBoardState(result.state);
+      }
+    } catch (settingsError) {
+      setError(settingsError.message);
+    }
+  };
+
+  const updateSharedDifficulty = async (difficultyLevel) => {
+    try {
+      await gameSettings.updateDifficulty(
+        difficultyLevel,
+        physicalAttached ? workspaceState.sessionGeneration : null
+      );
+    } catch (settingsError) {
+      setError(settingsError.message);
+    }
   };
 
   const resetBoard = () => {
@@ -1422,6 +1460,16 @@ export default function MentorWorkspace() {
             <Radio size={13} /> Physical
           </button>
         </div>
+        <GameSettingsControls
+          compact
+          defaults={gameSettings.defaults}
+          activeHumanColor={physicalAttached ? workspaceState?.humanColor : gameSettings.defaults.humanColor}
+          activeGame={Boolean(physicalAttached || activity)}
+          activeSearch={Boolean(physicalAttached && (workspaceState?.activeSearchLevel || workspaceState?.difficultyPending))}
+          disabled={physicalBusy}
+          onColorChange={updateSharedColor}
+          onLevelChange={updateSharedDifficulty}
+        />
         {physicalAttached ? (
           <>
             <div className={`mentor-physical-status is-${workspaceState.physical.phase}`}>

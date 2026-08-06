@@ -12,6 +12,7 @@ function createMentorRouter({
   liveService,
   speakerService,
   physicalObserver,
+  gameSettingsService,
   emitBoardUpdate = () => {}
 }) {
   const router = express.Router();
@@ -44,7 +45,10 @@ function createMentorRouter({
   });
 
   router.post('/conversations', (req, res) => {
-    const conversation = store.createConversation(req.body || {});
+    const conversation = store.createConversation({
+      ...(req.body || {}),
+      orientation: gameSettingsService?.get().defaults.humanColor || 'white'
+    });
     res.status(201).json({
       conversation: {
         ...conversation,

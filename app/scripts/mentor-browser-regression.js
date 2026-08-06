@@ -85,6 +85,15 @@ async function runViewport(browser, viewport) {
   await expectText(page.locator('.logo-container'), 'Companion Board');
   await expectText(page.locator('.mode-info'), 'Interactive lessons, analysis, and board demonstrations.');
   await page.locator('[data-square="a1"] > div').waitFor({ state: 'visible' });
+  const companionSettings = page.locator('.shared-game-settings').first();
+  await companionSettings.getByRole('button', { name: 'Black', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.shared-side-selector button.is-active')?.textContent.trim() === 'Black');
+  await page.getByRole('button', { name: 'New Virtual Game' }).click();
+  await page.locator('#moveList li').first().waitFor({ state: 'visible', timeout: 10000 });
+  assert.strictEqual(await page.locator('#moveList li').count(), 1, 'Human Black should receive exactly one White engine opener.');
+  await companionSettings.getByRole('button', { name: 'White', exact: true }).click();
+  await page.getByRole('button', { name: 'New Virtual Game' }).click();
+  assert.strictEqual(await page.locator('#moveList li').count(), 0, 'New Virtual Game should clear the previous move history.');
   const normalBoardColors = await page.evaluate(() => ({
     dark: getComputedStyle(document.querySelector('[data-square="a1"] > div')).backgroundColor,
     light: getComputedStyle(document.querySelector('[data-square="b1"] > div')).backgroundColor
@@ -93,6 +102,11 @@ async function runViewport(browser, viewport) {
   await page.locator('.mentor-shell').waitFor({ state: 'visible' });
   await page.locator('[data-square="e2"]').waitFor({ state: 'visible' });
   await page.waitForURL(/\/mentor\/[^/]+$/);
+  const mentorSettings = page.locator('.shared-game-settings').first();
+  await expectText(mentorSettings.locator('.shared-side-selector button.is-active'), 'White');
+  await mentorSettings.getByRole('button', { name: 'Black', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.mentor-board-panel .shared-side-selector button.is-active')?.textContent.trim() === 'Black');
+  await mentorSettings.getByRole('button', { name: 'White', exact: true }).click();
 
   const mentorTheme = await page.evaluate(() => {
     const root = getComputedStyle(document.documentElement);

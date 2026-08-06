@@ -95,13 +95,43 @@ bytes static RAM.
 
 ## Remaining Demo Milestones
 
-1. Shared White/Black and difficulty controls, including validated Gemini use.
+1. Complete the real-board Human Black acceptance gate for shared side and difficulty settings.
 2. Online physical promotions.
 3. Gemini-led physical curriculum beyond fixed opening drills.
 4. Production offline feedback, side selection, and promotion interaction.
 5. Continuous production offline gameplay.
 6. Online/offline ownership, persistence, and reconnect handoff.
 7. Final demo operations, documentation, and release acceptance.
+
+## Shared Side And Difficulty Configuration
+
+The Companion Board and Mentor now use one SQLite-backed preference for Human
+White/Black and Level 1-15. Both pages update immediately through
+`game-settings-updated`. Side changes apply to the next game, while difficulty
+changes update an attached physical session through its generation-checked
+settings endpoint and take effect at the next engine-selection transaction.
+
+Physical sessions record human/robot colors and the configured, active-search,
+and queued-job levels. Human Black completes normal calibration, receives one
+verified White robot opener, and then owns only Black lifts and moves. Captures,
+castling, synchronization recovery, and actor-based undo/redo use the same
+color-aware state machine. Reviewed physical opening drills remain learner-White
+only.
+
+Virtual Companion games support either side, orient to the active human color,
+and expose an explicit New Virtual Game command. A generation guard prevents a
+late engine response from a previous game from mutating the new game. Companion
+personality selection remains unchanged; mentor-started physical games always
+use Balanced with the shared side and level. Gemini can update the same defaults
+through `set_game_preferences` without receiving low-level board controls.
+
+Automated acceptance covers migration persistence and validation, REST and
+socket behavior, mentor tool use, Human Black move interpretation, captures,
+castling, engine-level snapshotting, one-time White opening scheduling,
+actor-based undo/redo, and desktop virtual Human Black play. Client lint/build,
+backend syntax, physical regressions, and relevant mentor regressions pass. The
+firmware and offline core are unchanged. The required real-board Human Black
+test remains pending before this milestone is physically accepted.
 
 ## Mentor Physical Intent And Selective Coaching
 

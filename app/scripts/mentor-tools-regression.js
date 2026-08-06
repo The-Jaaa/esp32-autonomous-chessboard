@@ -7,6 +7,7 @@ const { MentorChessService } = require('../mentor/chess-service');
 const { MentorService } = require('../mentor/service');
 const { GeminiMentorTextProvider, MAX_TOOL_ROUNDS } = require('../mentor/text-provider');
 const { MentorToolService } = require('../mentor/tool-service');
+const { GameSettingsService } = require('../game-settings-service');
 
 function temporaryDatabase(name) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), `mentor-tools-${name}-`));
@@ -64,9 +65,11 @@ async function executorRegressions() {
   const pair = store.createMessagePair(conversation.id, { requestId: 'tools', text: 'Use tools.' });
   const events = [];
   const boardUpdates = [];
+  const gameSettingsService = new GameSettingsService({ store });
   const toolService = new MentorToolService({
     store,
     chessService: chess,
+    gameSettingsService,
     delay: async () => {},
     emit: (id, event, payload) => events.push({ id, event, payload }),
     emitBoardUpdate: (id, result) => boardUpdates.push({ id, result })
@@ -84,6 +87,11 @@ async function executorRegressions() {
   const read = await execute('get_board_state');
   assert.strictEqual(read.toolCall.status, 'complete');
   assert.strictEqual(read.response.output.legalMoves.length, 20);
+
+  const preferences = await execute('set_game_preferences', { humanColor: 'black', difficultyLevel: 11 });
+  assert.strictEqual(preferences.toolCall.status, 'complete');
+  assert.strictEqual(store.getAppSettings().humanColor, 'black');
+  assert.strictEqual(store.getAppSettings().difficultyLevel, 11);
 
   await execute('annotate_board', {
     highlights: [{ square: 'e4', role: 'idea' }],

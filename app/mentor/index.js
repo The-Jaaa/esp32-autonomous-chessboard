@@ -8,6 +8,7 @@ const { MentorAnalysisService } = require('./analysis-service');
 const { MentorActivityService } = require('./activity-service');
 const { MentorSpeakerService } = require('./speaker-service');
 const { MentorPhysicalObserverService } = require('./physical-observer-service');
+const { GameSettingsService } = require('../game-settings-service');
 const {
   DEFAULT_LIVE_MODEL,
   DEFAULT_LIVE_VOICE,
@@ -39,6 +40,10 @@ function createMentorFeature({
   liveVoice = DEFAULT_LIVE_VOICE
 }) {
   const store = new MentorStore(dbPath ? { dbPath } : {});
+  const gameSettingsService = new GameSettingsService({
+    store,
+    emit: (event, payload) => io.emit(event, payload)
+  });
   const textProvider = provider || (process.env.MENTOR_FAKE_TEXT === '1'
     ? new DeterministicMentorTextProvider()
     : new GeminiMentorTextProvider({ ai, model }));
@@ -77,6 +82,7 @@ function createMentorFeature({
     chessService,
     analysisService: mentorAnalysis,
     physicalObserver,
+    gameSettingsService,
     emit,
     emitBoardUpdate
   });
@@ -139,6 +145,7 @@ function createMentorFeature({
     liveService,
     speakerService,
     physicalObserver,
+    gameSettingsService,
     emitBoardUpdate
   }));
 
@@ -177,6 +184,7 @@ function createMentorFeature({
     engineService: mentorEngine,
     liveService,
     physicalObserver,
+    gameSettingsService,
     liveConnector: connector,
     provider: textProvider,
     async close() {

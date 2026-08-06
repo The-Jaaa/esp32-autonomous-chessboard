@@ -459,6 +459,7 @@ async function socketRegressions() {
   const declarationNames = connector.connectCalls.at(-1).config.tools[0].functionDeclarations
     .map((declaration) => declaration.name);
   const expectedToolNames = [
+    'set_game_preferences',
     'get_physical_game_status',
     'start_physical_game',
     'attach_physical_game',

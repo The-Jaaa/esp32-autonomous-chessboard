@@ -14,6 +14,17 @@ const CUSTOM_ACTIVITY_PROPERTIES = {
 };
 
 const TOOL_DECLARATIONS = [{
+  name: 'set_game_preferences',
+  description: 'Set the learner\'s default side and/or difficulty. Side applies to the next game; difficulty also applies to the next robot turn of an attached physical game.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      humanColor: { type: 'string', enum: ['white', 'black'] },
+      difficultyLevel: { type: 'integer', minimum: 1, maximum: 15 }
+    },
+    additionalProperties: false
+  }
+}, {
   name: 'get_physical_game_status',
   description: 'Check whether the physical chessboard is connected, whether a game is active, and whether it is already attached to a mentor conversation.',
   parametersJsonSchema: { type: 'object', properties: {}, additionalProperties: false }
@@ -251,12 +262,13 @@ function progressTotalFor(name, args) {
 }
 
 class MentorToolService {
-  constructor({ store, chessService, analysisService = null, activityService = null, physicalObserver = null, emit = () => {}, emitBoardUpdate = () => {}, delay = waitWithSignal }) {
+  constructor({ store, chessService, analysisService = null, activityService = null, physicalObserver = null, gameSettingsService = null, emit = () => {}, emitBoardUpdate = () => {}, delay = waitWithSignal }) {
     this.store = store;
     this.chessService = chessService;
     this.analysisService = analysisService;
     this.activityService = activityService;
     this.physicalObserver = physicalObserver;
+    this.gameSettingsService = gameSettingsService;
     this.emit = emit;
     this.emitBoardUpdate = emitBoardUpdate;
     this.delay = delay;
@@ -406,6 +418,13 @@ class MentorToolService {
 
   async runTool(name, args, context) {
     const { conversationId, requestId, toolCall, signal, onProgress } = context;
+    if (name === 'set_game_preferences') {
+      if (!this.gameSettingsService) throw new Error('Game settings are unavailable.');
+      const result = this.gameSettingsService.updateFromMentor(conversationId, args);
+      onProgress(1, 1);
+      return result;
+    }
+
     if (name === 'get_physical_game_status') {
       onProgress(1, 1);
       return this.physicalObserver?.getPhysicalGameStatus(conversationId) || { available: false };

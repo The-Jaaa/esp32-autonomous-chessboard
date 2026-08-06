@@ -6,6 +6,7 @@ const {
   physicalBoardTest: {
     physicalSession,
     processPhysicalSnapshot,
+    startPhysicalSession,
     queueRobotReply,
     pausePendingRobotJobAfterFailure,
     startPhysicalUndoTurn,
@@ -39,7 +40,10 @@ function resetPhysicalSession(fen = PHYSICAL_START_FEN) {
   physicalSession.pendingCaptureTarget = null;
   physicalSession.pendingCastleMove = null;
   physicalSession.legalTargets = [];
+  physicalSession.humanColor = 'white';
+  physicalSession.robotColor = 'black';
   physicalSession.level = clampLevel(1);
+  physicalSession.activeSearchLevel = null;
   physicalSession.profile = normalizeProfile('balanced');
   physicalSession.graveyardSlots = normalizeGraveyardSlots(DEFAULT_Z_GRAVEYARD_SLOTS);
   physicalSession.nextGraveyardSlot = 0;
@@ -60,6 +64,8 @@ function resetPhysicalSession(fen = PHYSICAL_START_FEN) {
   physicalSession.postRobotSettleGuard = null;
   physicalSession.statusText = 'Waiting for your move.';
   physicalSession.lastMove = null;
+  physicalSession.lastSnapshotAt = Date.now();
+  physicalSession.lastPollAt = Date.now();
 }
 
 function parseUci(uci) {
@@ -118,6 +124,15 @@ function occupancyWithSquare(fen, square, occupied) {
   return occupancy;
 }
 
+async function waitFor(predicate, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error('Timed out waiting for physical-state regression condition.');
+}
+
 function verifyOpeningAutoContinueLift() {
   const game = new Chess(PHYSICAL_START_FEN);
   for (const uci of ['d2d4', 'g8f6', 'c2c4', 'g7g6', 'b1c3', 'f8g7', 'e2e4', 'd7d6', 'g1f3', 'e8g8']) {
@@ -137,6 +152,74 @@ function verifyOpeningAutoContinueLift() {
 
 async function run() {
   verifyOpeningAutoContinueLift();
+  startPhysicalSession({ humanColor: 'black', level: 6, profile: 'aggressive' });
+  let state = serializePhysicalState();
+  assert.strictEqual(state.humanColor, 'black');
+  assert.strictEqual(state.robotColor, 'white');
+  assert.strictEqual(state.configuredLevel, 6);
+  assert.strictEqual(state.profile, 'aggressive');
+
+  const afterWhiteOpening = new Chess(PHYSICAL_START_FEN);
+  afterWhiteOpening.move('e4');
+  resetPhysicalSession(afterWhiteOpening.fen());
+  physicalSession.humanColor = 'black';
+  physicalSession.robotColor = 'white';
+  const wrongColorLift = occupancyFromFen(afterWhiteOpening.fen());
+  wrongColorLift[squareToIndex('g1')] = false;
+  await processPhysicalSnapshot(wrongColorLift, { source: 'regression-test' });
+  state = serializePhysicalState();
+  assert.strictEqual(state.phase, 'sync_warning', 'lifting a White piece on the Black human turn should warn');
+  await processPhysicalSnapshot(occupancyFromFen(afterWhiteOpening.fen()), { source: 'regression-test' });
+  const blackLift = occupancyFromFen(afterWhiteOpening.fen());
+  blackLift[squareToIndex('g8')] = false;
+  await processPhysicalSnapshot(blackLift, { source: 'regression-test' });
+  state = serializePhysicalState();
+  assert.strictEqual(state.phase, 'piece_lifted', 'a Black piece lift should arm moves for Human Black');
+
+  const blackCaptureFen = '4k3/8/8/8/4p3/3P4/8/4K3 b - - 0 1';
+  resetPhysicalSession(blackCaptureFen);
+  physicalSession.humanColor = 'black';
+  physicalSession.robotColor = 'white';
+  const blackCaptureLift = occupancyFromFen(blackCaptureFen);
+  blackCaptureLift[squareToIndex('e4')] = false;
+  await processPhysicalSnapshot(blackCaptureLift, { source: 'regression-test' });
+  const blackCaptureVictimRemoved = [...blackCaptureLift];
+  blackCaptureVictimRemoved[squareToIndex('d3')] = false;
+  await processPhysicalSnapshot(blackCaptureVictimRemoved, { source: 'regression-test' });
+  const blackCaptureComplete = [...blackCaptureVictimRemoved];
+  blackCaptureComplete[squareToIndex('d3')] = true;
+  await processPhysicalSnapshot(blackCaptureComplete, { source: 'regression-test' });
+  assert.strictEqual(physicalSession.moveLog.at(-1)?.uci, 'e4d3');
+
+  const blackCastleFen = '4k2r/8/8/8/8/8/8/4K3 b k - 0 1';
+  resetPhysicalSession(blackCastleFen);
+  physicalSession.humanColor = 'black';
+  physicalSession.robotColor = 'white';
+  const blackCastleLift = occupancyFromFen(blackCastleFen);
+  blackCastleLift[squareToIndex('e8')] = false;
+  await processPhysicalSnapshot(blackCastleLift, { source: 'regression-test' });
+  const blackKingPlaced = [...blackCastleLift];
+  blackKingPlaced[squareToIndex('g8')] = true;
+  await processPhysicalSnapshot(blackKingPlaced, { source: 'regression-test' });
+  assert.strictEqual(physicalSession.phase, 'castle_pending_rook');
+  const blackCastleComplete = [...blackKingPlaced];
+  blackCastleComplete[squareToIndex('h8')] = false;
+  blackCastleComplete[squareToIndex('f8')] = true;
+  await processPhysicalSnapshot(blackCastleComplete, { source: 'regression-test' });
+  assert.strictEqual(physicalSession.moveLog.at(-1)?.san, 'O-O');
+
+  const robotTurn = new Chess(PHYSICAL_START_FEN);
+  robotTurn.move('e4');
+  resetPhysicalSession(robotTurn.fen());
+  physicalSession.level = 2;
+  const inFlightSearch = queueRobotReply();
+  physicalSession.level = 9;
+  await inFlightSearch;
+  state = serializePhysicalState();
+  assert.strictEqual(state.configuredLevel, 9, 'the session should retain the newly configured level');
+  assert.strictEqual(state.pendingRobotJob?.engineLevel, 2, 'the running engine transaction should retain its original level');
+  assert.strictEqual(state.difficultyPending, true, 'status should show that the new level is waiting for the next robot turn');
+
   const fen = 'rnbqkbnr/2pppppp/p7/1p6/6P1/2P5/PP1PPP1P/RNBQKBNR w KQkq - 0 3';
   resetPhysicalSession(fen);
 
@@ -144,7 +227,7 @@ async function run() {
   lifted[squareToIndex('h1')] = false;
 
   await processPhysicalSnapshot(lifted, { source: 'regression-test' });
-  let state = serializePhysicalState();
+  state = serializePhysicalState();
   assert.strictEqual(state.phase, 'sync_warning', 'lifting a no-legal-move rook should be recoverable');
   assert.strictEqual(state.lastError, null, 'recoverable no-move lift should not set lastError');
   assert.strictEqual(state.syncWarningReason?.type, 'no_legal_moves_lift');
@@ -457,9 +540,44 @@ async function run() {
   assert.strictEqual(state.phase, 'sync_warning');
   assert.strictEqual(state.syncWarningReason?.type, 'undo_stale_board');
 
+  const robotWhiteOpening = makeMoveLogEntry('robot', PHYSICAL_START_FEN, 'e2e4');
+  const humanBlackReply = makeMoveLogEntry('human', robotWhiteOpening.afterFen, 'e7e5');
+  const robotWhiteReply = makeMoveLogEntry('robot', humanBlackReply.afterFen, 'd2d3');
+  resetPhysicalSession(robotWhiteReply.afterFen);
+  physicalSession.humanColor = 'black';
+  physicalSession.robotColor = 'white';
+  physicalSession.moveLog = [robotWhiteOpening, humanBlackReply, robotWhiteReply];
+  undoResult = startPhysicalUndoTurn();
+  assert.strictEqual(undoResult.success, true);
+  completePendingUndoRobotJob(occupancyFromFen(robotWhiteReply.beforeFen));
+  completePendingUndoRobotJob(occupancyFromFen(humanBlackReply.beforeFen));
+  assert.strictEqual(physicalSession.moveLog.length, 1, 'Human Black undo should retain the initial White robot move');
+  assert.strictEqual(physicalSession.game.fen(), robotWhiteOpening.afterFen);
+  redoResult = startPhysicalRedoTurn();
+  assert.strictEqual(redoResult.success, true);
+  completePendingRedoRobotJob(occupancyFromFen(humanBlackReply.afterFen));
+  completePendingRedoRobotJob(occupancyFromFen(robotWhiteReply.afterFen));
+  assert.strictEqual(physicalSession.moveLog.length, 3, 'Human Black redo should restore both actor moves');
+  assert.strictEqual(physicalSession.game.fen(), robotWhiteReply.afterFen);
+
+  startPhysicalSession({ humanColor: 'black', level: 1, profile: 'balanced' });
+  const calibratedStart = occupancyFromFen(PHYSICAL_START_FEN);
+  await processPhysicalSnapshot(calibratedStart, { source: 'regression-test' });
+  await processPhysicalSnapshot(calibratedStart, { source: 'regression-test-duplicate' });
+  await waitFor(() => Boolean(physicalSession.pendingRobotJob));
+  const queuedOpeningMoves = physicalSession.commands.filter((command) => command.type === 'move');
+  assert.strictEqual(queuedOpeningMoves.length, 1, 'Human Black calibration should queue exactly one White robot opener');
+  assert.strictEqual(physicalSession.pendingRobotJob.appliedMove.color, 'w');
+
   console.log(JSON.stringify({
     success: true,
     checked: [
+      'physical sessions retain Human Black and Robot White actor colors',
+      'Human Black rejects White lifts and accepts Black lifts',
+      'Human Black captures and castling commit through the existing sensor state machine',
+      'difficulty changes during search apply only to the next robot turn',
+      'Human Black calibration queues exactly one White robot opening move',
+      'Human Black undo and redo preserve the initial White robot move',
       'no-legal-move rook lift enters sync_warning',
       'placing rook back returns physical board to ready',
       'mid-capture occupancy snapshot does not prematurely commit robot move',

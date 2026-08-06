@@ -149,6 +149,16 @@ function mapLearnerProfile(row) {
   };
 }
 
+function mapAppSettings(row) {
+  if (!row) return null;
+  return {
+    humanColor: row.human_color,
+    difficultyLevel: Number(row.difficulty_level),
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at)
+  };
+}
+
 function mapTopicProgress(row) {
   if (!row) return null;
   return {
@@ -490,6 +500,20 @@ class MentorStore {
           PRIMARY KEY(conversation_id, request_id)
         );
       `
+    }, {
+      version: 10,
+      sql: `
+        CREATE TABLE app_game_settings (
+          id INTEGER PRIMARY KEY CHECK(id = 1),
+          human_color TEXT NOT NULL DEFAULT 'white' CHECK(human_color IN ('white', 'black')),
+          difficulty_level INTEGER NOT NULL DEFAULT 1 CHECK(difficulty_level BETWEEN 1 AND 15),
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        INSERT INTO app_game_settings(id, human_color, difficulty_level, created_at, updated_at)
+        VALUES (1, 'white', 1, ${this.now()}, ${this.now()});
+      `
     }];
 
     const applied = new Set(
@@ -543,7 +567,7 @@ class MentorStore {
     `).run(timestamp).changes;
   }
 
-  createConversation({ title = DEFAULT_TITLE } = {}) {
+  createConversation({ title = DEFAULT_TITLE, orientation = 'white' } = {}) {
     const timestamp = this.now();
     const conversation = {
       id: this.createId(),
@@ -563,8 +587,15 @@ class MentorStore {
         INSERT INTO mentor_chess_sessions(
           conversation_id, initial_fen, current_fen, pgn, orientation,
           revision, created_at, updated_at
-        ) VALUES (?, ?, ?, '', 'white', 0, ?, ?)
-      `).run(conversation.id, STANDARD_FEN, STANDARD_FEN, timestamp, timestamp);
+        ) VALUES (?, ?, ?, '', ?, 0, ?, ?)
+      `).run(
+        conversation.id,
+        STANDARD_FEN,
+        STANDARD_FEN,
+        orientation === 'black' ? 'black' : 'white',
+        timestamp,
+        timestamp
+      );
       this.db.exec('COMMIT;');
     } catch (error) {
       this.db.exec('ROLLBACK;');
@@ -1250,6 +1281,36 @@ class MentorStore {
     return mapLearnerProfile(this.db.prepare(
       'SELECT * FROM mentor_learner_profile WHERE id = 1'
     ).get());
+  }
+
+  getAppSettings() {
+    return mapAppSettings(this.db.prepare(
+      'SELECT * FROM app_game_settings WHERE id = 1'
+    ).get());
+  }
+
+  updateAppSettings({ humanColor, difficultyLevel } = {}) {
+    const current = this.getAppSettings();
+    const nextColor = humanColor === undefined ? current.humanColor : humanColor;
+    const nextLevel = difficultyLevel === undefined ? current.difficultyLevel : difficultyLevel;
+    if (!['white', 'black'].includes(nextColor)) {
+      const error = new Error('Human color must be white or black.');
+      error.code = 'invalid_human_color';
+      error.statusCode = 400;
+      throw error;
+    }
+    if (!Number.isInteger(nextLevel) || nextLevel < 1 || nextLevel > 15) {
+      const error = new Error('Difficulty level must be an integer from 1 to 15.');
+      error.code = 'invalid_difficulty_level';
+      error.statusCode = 400;
+      throw error;
+    }
+    this.db.prepare(`
+      UPDATE app_game_settings
+      SET human_color = ?, difficulty_level = ?, updated_at = ?
+      WHERE id = 1
+    `).run(nextColor, nextLevel, this.now());
+    return this.getAppSettings();
   }
 
   updateLearnerProfile({ skillBand, goals }) {

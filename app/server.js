@@ -892,7 +892,10 @@ const physicalSession = {
   pendingCaptureTarget: null,
   pendingCastleMove: null,
   legalTargets: [],
+  humanColor: 'white',
+  robotColor: 'black',
   level: 1,
+  activeSearchLevel: null,
   profile: 'balanced',
   graveyardSlots: [],
   nextGraveyardSlot: 0,
@@ -917,6 +920,31 @@ const physicalSession = {
   statusText: 'Physical board idle.',
   lastMove: null
 };
+
+function normalizeHumanColor(value) {
+  return String(value || 'white').toLowerCase() === 'black' ? 'black' : 'white';
+}
+
+function oppositeHumanColor(color) {
+  return normalizeHumanColor(color) === 'white' ? 'black' : 'white';
+}
+
+function physicalColorCode(color) {
+  return normalizeHumanColor(color) === 'white' ? 'w' : 'b';
+}
+
+function isHumanTurn(game = physicalSession.game) {
+  return game.turn() === physicalColorCode(physicalSession.humanColor);
+}
+
+function isRobotTurn(game = physicalSession.game) {
+  return game.turn() === physicalColorCode(physicalSession.robotColor);
+}
+
+function waitingForTurnStatus(prefix = '') {
+  const message = isHumanTurn() ? 'Waiting for your move.' : 'Waiting for robot move.';
+  return prefix ? `${prefix} ${message}` : message;
+}
 
 const PHYSICAL_LOG_DIR = path.join(__dirname, 'logs');
 const PHYSICAL_LOG_MEMORY_LIMIT = 500;
@@ -1024,6 +1052,8 @@ function summarizePendingRobotJob(job = physicalSession.pendingRobotJob) {
     kind: job.kind || 'robot',
     move: job.uci,
     san: job.san,
+    engineLevel: job.engineLevel ?? null,
+    engineProfile: job.engineProfile || null,
     routeMode: job.command?.routeMode || null,
     planStepCount: Array.isArray(job.command?.plan) ? job.command.plan.length : 0
   };
@@ -1341,8 +1371,8 @@ function serializePhysicalState() {
     sessionGeneration: physicalSession.sessionGeneration,
     stateRevision: physicalSession.stateRevision,
     active: physicalSession.active,
-    humanColor: 'white',
-    robotColor: 'black',
+    humanColor: physicalSession.humanColor,
+    robotColor: physicalSession.robotColor,
     phase: physicalSession.phase,
     setupMode: physicalSession.setupMode,
     statusText: physicalSession.statusText,
@@ -1368,7 +1398,9 @@ function serializePhysicalState() {
           id: physicalSession.pendingRobotJob.id,
           move: physicalSession.pendingRobotJob.uci,
           san: physicalSession.pendingRobotJob.san,
-          kind: physicalSession.pendingRobotJob.kind || 'robot'
+          kind: physicalSession.pendingRobotJob.kind || 'robot',
+          engineLevel: physicalSession.pendingRobotJob.engineLevel ?? null,
+          engineProfile: physicalSession.pendingRobotJob.engineProfile || null
         }
       : null,
     pendingUndo: physicalSession.pendingUndo
@@ -1412,6 +1444,12 @@ function serializePhysicalState() {
     mentorOpeningLock: physicalSession.mentorOpeningLock,
     lastMove: physicalSession.lastMove,
     level: physicalSession.level,
+    configuredLevel: physicalSession.level,
+    activeSearchLevel: physicalSession.activeSearchLevel,
+    difficultyPending: Number.isInteger(physicalSession.activeSearchLevel)
+      ? physicalSession.activeSearchLevel !== physicalSession.level
+      : Boolean(physicalSession.pendingRobotJob?.engineLevel
+        && physicalSession.pendingRobotJob.engineLevel !== physicalSession.level),
     profile: physicalSession.profile,
     graveyardSlotCount: physicalSession.graveyardSlots.length,
     nextGraveyardSlot: physicalSession.nextGraveyardSlot,
@@ -1424,6 +1462,10 @@ function physicalMentorStateSignature() {
     active: physicalSession.active,
     sessionGeneration: physicalSession.sessionGeneration,
     phase: physicalSession.phase,
+    humanColor: physicalSession.humanColor,
+    robotColor: physicalSession.robotColor,
+    configuredLevel: physicalSession.level,
+    activeSearchLevel: physicalSession.activeSearchLevel,
     setupMode: physicalSession.setupMode,
     fen: physicalSession.game.fen(),
     occupied: occupiedIndices(physicalSession.occupancy),
@@ -1483,6 +1525,13 @@ function queueOpeningExpectedLedCommand(policy = physicalSession.mentorOpeningDr
 }
 
 function setOpeningDrillPolicy(policy) {
+  if (policy && physicalSession.humanColor !== 'white') {
+    return {
+      success: false,
+      error: 'Physical opening drills currently require the learner to play White.',
+      code: 'physical_opening_requires_white'
+    };
+  }
   physicalSession.mentorOpeningDrill = policy ? JSON.parse(JSON.stringify(policy)) : null;
   physicalSession.mentorOpeningRestoreCandidateAt = null;
   if (!policy) return { success: true };
@@ -1608,8 +1657,10 @@ mentorFeature.physicalObserver.setAdapter({
       error.statusCode = 409;
       throw error;
     }
+    const defaults = mentorFeature.gameSettingsService.get().defaults;
     return startPhysicalSession({
-      level: 1,
+      humanColor: defaults.humanColor,
+      level: defaults.difficultyLevel,
       profile: 'balanced',
       graveyardSlots: DEFAULT_GRAVEYARD_SLOTS,
       setupMode: 'full'
@@ -1618,6 +1669,46 @@ mentorFeature.physicalObserver.setAdapter({
   setOpeningDrill: setOpeningDrillPolicy,
   retryOpeningDrill: retryOpeningDrillPolicy,
   resolveOpeningDrill: resolveOpeningDrillPolicy
+});
+
+mentorFeature.gameSettingsService.setPhysicalAdapter({
+  getState: () => ({
+    active: physicalSession.active && physicalSession.phase !== 'idle',
+    sessionGeneration: physicalSession.sessionGeneration,
+    humanColor: physicalSession.humanColor,
+    robotColor: physicalSession.robotColor,
+    configuredLevel: physicalSession.level,
+    activeSearchLevel: physicalSession.activeSearchLevel,
+    pendingRobotLevel: physicalSession.pendingRobotJob?.engineLevel ?? null
+  }),
+  updateDifficulty: ({ difficultyLevel, expectedSessionGeneration }) => {
+    if (!Number.isInteger(expectedSessionGeneration)
+      || expectedSessionGeneration !== physicalSession.sessionGeneration) {
+      const error = new Error('The physical game session changed. Refresh before changing its difficulty.');
+      error.code = 'stale_physical_session';
+      error.statusCode = 409;
+      throw error;
+    }
+    if (!physicalSession.active || physicalSession.phase === 'idle') {
+      const error = new Error('No physical game is active.');
+      error.code = 'physical_game_inactive';
+      error.statusCode = 409;
+      throw error;
+    }
+    physicalSession.level = difficultyLevel;
+    logPhysicalEvent('physical_difficulty_updated', `Physical difficulty set to level ${difficultyLevel}.`, {
+      details: {
+        configuredLevel: difficultyLevel,
+        activeSearchLevel: physicalSession.activeSearchLevel,
+        pendingRobotLevel: physicalSession.pendingRobotJob?.engineLevel ?? null,
+        appliesNextRobotTurn: Number.isInteger(physicalSession.activeSearchLevel)
+          || Boolean(physicalSession.pendingRobotJob)
+      }
+    });
+    emitPhysicalState('physical-board');
+    return serializePhysicalState();
+  },
+  isConversationAttached: (conversationId) => activePhysicalMentorConversationId() === conversationId
 });
 
 function queuePhysicalCommand(command) {
@@ -1923,6 +2014,8 @@ function summarizePhysicalMoveLogEntry(entry) {
     castleRookMove: entry.castleRookMove ? { ...entry.castleRookMove } : null,
     enPassantCapturedSquare: entry.enPassantCapturedSquare || null,
     robotGraveyardSlot: entry.robotGraveyardSlot?.label || null,
+    engineLevel: entry.engineLevel ?? null,
+    engineProfile: entry.engineProfile || null,
     robotCapturedPathSquares: Array.isArray(entry.robotCapturedPathSquares)
       ? [...entry.robotCapturedPathSquares]
       : [],
@@ -1953,6 +2046,8 @@ function buildPhysicalMoveLogEntry(side, move, beforeFen, afterFen, extra = {}) 
     enPassantCapturedSquare: move.flags?.includes('e') ? capturedSquare : null,
     robotGraveyardSlot: extra.robotGraveyardSlot || null,
     robotCapturedPathSquares: extra.robotCapturedPathSquares || [],
+    engineLevel: extra.engineLevel ?? null,
+    engineProfile: extra.engineProfile || null,
     verified: extra.verified !== false,
     createdAt: Date.now()
   };
@@ -2145,7 +2240,7 @@ async function finalizeHumanPhysicalMove(move, occupancy) {
   }
 
   const nextOpening = physicalSession.mentorOpeningDrill;
-  if (physicalSession.game.turn() === 'b' && nextOpening?.expectedActor === 'mentor' && nextOpening.expectedUci) {
+  if (isRobotTurn() && nextOpening?.expectedActor === 'mentor' && nextOpening.expectedUci) {
     physicalSession.phase = 'robot_thinking';
     physicalSession.statusText = `${nextOpening.title}: preparing ${nextOpening.expectedUci}.`;
     emitPhysicalState();
@@ -2154,7 +2249,7 @@ async function finalizeHumanPhysicalMove(move, occupancy) {
         setPhysicalError(err.message || String(err));
       });
     }, 0);
-  } else if (physicalSession.game.turn() === 'b' && physicalSession.autoRobotReply !== false) {
+  } else if (isRobotTurn() && physicalSession.autoRobotReply !== false) {
     physicalSession.phase = 'robot_thinking';
     physicalSession.statusText = 'Move accepted. Engine will choose a physical reply.';
     emitPhysicalState();
@@ -2165,7 +2260,7 @@ async function finalizeHumanPhysicalMove(move, occupancy) {
     }, 0);
   } else {
     physicalSession.phase = 'ready';
-    physicalSession.statusText = 'Waiting for your move.';
+    physicalSession.statusText = waitingForTurnStatus();
     emitPhysicalState();
   }
 }
@@ -3834,12 +3929,20 @@ function rollbackPendingRobotMove(pending) {
 
 async function queueRobotReply(options = {}) {
   const forcedUci = options.forcedUci || null;
+  const searchLevel = physicalSession.level;
+  const searchProfile = physicalSession.profile;
+  physicalSession.activeSearchLevel = forcedUci ? null : searchLevel;
   physicalSession.phase = 'robot_thinking';
   physicalSession.statusText = forcedUci
     ? `Preparing reviewed opening reply ${forcedUci}.`
     : 'Engine is choosing a physical reply.';
   logPhysicalEvent(forcedUci ? 'mentor_opening_robot_thinking' : 'robot_thinking', physicalSession.statusText, {
-    details: forcedUci ? { forcedUci, activityId: options.activityId || null } : null
+    details: {
+      forcedUci,
+      activityId: options.activityId || null,
+      engineLevel: forcedUci ? null : searchLevel,
+      engineProfile: forcedUci ? null : searchProfile
+    }
   });
   emitPhysicalState();
 
@@ -3872,7 +3975,7 @@ async function queueRobotReply(options = {}) {
 
     const result = forcedUci
       ? { success: true, move: forcedUci }
-      : await chooseEngineMove(physicalSession.game.fen(), physicalSession.level, physicalSession.profile);
+      : await chooseEngineMove(physicalSession.game.fen(), searchLevel, searchProfile);
     if (!result.success || !result.move) {
       throw new Error(result.error || 'Engine did not return a move.');
     }
@@ -3916,8 +4019,8 @@ async function queueRobotReply(options = {}) {
       const plannedResult = planPhysicalRobotCandidates(candidateMoves);
       planningFailures = plannedResult.failures;
       const preferredPlan = plannedResult.planned.find((plan) => legalMoveMatchesUci(plan.move, result.move)) || null;
-      selectedPlan = physicalSession.level >= 12
-        ? preferredPlan || await chooseBestRoutablePhysicalMove(physicalSession.game.fen(), plannedResult.planned, physicalSession.level)
+      selectedPlan = searchLevel >= 12
+        ? preferredPlan || await chooseBestRoutablePhysicalMove(physicalSession.game.fen(), plannedResult.planned, searchLevel)
         : plannedResult.planned[0] || null;
     }
     const legalMove = selectedPlan?.move || null;
@@ -3937,7 +4040,9 @@ async function queueRobotReply(options = {}) {
         details: {
           preferredMove: result.move,
           selectedMove: moveToUci(legalMove),
-          expertReranked: physicalSession.level >= 12,
+          expertReranked: searchLevel >= 12,
+          engineLevel: searchLevel,
+          engineProfile: searchProfile,
           selectedScore: selectedPlan.score ?? null,
           scoreDepth: selectedPlan.scoreDepth ?? null,
           routeMode: command.routeMode,
@@ -3956,6 +4061,8 @@ async function queueRobotReply(options = {}) {
       preMoveFen: physicalSession.game.fen(),
       mentorActivityId: options.activityId || null,
       forcedOpeningMove: Boolean(forcedUci),
+      engineLevel: forcedUci ? null : searchLevel,
+      engineProfile: forcedUci ? 'reviewed-opening' : searchProfile,
       applied: false,
       appliedMove: null
     };
@@ -3983,6 +4090,8 @@ async function queueRobotReply(options = {}) {
         graveyardRouteCandidates: command.graveyardRouteCandidates || [],
         temporaryClearance: command.temporaryClearance || null,
         forcedOpeningMove: Boolean(forcedUci),
+        engineLevel: forcedUci ? null : searchLevel,
+        engineProfile: forcedUci ? 'reviewed-opening' : searchProfile,
         activityId: options.activityId || null,
         snapshotAgeMs: snapshotStatus.snapshotAgeMs
       }
@@ -3996,7 +4105,11 @@ async function queueRobotReply(options = {}) {
     queuePhysicalCommand(command);
     logPhysicalEvent('robot_job_queued', `Robot job queued for ${legalMove.san}.`, {
       commandId: command.id,
-      details: { command: summarizePhysicalCommand(command) }
+      details: {
+        command: summarizePhysicalCommand(command),
+        engineLevel: forcedUci ? null : searchLevel,
+        engineProfile: forcedUci ? 'reviewed-opening' : searchProfile
+      }
     });
     emitPhysicalState();
   } catch (err) {
@@ -4005,6 +4118,9 @@ async function queueRobotReply(options = {}) {
     }
     physicalSession.pendingRobotJob = null;
     setPhysicalError(err.message);
+  } finally {
+    physicalSession.activeSearchLevel = null;
+    emitPhysicalState();
   }
 }
 
@@ -4059,7 +4175,9 @@ function completePendingRobotMove(occupancy = null) {
   const moveEntry = recordPhysicalMove('robot', moveObj, pending.preMoveFen || null, physicalSession.game.fen(), {
     verified: true,
     robotGraveyardSlot: pending.command?.graveyardSlot || null,
-    robotCapturedPathSquares: pending.command?.capturePreview?.capturedSquares || []
+    robotCapturedPathSquares: pending.command?.capturePreview?.capturedSquares || [],
+    engineLevel: pending.engineLevel,
+    engineProfile: pending.engineProfile
   });
   rememberCompletedRobotJob(pending, {
     move: pending.uci,
@@ -4071,13 +4189,15 @@ function completePendingRobotMove(occupancy = null) {
   physicalSession.phase = physicalSession.game.isGameOver() ? 'game_over' : 'ready';
   physicalSession.statusText = physicalSession.game.isGameOver()
     ? gameResultMessage(physicalSession.game) || 'Game over.'
-    : 'Waiting for your move.';
+    : waitingForTurnStatus();
   logPhysicalEvent('robot_move_committed', `Robot move committed after hardware verification: ${moveObj?.san || pending.san}.`, {
     commandId: pending.id,
     actualOccupancy: occupancy || occupancyFromGame(physicalSession.game),
     details: {
       move: pending.uci,
-      san: moveObj?.san || pending.san
+      san: moveObj?.san || pending.san,
+      engineLevel: pending.engineLevel ?? null,
+      engineProfile: pending.engineProfile || null
     }
   });
   clearPhysicalLeds();
@@ -4304,7 +4424,7 @@ function finishPhysicalUndo() {
   physicalSession.phase = physicalSession.game.isGameOver() ? 'game_over' : 'ready';
   physicalSession.statusText = physicalSession.game.isGameOver()
     ? gameResultMessage(physicalSession.game) || 'Game over.'
-    : 'Undo complete. Waiting for your move.';
+    : waitingForTurnStatus('Undo complete.');
   clearPhysicalLeds();
   queueGameStatusLedCommand(physicalSession.game);
   if (physicalSession.phase === 'ready') {
@@ -4327,7 +4447,7 @@ function finishPhysicalRedo() {
   physicalSession.phase = physicalSession.game.isGameOver() ? 'game_over' : 'ready';
   physicalSession.statusText = physicalSession.game.isGameOver()
     ? gameResultMessage(physicalSession.game) || 'Game over.'
-    : 'Redo complete. Waiting for your move.';
+    : waitingForTurnStatus('Redo complete.');
   clearPhysicalLeds();
   queueGameStatusLedCommand(physicalSession.game);
   if (physicalSession.phase === 'ready') {
@@ -4404,6 +4524,8 @@ function queueNextPhysicalRedoStep() {
     san: move.san,
     command,
     preMoveFen: physicalSession.game.fen(),
+    engineLevel: entry.engineLevel ?? null,
+    engineProfile: entry.engineProfile || null,
     applied: false,
     appliedMove: null,
     redo: {
@@ -4468,6 +4590,8 @@ function completePendingRedoRobotJob(occupancy = null) {
     verified: true,
     robotGraveyardSlot: pending.command?.graveyardSlot || null,
     robotCapturedPathSquares: pending.command?.capturePreview?.capturedSquares || [],
+    engineLevel: entry.engineLevel,
+    engineProfile: entry.engineProfile,
     preserveRedo: true
   });
   rememberCompletedRobotJob(pending, {
@@ -4767,7 +4891,7 @@ function processUndoWaitingHumanRestoreSnapshot(occupancy) {
   const pending = physicalSession.pendingUndo?.waitingForHumanRestore;
   if (!pending) {
     physicalSession.phase = 'ready';
-    physicalSession.statusText = 'Waiting for your move.';
+    physicalSession.statusText = waitingForTurnStatus();
     emitPhysicalState('physical-board');
     return;
   }
@@ -4878,7 +5002,7 @@ function processRobotBusySnapshot(occupancy) {
   const pending = physicalSession.pendingRobotJob;
   if (!pending) {
     physicalSession.phase = 'ready';
-    physicalSession.statusText = 'Waiting for your move.';
+    physicalSession.statusText = waitingForTurnStatus();
     emitPhysicalState('physical-board');
     return;
   }
@@ -4927,10 +5051,10 @@ function processSyncWarningSnapshot(occupancy) {
     physicalSession.lastError = null;
     physicalSession.syncWarningReason = null;
     const opening = physicalSession.mentorOpeningDrill;
-    const shouldResumeOpeningReply = physicalSession.game.turn() === 'b'
+    const shouldResumeOpeningReply = isRobotTurn()
       && opening?.expectedActor === 'mentor'
       && opening.expectedUci;
-    const shouldResumeEngineReply = physicalSession.game.turn() === 'b'
+    const shouldResumeEngineReply = isRobotTurn()
       && !opening
       && physicalSession.autoRobotReply !== false;
 
@@ -4959,9 +5083,7 @@ function processSyncWarningSnapshot(occupancy) {
     physicalSession.phase = 'ready';
     physicalSession.statusText = opening?.expectedActor === 'learner'
       ? `Board restored. ${opening.title}: play ${opening.expectedUci}.`
-      : physicalSession.game.turn() === 'w'
-        ? 'Board restored. Waiting for your move.'
-        : 'Board restored. Waiting for robot move.';
+      : waitingForTurnStatus('Board restored.');
     logPhysicalEvent('sync_restored', 'Physical board occupancy matches the expected game state again.', {
       actualOccupancy: occupancy
     });
@@ -5079,9 +5201,7 @@ function processReadySnapshot(occupancy) {
     const opening = physicalSession.mentorOpeningDrill;
     physicalSession.statusText = opening?.expectedActor === 'learner'
       ? `${opening.title}: play ${opening.expectedUci}.`
-      : physicalSession.game.turn() === 'w'
-        ? 'Waiting for your move.'
-        : 'Waiting for robot move.';
+      : waitingForTurnStatus();
     if (opening?.expectedActor === 'learner') queueOpeningExpectedLedCommand(opening);
     else queueGameStatusLedCommand(physicalSession.game);
     emitPhysicalState('physical-board');
@@ -5101,7 +5221,7 @@ function processReadySnapshot(occupancy) {
     return;
   }
 
-  if (physicalSession.game.turn() !== 'w') {
+  if (!isHumanTurn()) {
     if (diff.missing.length + diff.extra.length > 0) {
       setPhysicalSyncWarning('Board changed while it was not the player turn. Restore the expected position.', diff);
     }
@@ -5117,8 +5237,10 @@ function processReadySnapshot(occupancy) {
       return;
     }
 
-    if (piece.color !== 'w') {
-      setPhysicalSyncWarning(`Black piece on ${sourceSquare} is not detected. Center it on the sensor before moving White.`, diff);
+    if (piece.color !== physicalColorCode(physicalSession.humanColor)) {
+      const pieceColor = piece.color === 'w' ? 'White' : 'Black';
+      const humanColor = physicalSession.humanColor === 'white' ? 'White' : 'Black';
+      setPhysicalSyncWarning(`${pieceColor} piece on ${sourceSquare} is not detected. Center it on the sensor before moving ${humanColor}.`, diff);
       return;
     }
 
@@ -5349,8 +5471,8 @@ async function processPhysicalSnapshot(occupancy, metadata = {}) {
 
       physicalSession.phase = 'ready';
       physicalSession.statusText = physicalSession.setupMode === 'partial'
-        ? `Partial setup accepted with ${report.present.length} detected starting pieces. Waiting for your move.`
-        : 'Calibration passed. Waiting for your move.';
+        ? `Partial setup accepted with ${report.present.length} detected starting pieces. ${waitingForTurnStatus()}`
+        : waitingForTurnStatus('Calibration passed.');
       physicalSession.lastError = null;
       logPhysicalEvent('setup_ready', physicalSession.statusText, {
         actualOccupancy: occupancy,
@@ -5361,6 +5483,21 @@ async function processPhysicalSnapshot(occupancy, metadata = {}) {
         }
       });
       clearPhysicalLeds();
+
+      if (isRobotTurn() && physicalSession.autoRobotReply !== false && !physicalSession.mentorOpeningDrill) {
+        physicalSession.phase = 'robot_thinking';
+        physicalSession.statusText = 'Calibration passed. Engine will make the opening move for White.';
+        logPhysicalEvent('robot_opening_scheduled', physicalSession.statusText, {
+          details: {
+            humanColor: physicalSession.humanColor,
+            robotColor: physicalSession.robotColor,
+            configuredLevel: physicalSession.level
+          }
+        });
+        setTimeout(() => queueRobotReply().catch((error) => {
+          setPhysicalError(error.message || String(error));
+        }), 0);
+      }
     } else {
       physicalSession.statusText = physicalSession.setupMode === 'partial'
         ? `Partial setup needs both kings and no extra squares: ${report.missing.length} required missing, ${report.extra.length} extra.`
@@ -5420,7 +5557,7 @@ async function processPhysicalSnapshot(occupancy, metadata = {}) {
   emitPhysicalState('physical-board', { snapshotMeta: metadata });
 }
 
-function startPhysicalSession({ level = 1, profile = 'balanced', graveyardSlots = [], setupMode = 'full' } = {}) {
+function startPhysicalSession({ humanColor = 'white', level = 1, profile = 'balanced', graveyardSlots = [], setupMode = 'full' } = {}) {
   physicalSession.sessionGeneration += 1;
   physicalSession.stateRevision = 0;
   physicalSession.mentorStateSignature = '';
@@ -5433,7 +5570,10 @@ function startPhysicalSession({ level = 1, profile = 'balanced', graveyardSlots 
   physicalSession.pendingCaptureTarget = null;
   physicalSession.pendingCastleMove = null;
   physicalSession.legalTargets = [];
+  physicalSession.humanColor = normalizeHumanColor(humanColor);
+  physicalSession.robotColor = oppositeHumanColor(physicalSession.humanColor);
   physicalSession.level = clampLevel(level);
+  physicalSession.activeSearchLevel = null;
   physicalSession.profile = normalizeProfile(profile);
   physicalSession.graveyardSlots = normalizeGraveyardSlots(graveyardSlots);
   physicalSession.nextGraveyardSlot = 0;
@@ -5460,6 +5600,8 @@ function startPhysicalSession({ level = 1, profile = 'balanced', graveyardSlots 
   logPhysicalEvent('setup_started', physicalSession.statusText, {
     details: {
       setupMode: physicalSession.setupMode,
+      humanColor: physicalSession.humanColor,
+      robotColor: physicalSession.robotColor,
       level: physicalSession.level,
       profile: physicalSession.profile,
       graveyardSlots: physicalSession.graveyardSlots.map((slot) => ({
@@ -5478,8 +5620,47 @@ function startPhysicalSession({ level = 1, profile = 'balanced', graveyardSlots 
   return { success: true, state: serializePhysicalState() };
 }
 
+function sendGameSettingsError(res, error) {
+  return res.status(error.statusCode || 500).json({
+    success: false,
+    code: error.code || 'game_settings_failed',
+    error: error.message || String(error)
+  });
+}
+
+app.get('/api/game-settings', (req, res) => {
+  res.json({ success: true, ...mentorFeature.gameSettingsService.get() });
+});
+
+app.patch('/api/game-settings', (req, res) => {
+  try {
+    const settings = mentorFeature.gameSettingsService.updateDefaults(req.body || {});
+    return res.json({ success: true, ...settings });
+  } catch (error) {
+    return sendGameSettingsError(res, error);
+  }
+});
+
+app.patch('/api/physical/settings', (req, res) => {
+  try {
+    const settings = mentorFeature.gameSettingsService.updateActiveDifficulty({
+      difficultyLevel: req.body?.difficultyLevel,
+      expectedSessionGeneration: req.body?.expectedSessionGeneration
+    });
+    return res.json({ success: true, ...settings });
+  } catch (error) {
+    return sendGameSettingsError(res, error);
+  }
+});
+
 app.post('/api/physical/start', (req, res) => {
-  const result = startPhysicalSession(req.body || {});
+  const defaults = mentorFeature.gameSettingsService.get().defaults;
+  const body = req.body || {};
+  const result = startPhysicalSession({
+    ...body,
+    humanColor: body.humanColor ?? defaults.humanColor,
+    level: body.level ?? defaults.difficultyLevel
+  });
 
   return res.json(result);
 });
@@ -6001,6 +6182,7 @@ module.exports = {
   physicalBoardTest: {
     physicalSession,
     processPhysicalSnapshot,
+    startPhysicalSession,
     queueRobotReply,
     pausePendingRobotJobAfterFailure,
     startPhysicalUndoTurn,
@@ -6012,6 +6194,8 @@ module.exports = {
     occupancyFromFen,
     squareToIndex,
     openingAutoContinueLift,
+    isHumanTurn,
+    isRobotTurn,
     normalizeProfile,
     clampLevel
   },

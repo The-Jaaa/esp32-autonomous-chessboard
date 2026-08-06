@@ -12,6 +12,7 @@ const DEFAULT_PHYSICAL_TURN_TIMEOUT_MS = 15000;
 const VOICE_TRANSCRIPT_PLACEHOLDER = 'Voice request in progress.';
 
 const LIVE_TOOL_LABELS = {
+  set_game_preferences: 'Updating game preferences',
   get_physical_game_status: 'Checking physical board',
   start_physical_game: 'Starting physical game',
   attach_physical_game: 'Attaching physical board',

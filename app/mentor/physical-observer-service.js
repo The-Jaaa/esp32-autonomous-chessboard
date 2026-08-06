@@ -6,6 +6,7 @@ const { listCatalog } = require('./curriculum');
 
 const PHYSICAL_BOARD_ID = 'main-board';
 const PHYSICAL_READ_TOOLS = new Set([
+  'set_game_preferences',
   'get_physical_game_status',
   'start_physical_game',
   'attach_physical_game',
@@ -81,6 +82,12 @@ function normalizeSnapshot(snapshot, binding) {
     fen: game.fen(),
     pgn: snapshot.pgn || '',
     orientation: binding.orientation,
+    humanColor: snapshot.humanColor || 'white',
+    robotColor: snapshot.robotColor || 'black',
+    sessionGeneration: Number(snapshot.sessionGeneration),
+    configuredLevel: snapshot.configuredLevel || snapshot.level || 1,
+    activeSearchLevel: snapshot.activeSearchLevel ?? null,
+    difficultyPending: Boolean(snapshot.difficultyPending),
     revision: Number(snapshot.stateRevision || 0),
     turn: game.turn(),
     turnName: game.turn() === 'w' ? 'White' : 'Black',
@@ -99,6 +106,9 @@ function normalizeSnapshot(snapshot, binding) {
       boardId: binding.boardId,
       humanColor: snapshot.humanColor || 'white',
       robotColor: snapshot.robotColor || 'black',
+      configuredLevel: snapshot.configuredLevel || snapshot.level || 1,
+      activeSearchLevel: snapshot.activeSearchLevel ?? null,
+      difficultyPending: Boolean(snapshot.difficultyPending),
       serverInstanceId: snapshot.serverInstanceId,
       sessionGeneration: Number(snapshot.sessionGeneration),
       stateRevision: Number(snapshot.stateRevision || 0),
