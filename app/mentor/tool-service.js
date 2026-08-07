@@ -1,4 +1,5 @@
 const { Chess } = require('chess.js');
+const { listCatalog } = require('./curriculum');
 
 const MAX_LINE_PLIES = 24;
 const MOVE_PATTERN = /^[a-h][1-8][a-h][1-8][qrbn]?$/;
@@ -7,13 +8,15 @@ const PHYSICAL_ONLY_TOOL_NAMES = new Set([
   'pause_activity',
   'resume_activity',
   'confirm_physical_setup',
-  'resolve_opening_drill'
+  'resolve_opening_drill',
+  'resolve_physical_board_handoff'
 ]);
 const VOICE_FIRST_UNATTACHED_TOOL_NAMES = new Set([
   'set_game_preferences',
   'get_physical_game_status',
   'get_activity_state',
-  'start_activity'
+  'start_activity',
+  'resolve_physical_board_handoff'
 ]);
 const VOICE_FIRST_BLOCKED_TOOL_NAMES = new Set([
   'start_physical_game',
@@ -213,6 +216,18 @@ const TOOL_DECLARATIONS = [{
     additionalProperties: false
   }
 }, {
+  name: 'resolve_physical_board_handoff',
+  description: 'Resolve a pending physical-board ownership conflict after the learner chooses to continue the existing game or explicitly end it and start the requested activity in this conversation.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      handoffId: { type: 'string' },
+      action: { type: 'string', enum: ['continue_existing', 'end_and_start'] }
+    },
+    required: ['handoffId', 'action'],
+    additionalProperties: false
+  }
+}, {
   name: 'pause_activity',
   description: 'Pause the active physical mentor activity. A robot move already in progress finishes safely.',
   parametersJsonSchema: { type: 'object', properties: {}, additionalProperties: false }
@@ -323,11 +338,32 @@ class MentorToolService {
 
   declarations(conversationId = null, { voiceFirstPhysical = false } = {}) {
     if (voiceFirstPhysical) {
+      const physicalDeclarations = TOOL_DECLARATIONS.map((tool) => {
+        if (tool.name !== 'start_activity') return tool;
+        const sourceIds = listCatalog()
+          .filter((item) => item.supportsPhysical && ['opening_drill', 'puzzle'].includes(item.type))
+          .map((item) => item.id);
+        return {
+          ...tool,
+          description: 'Start a confirmed physical practice game, reviewed opening, or reviewed puzzle. Use a reviewed sourceId for named openings and puzzles; omit it to select a puzzle from the current difficulty band.',
+          parametersJsonSchema: {
+            type: 'object',
+            properties: {
+              type: { type: 'string', enum: ['practice_game', 'opening_drill', 'puzzle'] },
+              opponentMode: { type: 'string', enum: ['mentor', 'stockfish'] },
+              learnerColor: { type: 'string', enum: ['white', 'black'] },
+              sourceId: { type: 'string', enum: sourceIds }
+            },
+            required: ['type'],
+            additionalProperties: false
+          }
+        };
+      });
       if (conversationId && this.physicalObserver?.isAttached(conversationId)) {
-        return TOOL_DECLARATIONS.filter((tool) => this.physicalObserver.allowedTool(tool.name)
+        return physicalDeclarations.filter((tool) => this.physicalObserver.allowedTool(tool.name)
           && !VOICE_FIRST_BLOCKED_TOOL_NAMES.has(tool.name));
       }
-      return TOOL_DECLARATIONS.filter((tool) => VOICE_FIRST_UNATTACHED_TOOL_NAMES.has(tool.name));
+      return physicalDeclarations.filter((tool) => VOICE_FIRST_UNATTACHED_TOOL_NAMES.has(tool.name));
     }
     if (conversationId && this.physicalObserver?.isAttached(conversationId)) {
       return TOOL_DECLARATIONS.filter((tool) => this.physicalObserver.allowedTool(tool.name));
@@ -480,8 +516,26 @@ class MentorToolService {
     if (name === 'set_game_preferences') {
       if (!this.gameSettingsService) throw new Error('Game settings are unavailable.');
       const result = this.gameSettingsService.updateFromMentor(conversationId, args);
+      const activity = this.activityService?.get?.(conversationId) || null;
+      let difficultyApplies = args.difficultyLevel === undefined ? null : 'next_game';
+      if (args.difficultyLevel !== undefined && activity?.config?.boardSource === 'physical') {
+        if (activity.type === 'practice_game' && activity.config.opponentMode === 'stockfish') {
+          difficultyApplies = 'next_robot_turn';
+        } else if (activity.type === 'puzzle') {
+          difficultyApplies = 'next_puzzle';
+        } else {
+          difficultyApplies = 'next_game';
+        }
+      }
       onProgress(1, 1);
-      return result;
+      return {
+        ...result,
+        applicability: {
+          humanColor: args.humanColor === undefined ? null : 'next_game',
+          difficultyLevel: difficultyApplies,
+          currentActivityUnchanged: Boolean(activity && difficultyApplies !== 'next_robot_turn')
+        }
+      };
     }
 
     if (name === 'get_physical_game_status') {
@@ -522,16 +576,20 @@ class MentorToolService {
 
     if (name === 'start_activity') {
       if (!this.activityService) throw new Error('Mentor activities are unavailable.');
+      const voiceFirstPhysical = channel === 'live-physical';
+      const activityArgs = voiceFirstPhysical
+        ? this.activityService.normalizePhysicalActivityRequest(args)
+        : args;
       const activeActivity = this.activityService.get?.(conversationId) || null;
-      const requestedType = args.type || 'practice_game';
-      const requestedOpponent = args.opponentMode || 'mentor';
-      const requestedColor = args.learnerColor || this.gameSettingsService?.get()?.defaults?.humanColor || 'white';
+      const requestedType = activityArgs.type || 'practice_game';
+      const requestedOpponent = activityArgs.opponentMode || 'mentor';
+      const requestedColor = activityArgs.learnerColor || this.gameSettingsService?.get()?.defaults?.humanColor || 'white';
       const sameActiveActivity = activeActivity
         && activeActivity.status === 'active'
         && activeActivity.type === requestedType
         && activeActivity.learnerColor === requestedColor
         && (requestedType !== 'practice_game' || activeActivity.config?.opponentMode === requestedOpponent)
-        && (!args.sourceId || activeActivity.sourceId === args.sourceId);
+        && (!activityArgs.sourceId || activeActivity.sourceId === activityArgs.sourceId);
       if (sameActiveActivity) {
         onProgress(1, 1);
         return {
@@ -541,31 +599,54 @@ class MentorToolService {
         };
       }
       this.activityService.assertExplicitStartConsent(conversationId, requestId);
-      const voiceFirstPhysical = channel === 'live-physical';
       if (voiceFirstPhysical) {
         const learnerColor = requestedColor;
-        if (args.learnerColor && this.gameSettingsService) {
+        if (activityArgs.learnerColor && this.gameSettingsService) {
           this.gameSettingsService.updateFromMentor(conversationId, { humanColor: learnerColor });
         }
-        this.physicalObserver?.ensureVoiceActivityBoard(conversationId, {
+        const boardPreparation = this.physicalObserver?.ensureVoiceActivityBoard(conversationId, {
           requestId,
-          learnerColor
+          learnerColor,
+          activityRequest: {
+            type: requestedType,
+            opponentMode: requestedOpponent,
+            learnerColor,
+            sourceId: activityArgs.sourceId || null,
+            proposal: null
+          }
         });
+        if (boardPreparation?.handoffRequired) {
+          onProgress(1, 1);
+          return boardPreparation;
+        }
       }
       const state = this.workspaceState(conversationId);
       const activity = await this.activityService.startActivity(conversationId, {
-        type: args.type,
-        learnerColor: args.learnerColor || this.gameSettingsService?.get()?.defaults?.humanColor || 'white',
-        startFrom: args.startFrom || 'standard',
-        sourceId: args.sourceId,
-        opponentMode: args.opponentMode || 'mentor',
-        proposal: args.proposal,
+        type: activityArgs.type,
+        learnerColor: activityArgs.learnerColor || this.gameSettingsService?.get()?.defaults?.humanColor || 'white',
+        startFrom: activityArgs.startFrom || 'standard',
+        sourceId: activityArgs.sourceId,
+        opponentMode: activityArgs.opponentMode || 'mentor',
+        proposal: activityArgs.proposal,
         expectedRevision: state.revision,
         requestId,
         signal
       });
       onProgress(1, 1);
       return { activity, board: compactBoardState(this.workspaceState(conversationId)) };
+    }
+
+    if (name === 'resolve_physical_board_handoff') {
+      if (!this.physicalObserver?.resolvePhysicalBoardHandoff) {
+        throw new Error('Physical-board handoff is unavailable.');
+      }
+      const result = await this.physicalObserver.resolvePhysicalBoardHandoff(conversationId, {
+        handoffId: args.handoffId,
+        action: args.action,
+        requestId
+      });
+      onProgress(1, 1);
+      return result;
     }
 
     if (name === 'pause_activity') {

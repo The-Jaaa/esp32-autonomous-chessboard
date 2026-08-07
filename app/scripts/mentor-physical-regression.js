@@ -209,6 +209,7 @@ async function run() {
       'annotate_board',
       'get_activity_state',
       'start_activity',
+      'resolve_physical_board_handoff',
       'pause_activity',
       'resume_activity',
       'confirm_physical_setup',

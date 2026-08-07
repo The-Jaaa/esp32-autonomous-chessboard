@@ -609,6 +609,7 @@ export default function MentorWorkspace() {
   const [physicalBoard, setPhysicalBoard] = useState({ binding: null, state: null });
   const [physicalAvailability, setPhysicalAvailability] = useState(null);
   const [physicalBusy, setPhysicalBusy] = useState(false);
+  const [handoffBusy, setHandoffBusy] = useState(false);
   const [coachingStatus, setCoachingStatus] = useState(null);
   const [freshnessNow, setFreshnessNow] = useState(Date.now());
   const [previewFen, setPreviewFen] = useState(null);
@@ -733,6 +734,8 @@ export default function MentorWorkspace() {
   useEffect(() => {
     if (!conversationId) return;
     let cancelled = false;
+    setPhysicalBusy(false);
+    setHandoffBusy(false);
     stickToBottomRef.current = true;
     setShowJumpToLatest(false);
     setLoading(true);
@@ -843,6 +846,22 @@ export default function MentorWorkspace() {
       if (!matches(payload)) return;
       setCoachingStatus(payload);
     };
+    const onPhysicalHandoffUpdated = (payload) => {
+      if (!matches(payload)) return;
+      setPhysicalBoard((current) => ({
+        ...(payload.physicalBoard || current || { binding: null, state: null }),
+        handoff: payload.handoff?.status === 'pending'
+          ? { ...payload.handoff, owner: payload.owner || payload.handoff.owner }
+          : null
+      }));
+      if (payload.activity) setActivity(payload.activity);
+    };
+    const onPhysicalNavigationRequested = (payload) => {
+      if (!matches(payload) || !payload.targetConversationId) return;
+      setPhysicalBusy(false);
+      setHandoffBusy(false);
+      navigate(`/mentor/${payload.targetConversationId}`);
+    };
 
     socket.on('mentor-message-start', onStart);
     socket.on('mentor-message-delta', onDelta);
@@ -860,6 +879,8 @@ export default function MentorWorkspace() {
     socket.on('mentor-physical-binding-updated', onPhysicalBindingUpdated);
     socket.on('mentor-physical-board-updated', onPhysicalBoardUpdated);
     socket.on('mentor-physical-coaching-updated', onCoachingUpdated);
+    socket.on('mentor-physical-handoff-updated', onPhysicalHandoffUpdated);
+    socket.on('mentor-physical-navigation-requested', onPhysicalNavigationRequested);
     return () => {
       if (streamPollRef.current) clearTimeout(streamPollRef.current);
       socket.emit('mentor-unsubscribe', { conversationId });
@@ -881,8 +902,10 @@ export default function MentorWorkspace() {
       socket.off('mentor-physical-binding-updated', onPhysicalBindingUpdated);
       socket.off('mentor-physical-board-updated', onPhysicalBoardUpdated);
       socket.off('mentor-physical-coaching-updated', onCoachingUpdated);
+      socket.off('mentor-physical-handoff-updated', onPhysicalHandoffUpdated);
+      socket.off('mentor-physical-navigation-requested', onPhysicalNavigationRequested);
     };
-  }, [conversationId, refreshList, socket]);
+  }, [conversationId, navigate, refreshList, socket]);
 
   const openActivityDialog = useCallback(async () => {
     try {
@@ -1011,6 +1034,32 @@ export default function MentorWorkspace() {
       setError(physicalError.message);
     } finally {
       setPhysicalBusy(false);
+    }
+  };
+
+  const resolvePhysicalHandoff = async (action) => {
+    const handoff = physicalBoard?.handoff;
+    if (!conversationId || !handoff || handoffBusy) return;
+    setHandoffBusy(true);
+    setError('');
+    try {
+      const result = await mentorApi.resolvePhysicalHandoff(
+        conversationId,
+        handoff.id,
+        action,
+        crypto.randomUUID()
+      );
+      if (result.navigateToConversationId) {
+        setHandoffBusy(false);
+        navigate(`/mentor/${result.navigateToConversationId}`);
+        return;
+      }
+      if (result.physicalBoard) setPhysicalBoard(result.physicalBoard);
+      if (result.activity) setActivity(result.activity);
+    } catch (handoffError) {
+      setError(handoffError.message);
+    } finally {
+      setHandoffBusy(false);
     }
   };
 
@@ -1519,6 +1568,20 @@ export default function MentorWorkspace() {
           onColorChange={updateSharedColor}
           onLevelChange={updateSharedDifficulty}
         />
+        {physicalBoard?.handoff && (
+          <div className="mentor-physical-handoff">
+            <div>
+              <strong>Physical board in use</strong>
+              <small>
+                {physicalBoard.handoff.owner?.activityTitle || 'A physical game'} is active in {physicalBoard.handoff.owner?.title || 'another chat'}.
+              </small>
+            </div>
+            <div className="mentor-physical-handoff-actions">
+              <button type="button" onClick={() => resolvePhysicalHandoff('continue_existing')} disabled={handoffBusy}>Continue game</button>
+              <button type="button" className="is-danger" onClick={() => resolvePhysicalHandoff('end_and_start')} disabled={handoffBusy}>End &amp; use this chat</button>
+            </div>
+          </div>
+        )}
         {physicalAttached ? (
           <>
             <div className={`mentor-physical-status is-${workspaceState.physical.phase}`}>
@@ -1561,7 +1624,7 @@ export default function MentorWorkspace() {
             )}
           </>
         ) : physicalBoard?.binding?.status === 'stale' ? (
-          <div className="mentor-physical-status is-stale"><span className="mentor-physical-status-dot" /><div><strong>Previous physical session ended</strong><small>Attach the new game explicitly when it is ready.</small></div></div>
+          <div className="mentor-physical-status is-stale"><span className="mentor-physical-status-dot" /><div><strong>Previous physical session ended</strong><small>Your next activity will attach the available board automatically.</small></div></div>
         ) : !physicalAvailability?.available ? (
           <div className="mentor-physical-unavailable"><span>No active physical game.</span><Link to="/">Open Companion Board</Link></div>
         ) : null}

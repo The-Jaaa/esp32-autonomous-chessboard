@@ -41,6 +41,12 @@ export const mentorApi = {
   detachPhysicalBoard(id) {
     return request(`/conversations/${id}/physical-board`, { method: 'DELETE' });
   },
+  resolvePhysicalHandoff(id, handoffId, action, requestId) {
+    return request(`/conversations/${id}/physical-board/handoffs/${handoffId}`, {
+      method: 'POST',
+      body: JSON.stringify({ action, requestId })
+    });
+  },
   startPhysicalGame(id, requestId) {
     return request(`/conversations/${id}/physical-game/start`, {
       method: 'POST',

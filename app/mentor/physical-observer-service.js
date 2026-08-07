@@ -24,7 +24,8 @@ const PHYSICAL_READ_TOOLS = new Set([
   'confirm_physical_setup',
   'request_hint',
   'end_activity',
-  'resolve_opening_drill'
+  'resolve_opening_drill',
+  'resolve_physical_board_handoff'
 ]);
 
 class MentorPhysicalError extends Error {
@@ -281,6 +282,20 @@ function guidanceFor(snapshot) {
 function isRecoverableGuidanceKey(key) {
   return ['sync_warning', 'error', 'restore_required', 'castle_rook_required']
     .some((type) => String(key || '').includes(`|${type}|`));
+}
+
+function isSafeHandoffBoundary(snapshot) {
+  if (!snapshot?.active || !['setup', 'ready', 'game_over', 'mentor_drill_complete'].includes(snapshot.phase)) {
+    return false;
+  }
+  return !snapshot.robotBusy
+    && !snapshot.pendingRobotJob
+    && !snapshot.pendingUndo
+    && !snapshot.pendingRedo
+    && !snapshot.pendingPromotion
+    && !snapshot.selectedSource
+    && !snapshot.motionTransaction
+    && !snapshot.pendingMotionTransaction;
 }
 
 class MentorPhysicalObserverService {
@@ -655,6 +670,12 @@ class MentorPhysicalObserverService {
   availability() {
     const activeBinding = this.store.getActivePhysicalBinding(this.boardId);
     const adapterStatus = this.adapter?.getGameStatus?.() || null;
+    const ownerConversation = activeBinding
+      ? this.store.getConversation(activeBinding.conversationId)
+      : null;
+    const ownerActivity = activeBinding
+      ? this.activityService?.get?.(activeBinding.conversationId) || null
+      : null;
     return {
       available: Boolean(this.snapshot?.active && this.snapshot.phase !== 'idle'),
       boardId: this.boardId,
@@ -668,6 +689,9 @@ class MentorPhysicalObserverService {
       boundConversationId: activeBinding?.conversationId || null,
       binding: activeBinding ? {
         conversationId: activeBinding.conversationId,
+        conversationTitle: ownerConversation?.title || 'Current physical game',
+        activityId: ownerActivity?.id || null,
+        activityTitle: ownerActivity?.title || null,
         status: activeBinding.status,
         serverInstanceId: activeBinding.serverInstanceId,
         sessionGeneration: activeBinding.sessionGeneration,
@@ -678,9 +702,25 @@ class MentorPhysicalObserverService {
 
   detail(conversationId) {
     const binding = this.store.getPhysicalBinding(conversationId);
+    const pendingHandoff = this.store.getPendingPhysicalHandoff(conversationId);
+    const ownerConversation = pendingHandoff
+      ? this.store.getConversation(pendingHandoff.owningConversationId)
+      : null;
+    const ownerActivity = pendingHandoff
+      ? this.store.getActiveActivity(pendingHandoff.owningConversationId)
+      : null;
     return {
       binding,
-      state: binding?.status === 'active' ? normalizeSnapshot(this.snapshot, binding) : null
+      state: binding?.status === 'active' ? normalizeSnapshot(this.snapshot, binding) : null,
+      handoff: pendingHandoff ? {
+        ...pendingHandoff,
+        owner: {
+          conversationId: pendingHandoff.owningConversationId,
+          title: ownerConversation?.title || 'Current physical game',
+          activityId: ownerActivity?.id || null,
+          activityTitle: ownerActivity?.title || null
+        }
+      } : null
     };
   }
 
@@ -863,7 +903,7 @@ class MentorPhysicalObserverService {
     );
   }
 
-  ensureVoiceActivityBoard(conversationId, { requestId, learnerColor } = {}) {
+  ensureVoiceActivityBoard(conversationId, { requestId, learnerColor, activityRequest = {} } = {}) {
     if (!['white', 'black'].includes(learnerColor)) {
       throw new MentorPhysicalError('Learner color must be white or black.', 'invalid_learner_color');
     }
@@ -898,11 +938,51 @@ class MentorPhysicalObserverService {
 
     const status = this.getPhysicalGameStatus(conversationId);
     if (status.boundConversationId && status.boundConversationId !== conversationId) {
-      throw new MentorPhysicalError(
-        'The active physical game is attached to another conversation.',
-        'physical_board_already_attached',
-        409
-      );
+      const owningConversationId = status.boundConversationId;
+      const ownerActivity = this.store.getActiveActivity(owningConversationId);
+      if (ownerActivity) {
+        const handoff = this.store.createPhysicalHandoff({
+          boardId: this.boardId,
+          requestingConversationId: conversationId,
+          owningConversationId,
+          serverInstanceId: status.serverInstanceId,
+          sessionGeneration: status.sessionGeneration,
+          stateRevision: status.stateRevision,
+          ownerActivityId: ownerActivity.id,
+          requestedActivity: {
+            ...activityRequest,
+            learnerColor,
+            requestId
+          }
+        });
+        const ownerConversation = this.store.getConversation(owningConversationId);
+        const result = {
+          handoffRequired: true,
+          handoff,
+          owner: {
+            conversationId: owningConversationId,
+            title: ownerConversation?.title || 'Current physical game',
+            activityId: ownerActivity.id,
+            activityTitle: ownerActivity.title
+          },
+          message: `The physical board is being used by ${ownerActivity.title}. Ask whether to continue that game or end it and start here.`
+        };
+        this.emit(conversationId, 'mentor-physical-handoff-updated', {
+          conversationId,
+          ...result
+        });
+        return result;
+      }
+
+      this.clearPendingGuidance(owningConversationId);
+      this.clearPendingOpeningGuidance(owningConversationId);
+      this.clearPendingCoaching(owningConversationId);
+      const detached = this.store.detachPhysicalBinding(owningConversationId);
+      this.emit(owningConversationId, 'mentor-physical-binding-updated', {
+        conversationId: owningConversationId,
+        physicalBoard: { binding: detached, state: null, handoff: null }
+      });
+      this.liveService?.stopConversation?.(owningConversationId, 'physical_board_reassigned')?.catch?.(() => {});
     }
     if (status.available) {
       const activeColor = this.snapshot?.humanColor || 'white';
@@ -942,6 +1022,147 @@ class MentorPhysicalObserverService {
       });
     }
     return detail;
+  }
+
+  async resolvePhysicalBoardHandoff(conversationId, { handoffId, action, requestId } = {}) {
+    if (!['continue_existing', 'end_and_start'].includes(action)) {
+      throw new MentorPhysicalError('Choose whether to continue the existing game or end it and start here.', 'invalid_physical_handoff_action');
+    }
+    const handoff = this.store.getPhysicalHandoff(handoffId);
+    if (!handoff || handoff.requestingConversationId !== conversationId) {
+      throw new MentorPhysicalError('That physical-board handoff is unavailable.', 'physical_handoff_not_found', 404);
+    }
+    if (['expired', 'cancelled', 'failed'].includes(handoff.status)) {
+      throw new MentorPhysicalError(
+        'That physical-board handoff is no longer current. Ask again using the latest board state.',
+        handoff.errorCode || 'physical_handoff_stale',
+        409
+      );
+    }
+    if (handoff.status !== 'pending') {
+      return {
+        handoff,
+        duplicate: true,
+        navigateToConversationId: handoff.resolution === 'continue_existing'
+          ? handoff.owningConversationId
+          : null,
+        physicalBoard: this.detail(conversationId)
+      };
+    }
+
+    const ownerConversation = this.store.getConversation(handoff.owningConversationId);
+    if (action === 'continue_existing') {
+      const resolved = this.store.resolvePhysicalHandoff(handoff.id, {
+        status: 'continued',
+        resolution: action,
+        result: { navigateToConversationId: handoff.owningConversationId }
+      });
+      const result = {
+        handoff: resolved,
+        navigateToConversationId: handoff.owningConversationId,
+        owner: {
+          conversationId: handoff.owningConversationId,
+          title: ownerConversation?.title || 'Current physical game'
+        }
+      };
+      this.emit(conversationId, 'mentor-physical-handoff-updated', { conversationId, ...result });
+      this.emit(conversationId, 'mentor-physical-navigation-requested', {
+        conversationId,
+        targetConversationId: handoff.owningConversationId
+      });
+      return result;
+    }
+
+    const binding = this.store.getActivePhysicalBinding(this.boardId);
+    const ownerActivity = this.store.getActiveActivity(handoff.owningConversationId);
+    const identityMatches = binding?.conversationId === handoff.owningConversationId
+      && binding.serverInstanceId === handoff.serverInstanceId
+      && binding.sessionGeneration === handoff.sessionGeneration
+      && this.snapshot?.serverInstanceId === handoff.serverInstanceId
+      && Number(this.snapshot?.sessionGeneration) === handoff.sessionGeneration
+      && Number(this.snapshot?.stateRevision || 0) === handoff.stateRevision
+      && (ownerActivity?.id || null) === handoff.ownerActivityId;
+    if (!identityMatches) {
+      const failed = this.store.resolvePhysicalHandoff(handoff.id, {
+        status: 'failed',
+        resolution: action,
+        errorCode: 'physical_handoff_stale'
+      });
+      this.emit(conversationId, 'mentor-physical-handoff-updated', { conversationId, handoff: failed });
+      throw new MentorPhysicalError('The physical game changed before ownership could be transferred. Ask again using the current board state.', 'physical_handoff_stale', 409);
+    }
+    if (!isSafeHandoffBoundary(this.snapshot)) {
+      throw new MentorPhysicalError('Wait for the current physical move or recovery to finish before transferring the board.', 'physical_handoff_busy', 409, {
+        handoff
+      });
+    }
+
+    this.clearPendingGuidance(handoff.owningConversationId);
+    this.clearPendingOpeningGuidance(handoff.owningConversationId);
+    this.clearPendingCoaching(handoff.owningConversationId);
+    if (ownerActivity) this.activityService?.end?.(handoff.owningConversationId, 'physical_handoff');
+    await this.liveService?.stopConversation?.(handoff.owningConversationId, 'physical_board_transferred');
+    const detached = this.store.detachPhysicalBinding(handoff.owningConversationId);
+    this.emit(handoff.owningConversationId, 'mentor-physical-binding-updated', {
+      conversationId: handoff.owningConversationId,
+      physicalBoard: { binding: detached, state: null, handoff: null }
+    });
+
+    try {
+      const requested = handoff.requestedActivity || {};
+      const learnerColor = requested.learnerColor || 'white';
+      let detail;
+      if (requested.type === 'puzzle') {
+        detail = this.attach(conversationId, {
+          serverInstanceId: this.snapshot.serverInstanceId,
+          sessionGeneration: this.snapshot.sessionGeneration,
+          allowLiveSwitch: true,
+          coachingMode: 'off',
+          coachingOrigin: 'physical_handoff',
+          orientation: learnerColor
+        });
+      } else {
+        this.adapter?.startDefaultGame?.({ allowPristineRestart: true });
+        detail = this.attach(conversationId, {
+          serverInstanceId: this.snapshot.serverInstanceId,
+          sessionGeneration: this.snapshot.sessionGeneration,
+          allowLiveSwitch: true,
+          coachingMode: 'selective',
+          coachingOrigin: 'physical_handoff',
+          orientation: learnerColor
+        });
+      }
+
+      const activity = await this.activityService.startActivity(conversationId, {
+        type: requested.type,
+        learnerColor,
+        opponentMode: requested.opponentMode || 'mentor',
+        sourceId: requested.sourceId || null,
+        proposal: requested.proposal || null,
+        expectedRevision: detail.state.revision,
+        requestId: requestId || requested.requestId || null
+      });
+      const resolved = this.store.resolvePhysicalHandoff(handoff.id, {
+        status: 'transferred',
+        resolution: action,
+        result: { activityId: activity?.id || null, conversationId }
+      });
+      const physicalBoard = this.detail(conversationId);
+      const result = { handoff: resolved, activity, physicalBoard };
+      this.emit(conversationId, 'mentor-physical-handoff-updated', { conversationId, ...result });
+      return result;
+    } catch (error) {
+      const failed = this.store.resolvePhysicalHandoff(handoff.id, {
+        status: 'failed',
+        resolution: action,
+        errorCode: error.code || 'physical_handoff_start_failed'
+      });
+      this.emit(conversationId, 'mentor-physical-handoff-updated', {
+        conversationId,
+        handoff: failed
+      });
+      throw error;
+    }
   }
 
   attachPhysicalGame(conversationId, { requestId, requireIntent = true } = {}) {

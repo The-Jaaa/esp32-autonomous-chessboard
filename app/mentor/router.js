@@ -223,6 +223,14 @@ function createMentorRouter({
     }
   });
 
+  router.post('/conversations/:id/physical-board/handoffs/:handoffId', asyncRoute(async (req, res) => {
+    return physicalObserver.resolvePhysicalBoardHandoff(req.params.id, {
+      handoffId: req.params.handoffId,
+      action: req.body?.action,
+      requestId: req.body?.requestId || null
+    });
+  }));
+
   router.get('/catalog', (req, res) => {
     res.json({ catalog: activityService.catalog(req.query.type || null) });
   });

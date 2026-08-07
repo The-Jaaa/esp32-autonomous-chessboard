@@ -515,6 +515,7 @@ async function verifyVoiceFirstPhysicalOrchestration() {
   };
   const activityService = {
     current: null,
+    normalizePhysicalActivityRequest: (options) => options,
     assertExplicitStartConsent: () => true,
     validateTool: () => true,
     startActivity: async (_conversationId, options) => {
@@ -568,7 +569,17 @@ async function verifyVoiceFirstPhysicalOrchestration() {
       channel: 'live-physical'
     });
     assert(result.response.output);
-    assert.deepStrictEqual(ensured, [{ requestId: 'voice-opening-black', learnerColor: 'black' }]);
+    assert.deepStrictEqual(ensured, [{
+      requestId: 'voice-opening-black',
+      learnerColor: 'black',
+      activityRequest: {
+        type: 'opening_drill',
+        opponentMode: 'mentor',
+        learnerColor: 'black',
+        sourceId: 'italian-game',
+        proposal: null
+      }
+    }]);
     assert.strictEqual(defaults.humanColor, 'black');
     assert.strictEqual(starts.length, 1);
     assert.strictEqual(starts[0].learnerColor, 'black');

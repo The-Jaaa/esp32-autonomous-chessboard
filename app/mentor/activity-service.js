@@ -20,7 +20,9 @@ const ACTIVITY_TOOL_NAMES = new Set([
   'resolve_opening_drill',
   'pause_activity',
   'resume_activity',
-  'confirm_physical_setup'
+  'confirm_physical_setup',
+  'resolve_physical_board_handoff',
+  'set_game_preferences'
 ]);
 const READ_ONLY_TOOLS = new Set([
   'get_board_state',
@@ -33,6 +35,45 @@ const READ_ONLY_TOOLS = new Set([
   'request_hint',
   'end_activity'
 ]);
+
+function normalizedCatalogName(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\b(practice|drill|lesson|opening|puzzle)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function reviewedPhysicalItem(type, { sourceId = null, proposal = null } = {}) {
+  const items = listCatalog(type)
+    .filter((item) => item.supportsPhysical)
+    .map((item) => getCatalogItem(item.id));
+  const direct = sourceId && getCatalogItem(sourceId);
+  if (direct?.type === type && direct.supportsPhysical) return direct;
+
+  const requestedName = normalizedCatalogName(sourceId || proposal?.title);
+  if (requestedName) {
+    const named = items.filter((item) => {
+      const candidate = normalizedCatalogName(item.title);
+      return candidate === requestedName
+        || candidate.startsWith(requestedName)
+        || requestedName.startsWith(candidate);
+    });
+    if (named.length === 1) return named[0];
+  }
+
+  if (Array.isArray(proposal?.line) && proposal.line.length) {
+    const matchingLine = items.filter((item) => proposal.line.every((uci, index) => item.line[index] === uci));
+    if (matchingLine.length === 1) return matchingLine[0];
+  }
+  if (proposal?.initialFen) {
+    const exactPosition = items.filter((item) => item.initialFen === proposal.initialFen
+      && (!Array.isArray(proposal.line) || proposal.line.every((uci, index) => item.line[index] === uci)));
+    if (exactPosition.length === 1) return exactPosition[0];
+  }
+  return null;
+}
 
 class MentorActivityError extends Error {
   constructor(message, code = 'activity_error', statusCode = 400, details = {}) {
@@ -158,6 +199,42 @@ class MentorActivityService {
 
   catalog(type = null) {
     return listCatalog(type);
+  }
+
+  normalizePhysicalActivityRequest(options = {}) {
+    if (options.type === 'practice_game') {
+      return {
+        type: 'practice_game',
+        opponentMode: options.opponentMode || 'mentor',
+        learnerColor: options.learnerColor
+      };
+    }
+    if (!['opening_drill', 'puzzle'].includes(options.type)) {
+      throw new MentorActivityError(
+        'The physical mentor supports practice games, reviewed openings, and reviewed puzzles only.',
+        'physical_activity_unsupported',
+        409
+      );
+    }
+    if (options.type === 'puzzle' && !options.sourceId && !options.proposal) {
+      return { type: 'puzzle', learnerColor: options.learnerColor };
+    }
+    const item = reviewedPhysicalItem(options.type, options);
+    if (!item) {
+      throw new MentorActivityError(
+        options.type === 'opening_drill'
+          ? 'Reviewed physical opening drill not found.'
+          : 'Reviewed physical puzzle not found.',
+        'activity_source_not_found',
+        404
+      );
+    }
+    return {
+      type: options.type,
+      learnerColor: options.learnerColor,
+      sourceId: item.id,
+      proposal: null
+    };
   }
 
   assertExplicitStartConsent(conversationId, requestId) {
@@ -466,15 +543,15 @@ class MentorActivityService {
     requestId = null,
     proposal = null
   } = {}) {
-    if (type !== 'opening_drill' || proposal) {
+    if (type !== 'opening_drill') {
       throw new MentorActivityError(
         'The physical board currently supports reviewed opening drills only.',
         'physical_activity_unsupported',
         409
       );
     }
-    const item = getCatalogItem(sourceId);
-    if (!item || item.type !== 'opening_drill' || !item.supportsPhysical) {
+    const item = reviewedPhysicalItem('opening_drill', { sourceId, proposal });
+    if (!item) {
       throw new MentorActivityError('Reviewed physical opening drill not found.', 'activity_source_not_found', 404);
     }
     if (this.store.getActiveActivity(conversationId)) {
@@ -542,7 +619,8 @@ class MentorActivityService {
   startPhysicalPuzzle(conversationId, {
     sourceId = null,
     expectedRevision,
-    requestId = null
+    requestId = null,
+    proposal = null
   } = {}) {
     if (this.store.getActiveActivity(conversationId)) {
       throw new MentorActivityError('End the current activity before starting another.', 'activity_already_active', 409);
@@ -555,7 +633,7 @@ class MentorActivityService {
     const band = level <= 5 ? 'beginner' : level <= 10 ? 'intermediate' : 'advanced';
     const candidates = listCatalog('puzzle').filter((item) => item.supportsPhysical && item.difficultyBand === band);
     const selectedId = sourceId || candidates[0]?.id;
-    const item = getCatalogItem(selectedId);
+    const item = reviewedPhysicalItem('puzzle', { sourceId: selectedId, proposal });
     if (!item || item.type !== 'puzzle' || !item.supportsPhysical) {
       throw new MentorActivityError('Reviewed physical puzzle not found.', 'activity_source_not_found', 404);
     }

@@ -67,6 +67,28 @@ app.post('/api/test/mentor-physical-state', (req, res) => {
   res.json({ state: physicalSnapshot });
 });
 
+app.post('/api/test/mentor-physical-handoff/:conversationId', (req, res) => {
+  const binding = mentorFeature.store.getActivePhysicalBinding('main-board');
+  if (!binding) return res.status(409).json({ error: 'No owner is attached.' });
+  if (!mentorFeature.store.getActiveActivity(binding.conversationId)) {
+    mentorFeature.activityService.startPhysicalPractice(binding.conversationId, {
+      learnerColor: physicalSnapshot.humanColor || 'white',
+      opponentMode: 'stockfish',
+      expectedRevision: physicalSnapshot.stateRevision
+    });
+  }
+  const result = mentorFeature.physicalObserver.ensureVoiceActivityBoard(req.params.conversationId, {
+    requestId: `browser-handoff-${Date.now()}`,
+    learnerColor: physicalSnapshot.humanColor || 'white',
+    activityRequest: {
+      type: 'practice_game',
+      opponentMode: 'stockfish',
+      learnerColor: physicalSnapshot.humanColor || 'white'
+    }
+  });
+  return res.json(result);
+});
+
 server.listen(Number(process.env.PORT), () => {
   console.log(`Mentor browser test server listening on port ${process.env.PORT}`);
 });

@@ -389,3 +389,39 @@ analysis, status-revision execution, and a learner move committed during active
 narration. Complete Mentor and physical suites, browser checks, client
 lint/build, and backend syntax checks pass. Firmware and `offline_core` remain
 unchanged; a real guided-game retest remains required.
+
+## Milestone 3.5: Physical Mentor Ownership And Activity Switching
+
+Physical-board ownership is now claimed by activity intent rather than by chat
+navigation. Opening a new conversation does not disturb the current game. An
+activity request automatically adopts an unowned, ended, or stale board. When
+another conversation owns a genuinely active game, the request creates a
+persisted handoff and offers two safe choices: return to the current game, or
+end it and start the requested activity in the new conversation.
+
+Transfers are allowed only at an exact stable boundary. The backend rechecks
+the server identity, physical-session generation, state revision, owner,
+activity, sensors, robot state, promotion, Undo/Redo, recovery, and pending
+commands before changing ownership. Decisions are idempotent, expire after ten
+minutes, stop the previous conversation's Live session, and cannot replay a
+robot move. Failed post-transfer startup is persisted as failed rather than
+left pending.
+
+The voice-first physical tool declaration now exposes only practice games,
+reviewed opening drills, and reviewed puzzles. Opening names and stale Gemini
+proposals are resolved back to unique reviewed catalog entries; ambiguous or
+custom physical content is rejected. Human Black Italian instruction is
+covered explicitly and queues the reviewed first move `e2e4`. Physical puzzles
+always come from the reviewed 12-item catalog.
+
+Difficulty can now change during an active Stockfish-led physical activity. It
+applies to the next engine search while in-flight search or motion retains its
+captured level. Side changes remain next-game settings, Mentor-led policy is
+unchanged, and opening/puzzle scripts are not altered mid-activity.
+
+Automated acceptance passed: the new handoff regressions, game-settings suite,
+physical curriculum suite, complete Mentor and physical suites, Playwright at
+`1440x900` and `1920x1080`, zero-warning client lint, production client build,
+backend syntax, and diff checks. Firmware and `offline_core` remain unchanged.
+The eight-step real-board handoff/opening/puzzle gate remains required before
+Milestone 3 and 3.5 are marked demonstration-ready.

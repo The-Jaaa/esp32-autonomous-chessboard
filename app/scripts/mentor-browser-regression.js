@@ -138,6 +138,28 @@ async function runViewport(browser, viewport) {
   await page.getByRole('button', { name: 'Stop', exact: true }).click();
   await page.getByRole('button', { name: 'Start voice mentor' }).waitFor({ state: 'visible' });
 
+  const owningConversationId = page.url().split('/').at(-1);
+  await createNewConversation(page);
+  await page.evaluate(async () => {
+    const conversationId = location.pathname.split('/').at(-1);
+    const response = await fetch(`/api/test/mentor-physical-handoff/${conversationId}`, { method: 'POST' });
+    if (!response.ok) throw new Error(await response.text());
+  });
+  await expectText(page.locator('.mentor-physical-handoff'), 'Physical board in use');
+  await page.getByRole('button', { name: 'Continue game' }).click();
+  await page.waitForURL(`http://127.0.0.1:3010/mentor/${owningConversationId}`);
+
+  await createNewConversation(page);
+  await page.evaluate(async () => {
+    const conversationId = location.pathname.split('/').at(-1);
+    const response = await fetch(`/api/test/mentor-physical-handoff/${conversationId}`, { method: 'POST' });
+    if (!response.ok) throw new Error(await response.text());
+  });
+  await expectText(page.locator('.mentor-physical-handoff'), 'Physical board in use');
+  await page.getByRole('button', { name: 'End & use this chat' }).click();
+  await expectText(page.locator('.mentor-physical-status'), 'Waiting for your move');
+  assert.strictEqual(await page.locator('.mentor-physical-handoff').count(), 0);
+
   await page.evaluate(() => fetch('/api/test/mentor-physical-state', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

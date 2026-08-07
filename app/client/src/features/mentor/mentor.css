@@ -944,6 +944,34 @@
 .mentor-coaching-toggle:disabled { opacity: .55; cursor: default; }
 .mentor-physical-unavailable { justify-content: space-between; }
 .mentor-physical-unavailable a { color: #bfdbfe; font-weight: 700; text-decoration: none; }
+.mentor-physical-handoff {
+  display: grid;
+  gap: 8px;
+  margin: 8px 22px 0;
+  padding: 9px 10px;
+  border: 1px solid var(--warning-color);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--warning-color) 10%, var(--surface-panel));
+}
+.mentor-physical-handoff strong,
+.mentor-physical-handoff small { display: block; }
+.mentor-physical-handoff strong { color: var(--mentor-text); font-size: 11px; }
+.mentor-physical-handoff small { margin-top: 3px; color: var(--mentor-muted); font-size: 10px; }
+.mentor-physical-handoff-actions { display: flex; gap: 6px; }
+.mentor-physical-handoff-actions button {
+  min-height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--mentor-border);
+  border-radius: 4px;
+  color: var(--mentor-text);
+  background: var(--surface-input);
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 700;
+}
+.mentor-physical-handoff-actions button.is-danger { border-color: color-mix(in srgb, var(--danger-color) 65%, var(--mentor-border)); color: #fecaca; }
+.mentor-physical-handoff-actions button:disabled { opacity: .5; cursor: default; }
 
 .mentor-activity-bar {
   display: grid;

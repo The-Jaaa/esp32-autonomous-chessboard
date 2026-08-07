@@ -213,6 +213,28 @@ function mapPhysicalBinding(row) {
   };
 }
 
+function mapPhysicalHandoff(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    boardId: row.board_id,
+    requestingConversationId: row.requesting_conversation_id,
+    owningConversationId: row.owning_conversation_id,
+    serverInstanceId: row.server_instance_id,
+    sessionGeneration: Number(row.session_generation),
+    stateRevision: Number(row.state_revision),
+    ownerActivityId: row.owner_activity_id || null,
+    requestedActivity: parseJson(row.requested_activity_json, {}),
+    status: row.status,
+    resolution: row.resolution || null,
+    result: parseJson(row.result_json, null),
+    errorCode: row.error_code || null,
+    expiresAt: Number(row.expires_at),
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at)
+  };
+}
+
 function titleFromMessage(text) {
   const normalized = String(text || '').replace(/\s+/g, ' ').trim();
   if (!normalized) return DEFAULT_TITLE;
@@ -244,6 +266,7 @@ class MentorStore {
     this.recoverInterruptedMessages();
     this.recoverInterruptedToolCalls();
     this.recoverInterruptedActivities();
+    this.expirePhysicalHandoffs();
   }
 
   migrate() {
@@ -513,6 +536,32 @@ class MentorStore {
 
         INSERT INTO app_game_settings(id, human_color, difficulty_level, created_at, updated_at)
         VALUES (1, 'white', 1, ${this.now()}, ${this.now()});
+      `
+    }, {
+      version: 11,
+      sql: `
+        CREATE TABLE mentor_physical_handoffs (
+          id TEXT PRIMARY KEY,
+          board_id TEXT NOT NULL DEFAULT 'main-board',
+          requesting_conversation_id TEXT NOT NULL REFERENCES mentor_conversations(id) ON DELETE CASCADE,
+          owning_conversation_id TEXT NOT NULL REFERENCES mentor_conversations(id) ON DELETE CASCADE,
+          server_instance_id TEXT NOT NULL,
+          session_generation INTEGER NOT NULL,
+          state_revision INTEGER NOT NULL,
+          owner_activity_id TEXT,
+          requested_activity_json TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('pending', 'continued', 'transferred', 'cancelled', 'expired', 'failed')),
+          resolution TEXT CHECK(resolution IS NULL OR resolution IN ('continue_existing', 'end_and_start')),
+          result_json TEXT,
+          error_code TEXT,
+          expires_at INTEGER NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        CREATE UNIQUE INDEX mentor_physical_handoffs_one_pending_board
+          ON mentor_physical_handoffs(board_id)
+          WHERE status = 'pending';
       `
     }];
 
@@ -1110,6 +1159,120 @@ class MentorStore {
       annotations: { highlights: [], arrows: [] },
       lastEventKey: null
     });
+  }
+
+  expirePhysicalHandoffs() {
+    const timestamp = this.now();
+    return this.db.prepare(`
+      UPDATE mentor_physical_handoffs
+      SET status = 'expired', error_code = 'physical_handoff_expired', updated_at = ?
+      WHERE status = 'pending' AND expires_at <= ?
+    `).run(timestamp, timestamp).changes;
+  }
+
+  getPhysicalHandoff(id) {
+    this.expirePhysicalHandoffs();
+    return mapPhysicalHandoff(this.db.prepare(`
+      SELECT * FROM mentor_physical_handoffs WHERE id = ?
+    `).get(id));
+  }
+
+  getPendingPhysicalHandoff(conversationId) {
+    this.expirePhysicalHandoffs();
+    return mapPhysicalHandoff(this.db.prepare(`
+      SELECT * FROM mentor_physical_handoffs
+      WHERE requesting_conversation_id = ? AND status = 'pending'
+      ORDER BY created_at DESC LIMIT 1
+    `).get(conversationId));
+  }
+
+  createPhysicalHandoff({
+    boardId = 'main-board',
+    requestingConversationId,
+    owningConversationId,
+    serverInstanceId,
+    sessionGeneration,
+    stateRevision,
+    ownerActivityId = null,
+    requestedActivity = {},
+    expiresInMs = 10 * 60 * 1000
+  }) {
+    this.expirePhysicalHandoffs();
+    const timestamp = this.now();
+    const requestJson = JSON.stringify(requestedActivity || {});
+    const existing = this.db.prepare(`
+      SELECT * FROM mentor_physical_handoffs
+      WHERE board_id = ? AND status = 'pending'
+    `).get(boardId);
+    if (existing
+      && existing.requesting_conversation_id === requestingConversationId
+      && existing.owning_conversation_id === owningConversationId
+      && existing.server_instance_id === serverInstanceId
+      && Number(existing.session_generation) === Number(sessionGeneration)
+      && Number(existing.state_revision) === Number(stateRevision)
+      && (existing.owner_activity_id || null) === (ownerActivityId || null)
+      && existing.requested_activity_json === requestJson
+      && Number(existing.expires_at) > timestamp) {
+      return mapPhysicalHandoff(existing);
+    }
+
+    this.db.exec('BEGIN IMMEDIATE;');
+    try {
+      this.db.prepare(`
+        UPDATE mentor_physical_handoffs
+        SET status = 'cancelled', error_code = 'physical_handoff_superseded', updated_at = ?
+        WHERE board_id = ? AND status = 'pending'
+      `).run(timestamp, boardId);
+      const id = this.createId();
+      this.db.prepare(`
+        INSERT INTO mentor_physical_handoffs(
+          id, board_id, requesting_conversation_id, owning_conversation_id,
+          server_instance_id, session_generation, state_revision, owner_activity_id,
+          requested_activity_json, status, resolution, result_json, error_code,
+          expires_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, ?, ?, ?)
+      `).run(
+        id,
+        boardId,
+        requestingConversationId,
+        owningConversationId,
+        serverInstanceId,
+        Number(sessionGeneration),
+        Number(stateRevision),
+        ownerActivityId,
+        requestJson,
+        timestamp + expiresInMs,
+        timestamp,
+        timestamp
+      );
+      this.db.exec('COMMIT;');
+      return this.getPhysicalHandoff(id);
+    } catch (error) {
+      this.db.exec('ROLLBACK;');
+      throw error;
+    }
+  }
+
+  resolvePhysicalHandoff(id, {
+    status,
+    resolution = null,
+    result = null,
+    errorCode = null
+  }) {
+    const timestamp = this.now();
+    this.db.prepare(`
+      UPDATE mentor_physical_handoffs
+      SET status = ?, resolution = ?, result_json = ?, error_code = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      status,
+      resolution,
+      result === undefined ? null : JSON.stringify(result),
+      errorCode,
+      timestamp,
+      id
+    );
+    return this.getPhysicalHandoff(id);
   }
 
   createActivity({
