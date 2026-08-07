@@ -1246,9 +1246,19 @@ class MentorActivityService {
     }
   }
 
-  async playPhysicalMove(conversationId, requestId, uci, { signal } = {}) {
-    const activity = this.store.getActiveActivity(conversationId);
+  async playPhysicalMove(conversationId, requestId, uci, { signal, strategicPlan } = {}) {
+    let activity = this.store.getActiveActivity(conversationId);
     this.validatePhysicalMentorMove(conversationId, requestId, activity, uci);
+    const normalizedPlan = typeof strategicPlan === 'string' ? strategicPlan.trim() : '';
+    if (normalizedPlan.length > 240) {
+      throw new MentorActivityError('The strategic plan must be 240 characters or fewer.', 'invalid_strategic_plan', 400);
+    }
+    if (normalizedPlan) {
+      activity = this.store.updateActivity(activity.id, {
+        state: { ...activity.state, strategicPlan: normalizedPlan }
+      });
+      this.record(activity, 'strategic_plan_updated', { strategicPlan: normalizedPlan });
+    }
     const result = await this.physicalCoordinator.playPhysicalMove(conversationId, {
       activityId: activity.id,
       generation: activity.generation,
@@ -1426,6 +1436,7 @@ class MentorActivityService {
       `Authoritative physical revision: ${board.revision}. FEN: ${board.fen}`,
       activity.state.strategicPlan ? `Continue this strategic plan: ${activity.state.strategicPlan}` : 'Choose a coherent teaching plan and retain it across turns.',
       'Call analyze_position in quick mode, then call play_physical_move exactly once with a top-three move no more than 50 centipawns below the best.',
+      'Include a concise plan with play_physical_move. Keep an existing plan when it remains sound; replace it only when the position requires a new plan.',
       'Forced mates and materially superior moves take priority over teaching flexibility.',
       'Do not finish with analysis alone. Do not describe raw motors, paths, magnets, or sensors.',
       'After verification, explain the learner move, your reply, and the current plan directly and without praise padding.'

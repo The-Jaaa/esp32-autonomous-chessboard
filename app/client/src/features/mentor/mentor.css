@@ -782,6 +782,48 @@
 .mentor-send-button:disabled { color: var(--mentor-muted); background: var(--surface-panel-strong); cursor: default; }
 .mentor-composer-wrap > p { margin: 7px auto 0; color: var(--mentor-muted); font-size: 10px; text-align: center; }
 
+.mentor-voice-command-bar {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 46px;
+  padding: 8px 10px;
+  border: 1px solid var(--mentor-border);
+  border-radius: 8px;
+  background: var(--mentor-panel-strong);
+}
+
+.mentor-voice-command-bar > span {
+  min-width: 0;
+  margin-left: auto;
+  color: var(--mentor-muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mentor-voice-start {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 14px;
+  border: 1px solid var(--mentor-accent);
+  border-radius: 6px;
+  color: #fff;
+  background: var(--mentor-accent);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.mentor-voice-start:disabled { opacity: .45; cursor: default; }
+.mentor-voice-command-bar .mentor-live-button,
+.mentor-voice-command-bar .mentor-live-stop { width: auto; min-width: 78px; padding: 0 12px; gap: 7px; }
+
 .mentor-error {
   display: flex;
   justify-content: space-between;

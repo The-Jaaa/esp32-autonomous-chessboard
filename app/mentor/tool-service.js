@@ -36,7 +36,14 @@ const TOOL_DECLARATIONS = [{
   description: 'Play one Stockfish-verified move for Gemini during the active mentor-led physical turn. The backend validates and executes the move through the guarded physical planner.',
   parametersJsonSchema: {
     type: 'object',
-    properties: { uci: { type: 'string', description: 'One legal UCI move from the verified candidate list.' } },
+    properties: {
+      uci: { type: 'string', description: 'One legal UCI move from the verified candidate list.' },
+      plan: {
+        type: 'string',
+        maxLength: 240,
+        description: 'A concise strategic plan that should guide later mentor moves and explanations.'
+      }
+    },
     required: ['uci'],
     additionalProperties: false
   }
@@ -617,7 +624,10 @@ class MentorToolService {
       if (typeof args.uci !== 'string' || !MOVE_PATTERN.test(args.uci)) {
         throw new Error('play_physical_move requires one valid UCI move.');
       }
-      const result = await this.activityService.playPhysicalMove(conversationId, requestId, args.uci, { signal });
+      const result = await this.activityService.playPhysicalMove(conversationId, requestId, args.uci, {
+        signal,
+        strategicPlan: args.plan
+      });
       onProgress(1, 1);
       return result;
     }

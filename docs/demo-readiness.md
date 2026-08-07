@@ -251,3 +251,38 @@ held a fixed queen prompt, accepted the empty-then-occupied replacement, and
 Mentor Live announced the resulting check through the board speaker. The final
 standard-position regression committed human `e4` and verified robot `d5` with
 exact occupancy, no pending work, and no synchronization or motion error.
+
+## Milestone 3: Voice-First Physical Curriculum
+
+Automated implementation is complete on `codex/mentor-physical-curriculum` in
+three isolated commits. The Mentor can coordinate a physical practice game
+against either Gemini or Stockfish, teach all 18 reviewed openings with the
+learner playing White or Black, and guide all 12 reviewed puzzles through an
+explicit physical setup-confirmation gate.
+
+Gemini-controlled moves remain high-level and guarded. Gemini must first obtain
+matching-position Stockfish candidates, may choose only a top-three move within
+50 centipawns of the best, and submits one UCI move plus a persisted strategic
+plan. The existing physical server remains responsible for legality, routing,
+motors, sensors, verification, promotions, graveyards, and recovery. One
+corrective turn is allowed if Gemini analyzes without moving; Stockfish then
+provides the deterministic fallback.
+
+The primary `/mentor` surface is now desktop, physical-board, and voice-first.
+It retains conversation history, read-only transcripts, board/move state,
+speaker controls, side/difficulty settings, activity status, safety feedback,
+promotion controls, Pause/Resume, Hint, and End. Text input, virtual source
+selection, manual activity/profile dialogs, FEN/reset commands, and board
+demonstrations are no longer exposed on that page. Virtual mentor services
+remain internally compatible.
+
+Automated acceptance passed: `npm run test:physical`, the complete
+`npm run test:mentor` suite, Playwright at `1440x900` and `1920x1080`, zero-
+warning client lint, production client build, backend syntax checks, and diff
+checks. Firmware and `offline_core` were not changed; the accepted production
+baseline remains `1,083,819` bytes flash and `48,768` bytes static RAM.
+
+Real-board acceptance remains required before this milestone is marked
+demonstration-ready: Mentor-led three-turn play, Stockfish-led difficulty
+handoff, a Human Black reviewed opening, one physical puzzle with wrong-move
+recovery and a hint, Pause/Resume, and urgent mismatch guidance.

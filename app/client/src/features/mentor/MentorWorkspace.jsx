@@ -45,6 +45,7 @@ const SUGGESTIONS = [
   { title: 'Solve a puzzle', prompt: 'Give me a tactical puzzle appropriate for an improving club player.' },
   { title: 'Practice a position', prompt: 'Set up a useful practice position and coach me through the ideas.' }
 ];
+const VOICE_FIRST_PHYSICAL = true;
 const STANDARD_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 const ANNOTATION_COLORS = {
   idea: '#4f8fe8',
@@ -166,6 +167,10 @@ function toolLabel(toolCall) {
     get_activity_state: 'Read activity state',
     propose_activity: 'Validate activity',
     start_activity: 'Start activity',
+    play_physical_move: `Play physical move ${args.uci || ''}`.trim(),
+    pause_activity: 'Pause activity',
+    resume_activity: 'Resume activity',
+    confirm_physical_setup: 'Confirm puzzle setup',
     request_prediction: 'Request prediction',
     request_hint: 'Give hint',
     end_activity: 'End activity',
@@ -180,7 +185,8 @@ function activityPhaseLabel(activity) {
   const pauseLabels = {
     line_complete: 'Line complete',
     repeat_restore: 'Restore starting setup',
-    route_blocked: 'Route blocked'
+    route_blocked: 'Route blocked',
+    puzzle_setup: 'Confirm physical setup'
   };
   if (pauseLabels[activity?.state?.pauseReason]) return pauseLabels[activity.state.pauseReason];
   const labels = {
@@ -223,12 +229,12 @@ function ActivityBar({
       <div className="mentor-activity-bar is-idle">
         <div><GraduationCap size={17} /><span><strong>{openingLock ? 'Opening lesson finished' : 'Guided practice'}</strong><small>{openingLock
           ? 'The physical position is locked until you resume normal play'
-          : physical ? 'Practice a reviewed opening on the real board' : 'Start a game, drill, puzzle, or lesson'}</small></span></div>
+          : physical ? 'Ask the voice mentor to play, teach an opening, or start a puzzle' : 'Start a game, drill, puzzle, or lesson'}</small></span></div>
         <div className="mentor-activity-actions">
-          <button onClick={onProfile} title="Learner profile" aria-label="Learner profile"><Settings2 size={15} /></button>
+          {!VOICE_FIRST_PHYSICAL && <button onClick={onProfile} title="Learner profile" aria-label="Learner profile"><Settings2 size={15} /></button>}
           {openingLock
             ? <button className="is-primary" onClick={() => onPhysicalAction('resume')} disabled={busy}><Play size={14} /> Resume play</button>
-            : <button className="is-primary" onClick={onStart} disabled={busy || disabled}><Play size={14} /> Start activity</button>}
+            : !VOICE_FIRST_PHYSICAL && <button className="is-primary" onClick={onStart} disabled={busy || disabled}><Play size={14} /> Start activity</button>}
         </div>
       </div>
     );
@@ -241,7 +247,7 @@ function ActivityBar({
         <span className="mentor-activity-icon"><GraduationCap size={16} /></span>
         <span>
           <strong>{activity.title}</strong>
-          <small>{activityPhaseLabel(activity)} · {activityTypeLabel(activity.type)} · You play {activity.learnerColor}</small>
+          <small>{activityPhaseLabel(activity)} · {activityTypeLabel(activity.type)}{activity.config?.opponentMode ? ` · ${activity.config.opponentMode === 'mentor' ? 'Gemini opponent' : 'Stockfish opponent'}` : ''} · You play {activity.learnerColor}</small>
         </span>
       </div>
       {activity.totalSteps > 0 && <span className="mentor-activity-progress"><i style={{ width: `${progress}%` }} /></span>}
@@ -659,7 +665,7 @@ export default function MentorWorkspace() {
     onConversationChanged: onLiveConversationChanged
   });
   const physicalAttached = physicalBoard?.binding?.status === 'active' && Boolean(physicalBoard?.state);
-  const workspaceState = physicalAttached ? physicalBoard.state : boardState;
+  const workspaceState = physicalAttached ? physicalBoard.state : VOICE_FIRST_PHYSICAL ? null : boardState;
   const mentorRequestBusy = Boolean(activeRequestId || live.toolBusy);
   const openingLineComplete = physicalAttached && activity?.state?.pauseReason === 'line_complete';
   const displayedLiveStatus = openingLineComplete && live.status === 'thinking' ? 'listening' : live.status;
@@ -1361,23 +1367,23 @@ export default function MentorWorkspace() {
       <section className="mentor-conversation">
         <header className="mentor-conversation-header">
           <div><span>MENTOR</span><h1>{conversation?.title || 'New chat'}</h1></div>
-          <span className="mentor-model-label">{live.isActive ? 'Gemini 3.1 Flash Live' : 'Gemini 3.5 Flash'}</span>
+          <span className="mentor-model-label">{live.isActive ? 'Gemini 3.1 Flash Live' : 'Voice session offline'}</span>
         </header>
         <div className="mentor-message-scroll-wrap">
           <div className="mentor-message-scroll" ref={messageScrollRef} onScroll={onMessageScroll}>
             {!loading && messages.length === 0 ? (
               <div className="mentor-empty-state">
-                <div className="mentor-empty-mark"><Bot size={28} /></div>
-                <h2>What would you like to work on?</h2>
-                <p>Choose a starting point or ask your own chess question.</p>
-                <div className="mentor-suggestions">
+                <div className="mentor-empty-mark"><Mic size={28} /></div>
+                <h2>Voice mentor ready</h2>
+                <p>Start voice to play a guided physical game, learn an opening, or solve a puzzle.</p>
+                {!VOICE_FIRST_PHYSICAL && <div className="mentor-suggestions">
                   {SUGGESTIONS.map((suggestion) => (
                     <button key={suggestion.title} disabled={!socketReady || mentorRequestBusy} onClick={() => sendMessage(suggestion.prompt)}>
                       <strong>{suggestion.title}</strong>
                       <span>{suggestion.prompt}</span>
                     </button>
                   ))}
-                </div>
+                </div>}
               </div>
             ) : messages.map((message) => <Message key={message.id} message={message} />)}
             {live.partialUser && (
@@ -1419,10 +1425,28 @@ export default function MentorWorkspace() {
             <div className={`mentor-live-status is-${displayedLiveStatus}`}>
               <span className="mentor-live-status-dot" />
               <strong>{openingLineComplete && live.status === 'thinking' ? 'Opening line complete' : liveStatusText(live)}</strong>
-              {live.isActive && <span>{live.micGated ? 'Microphone pauses until playback ends or you interrupt' : live.toolBusy ? 'Microphone and Stop remain available' : 'Speak naturally or type below'}</span>}
+              {live.isActive && <span>{live.micGated ? 'Microphone pauses until playback ends or you interrupt' : live.toolBusy ? 'Microphone and Stop remain available' : 'Speak naturally to your mentor'}</span>}
             </div>
           )}
-          <div className="mentor-composer">
+          {VOICE_FIRST_PHYSICAL && <div className="mentor-voice-command-bar">
+            {!live.isActive ? (
+              <button
+                className="mentor-voice-start"
+                onClick={live.start}
+                disabled={!socketReady || !!activeRequestId || live.status === 'connecting'}
+              ><Mic size={18} /> Start voice mentor</button>
+            ) : (
+              <>
+                <button
+                  className={`mentor-live-button ${live.muted ? 'is-muted' : 'is-active'}`}
+                  onClick={live.toggleMute}
+                >{live.muted ? <MicOff size={17} /> : <Mic size={17} />} {live.muted ? 'Unmute' : 'Mute'}</button>
+                <button className="mentor-live-stop" onClick={() => live.stop()}><Square size={13} fill="currentColor" /> Stop</button>
+              </>
+            )}
+            <span>{physicalAttached ? 'Physical board connected' : 'Use voice to start or attach the physical board'}</span>
+          </div>}
+          {!VOICE_FIRST_PHYSICAL && <div className="mentor-composer">
             <textarea
               value={draft}
               placeholder={socketReady ? (live.isActive ? 'Speak or type to your chess mentor' : 'Ask your chess mentor') : 'Connecting to mentor...'}
@@ -1462,27 +1486,29 @@ export default function MentorWorkspace() {
                 <button className="mentor-send-button" onClick={() => sendMessage()} disabled={!draft.trim() || !socketReady || live.status === 'connecting' || live.toolBusy} title="Send message" aria-label="Send message"><ArrowUp size={19} /></button>
               )}
             </div>
-          </div>
-          <p>Mentor responses can be inaccurate. Verify critical analysis on the board.</p>
+          </div>}
+          <p>Chess claims are grounded with Stockfish when analysis is requested.</p>
         </div>
       </section>
 
       <aside className="mentor-board-panel">
         <header>
-          <div><span>WORKSPACE</span><h2>{physicalAttached ? 'Physical board' : 'Position board'}</h2></div>
+          <div><span>WORKSPACE</span><h2>Physical board</h2></div>
           <div className="mentor-board-tools">
-            <button onClick={() => setProfileDialogOpen(true)} disabled={activityBusy} title="Learner profile" aria-label="Learner profile"><Settings2 size={16} /></button>
             <button onClick={flipBoard} disabled={!workspaceState || mentorRequestBusy || !!pendingBoardAction || activityBusy || physicalBusy} title="Flip board" aria-label="Flip board"><Repeat2 size={17} /></button>
-            <button onClick={() => { setFenDraft(boardState?.fen || ''); setFenDialogOpen(true); }} disabled={!boardState || boardSetupLocked} title="Load FEN" aria-label="Load FEN"><Pencil size={16} /></button>
-            <button onClick={resetBoard} disabled={!boardState || boardSetupLocked} title="Reset board" aria-label="Reset board"><RefreshCcw size={16} /></button>
+            {!VOICE_FIRST_PHYSICAL && <>
+              <button onClick={() => setProfileDialogOpen(true)} disabled={activityBusy} title="Learner profile" aria-label="Learner profile"><Settings2 size={16} /></button>
+              <button onClick={() => { setFenDraft(boardState?.fen || ''); setFenDialogOpen(true); }} disabled={!boardState || boardSetupLocked} title="Load FEN" aria-label="Load FEN"><Pencil size={16} /></button>
+              <button onClick={resetBoard} disabled={!boardState || boardSetupLocked} title="Reset board" aria-label="Reset board"><RefreshCcw size={16} /></button>
+            </>}
           </div>
         </header>
-        <div className="mentor-board-source" role="group" aria-label="Board source">
+        {!VOICE_FIRST_PHYSICAL && <div className="mentor-board-source" role="group" aria-label="Board source">
           <button className={!physicalAttached ? 'is-active' : ''} onClick={detachPhysicalBoard} disabled={!physicalAttached || physicalBusy}>Virtual</button>
           <button className={physicalAttached ? 'is-active' : ''} onClick={attachPhysicalBoard} disabled={physicalAttached || physicalBusy || mentorRequestBusy || !!activity}>
             <Radio size={13} /> Physical
           </button>
-        </div>
+        </div>}
         <GameSettingsControls
           compact
           defaults={gameSettings.defaults}
@@ -1505,7 +1531,7 @@ export default function MentorWorkspace() {
                 ? `${Math.max(0, Math.round((freshnessNow - workspaceState.physical.lastSnapshotAt) / 1000))}s`
                 : 'No sensor data'}</span>
             </div>
-            <button
+            {!VOICE_FIRST_PHYSICAL && <button
               className={`mentor-coaching-toggle ${physicalBoard.binding?.coachingMode === 'selective' ? 'is-active' : ''}`}
               type="button"
               onClick={togglePhysicalCoaching}
@@ -1514,7 +1540,7 @@ export default function MentorWorkspace() {
             >
               <span>{coachingStatus?.text || (physicalBoard.binding?.coachingMode === 'selective' ? 'Selective coaching on' : physicalBoard.binding?.coachingMode === 'prompt_pending' ? 'Coaching choice pending' : 'Coaching paused')}</span>
               <strong>{physicalBoard.binding?.coachingMode === 'selective' ? 'On' : 'Off'}</strong>
-            </button>
+            </button>}
             {workspaceState.physical.pendingPromotion && (
               <div className="mentor-promotion-panel">
                 <strong>Promotion on {workspaceState.physical.pendingPromotion.to}</strong>
@@ -1543,7 +1569,7 @@ export default function MentorWorkspace() {
           activity={activity}
           busy={activityBusy || mentorRequestBusy}
           disabled={false}
-          physical={physicalAttached}
+          physical={VOICE_FIRST_PHYSICAL || physicalAttached}
           openingLock={Boolean(workspaceState?.physical?.openingLock)}
           onStart={openActivityDialog}
           onProfile={() => setProfileDialogOpen(true)}
@@ -1564,7 +1590,7 @@ export default function MentorWorkspace() {
           </div>
           <div className="mentor-board-frame">
             <Chessboard options={{
-              position: physicalAttached ? workspaceState?.fen : previewFen || workspaceState?.fen || STANDARD_FEN,
+              position: physicalAttached ? workspaceState?.fen : VOICE_FIRST_PHYSICAL ? STANDARD_FEN : previewFen || workspaceState?.fen || STANDARD_FEN,
               boardOrientation: workspaceState?.orientation || 'white',
               animationDurationInMs: 350,
               arrows: annotationArrows,
@@ -1599,7 +1625,7 @@ export default function MentorWorkspace() {
         </div>
       </aside>
 
-      {fenDialogOpen && (
+      {!VOICE_FIRST_PHYSICAL && fenDialogOpen && (
         <div className="mentor-modal-backdrop" role="presentation" onMouseDown={(event) => {
           if (event.target === event.currentTarget) setFenDialogOpen(false);
         }}>
@@ -1614,7 +1640,7 @@ export default function MentorWorkspace() {
           </form>
         </div>
       )}
-      {activityDialogOpen && workspaceState && (
+      {!VOICE_FIRST_PHYSICAL && activityDialogOpen && workspaceState && (
         <ActivityDialog
           catalog={catalog}
           boardRevision={workspaceState.revision}
@@ -1623,10 +1649,10 @@ export default function MentorWorkspace() {
           onStart={startActivity}
         />
       )}
-      {profileDialogOpen && (
+      {!VOICE_FIRST_PHYSICAL && profileDialogOpen && (
         <ProfileDialog progress={progress} onClose={() => setProfileDialogOpen(false)} onSave={saveProfile} />
       )}
-      {promotionPending && (
+      {!VOICE_FIRST_PHYSICAL && promotionPending && (
         <PromotionDialog
           color={promotionPending.color}
           target={promotionPending.targetSquare}

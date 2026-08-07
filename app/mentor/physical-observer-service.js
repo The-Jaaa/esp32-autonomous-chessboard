@@ -581,7 +581,14 @@ class MentorPhysicalObserverService {
         || current.phase !== 'ready') return;
       let analysis = null;
       try {
-        analysis = await this.analyzeMove(conversationId, { mode: 'quick' });
+        const state = this.getState(conversationId);
+        analysis = await this.analysisService.analyzeMoveState({
+          ...state,
+          history: [humanMove]
+        }, {
+          mode: 'quick',
+          assertCurrent: () => this.assertAnalysisCurrent(conversationId, state)
+        });
       } catch {
         // The fallback still gives a concise turn summary when engine analysis is unavailable.
       }
