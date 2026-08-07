@@ -335,3 +335,26 @@ activity execution, stale start-announcement suppression, and reconnect
 recovery. The complete `npm run test:mentor` and `npm run test:physical` suites,
 backend syntax checks, and diff checks pass. A real-board Mentor-led reply
 retest remains required.
+
+### Physical-Only Voice Startup Hardening
+
+Follow-up real sessions exposed a second startup path that bypassed the
+activity coordinator. Gemini could call the lower-level physical start or
+attach tools, receive an error, and still announce that a game had started.
+Repeated attempts could also create a newer physical-session generation,
+making the previous conversation stale and presenting as a degraded board.
+
+The voice-first Mentor now treats the physical board as the only gameplay
+source. It never asks Physical or Virtual. Before attachment it can inspect
+settings/status and call `start_activity`; after attachment it receives only
+the read-only and guarded physical activity tools. Direct voice calls to
+`start_physical_game` and `attach_physical_game` are rejected even if a stale
+provider declaration attempts them. `start_activity` is the sole transaction
+that establishes board ownership and creates a playable activity.
+
+Natural spoken consent is also normalized before validation, including filler
+prefixes and phrases that explicitly name the physical board, Mentor-led or
+Stockfish-led play, learner color, or playing against Gemini. The complete
+Mentor and physical suites, voice-first browser checks, client lint/build, and
+backend syntax checks pass. A final real-board startup and first-reply retest
+remains required.

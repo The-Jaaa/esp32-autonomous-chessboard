@@ -12,10 +12,12 @@ const PHYSICAL_ONLY_TOOL_NAMES = new Set([
 const VOICE_FIRST_UNATTACHED_TOOL_NAMES = new Set([
   'set_game_preferences',
   'get_physical_game_status',
-  'start_physical_game',
-  'attach_physical_game',
   'get_activity_state',
   'start_activity'
+]);
+const VOICE_FIRST_BLOCKED_TOOL_NAMES = new Set([
+  'start_physical_game',
+  'attach_physical_game'
 ]);
 const CUSTOM_ACTIVITY_PROPERTIES = {
   type: { type: 'string', enum: ['opening_drill', 'puzzle', 'guided_lesson'] },
@@ -320,11 +322,15 @@ class MentorToolService {
   }
 
   declarations(conversationId = null, { voiceFirstPhysical = false } = {}) {
+    if (voiceFirstPhysical) {
+      if (conversationId && this.physicalObserver?.isAttached(conversationId)) {
+        return TOOL_DECLARATIONS.filter((tool) => this.physicalObserver.allowedTool(tool.name)
+          && !VOICE_FIRST_BLOCKED_TOOL_NAMES.has(tool.name));
+      }
+      return TOOL_DECLARATIONS.filter((tool) => VOICE_FIRST_UNATTACHED_TOOL_NAMES.has(tool.name));
+    }
     if (conversationId && this.physicalObserver?.isAttached(conversationId)) {
       return TOOL_DECLARATIONS.filter((tool) => this.physicalObserver.allowedTool(tool.name));
-    }
-    if (voiceFirstPhysical) {
-      return TOOL_DECLARATIONS.filter((tool) => VOICE_FIRST_UNATTACHED_TOOL_NAMES.has(tool.name));
     }
     return TOOL_DECLARATIONS.filter((tool) => !PHYSICAL_ONLY_TOOL_NAMES.has(tool.name));
   }
@@ -466,6 +472,11 @@ class MentorToolService {
 
   async runTool(name, args, context) {
     const { conversationId, requestId, toolCall, signal, onProgress, channel } = context;
+    if (channel === 'live-physical' && VOICE_FIRST_BLOCKED_TOOL_NAMES.has(name)) {
+      const error = new Error('Use start_activity to start or attach the physical board and create the requested Mentor activity transactionally.');
+      error.code = 'voice_activity_start_required';
+      throw error;
+    }
     if (name === 'set_game_preferences') {
       if (!this.gameSettingsService) throw new Error('Game settings are unavailable.');
       const result = this.gameSettingsService.updateFromMentor(conversationId, args);

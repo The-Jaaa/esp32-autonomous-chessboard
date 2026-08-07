@@ -163,7 +163,9 @@ class MentorActivityService {
     const userMessage = this.store.getRequestMessages(conversationId, requestId)
       .find((message) => message.role === 'user');
     const text = String(userMessage?.content || '').trim();
-    const explicit = /^(yes\b|yeah\b|yep\b|sure\b|ok(?:ay)?\b|sounds good\b|do it\b|go ahead\b|start\b|begin\b|let'?s\b|please start\b|i(?:'d| would) like to\b|i want to\b|i(?:'ll| will) (?:go|play|take|be)\b|mentor(?:-led)?\b|stockfish(?:-led)?\b|play a\b|give me a\b|teach me\b|help me practice\b)/i.test(text);
+    const normalized = text.replace(/^(?:(?:uh+|um+|erm+|well)\b[,.]?\s*)+/i, '');
+    const explicit = /^(yes\b|yeah\b|yep\b|sure\b|ok(?:ay)?\b|sounds good\b|do it\b|go ahead\b|start\b|begin\b|let'?s\b|please start\b|i(?:'d| would) like to\b|i want to\b|i(?:'ll| will) (?:go|play|take|be)\b|mentor(?:-led)?\b|stockfish(?:-led)?\b|play a\b|give me a\b|teach me\b|help me practice\b)/i.test(normalized)
+      || /\b(?:physical (?:chess )?board|mentor-led|stockfish-led|play(?:ing)? (?:a game )?as (?:white|black)|against you)\b/i.test(normalized);
     if (!explicit) {
       throw new MentorActivityError(
         'Ask for the learner’s explicit agreement before starting an activity.',

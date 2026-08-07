@@ -37,6 +37,27 @@ function physicalState(game, revision, humanColor = 'white') {
   };
 }
 
+function verifyNaturalVoiceActivityConsent() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mentor-voice-consent-'));
+  const store = new MentorStore({ dbPath: path.join(tempDir, 'mentor.sqlite') });
+  const service = new MentorActivityService({ store, chessService: {}, analysisService: {}, emit: () => {} });
+  try {
+    for (const [index, text] of [
+      'Uh yes, a Mentor game and I want to play as White against you.',
+      'The physical board and yes, let us do it.',
+      'I want to play a physical game against you as White.'
+    ].entries()) {
+      const conversation = store.createConversation();
+      const requestId = `natural-consent-${index}`;
+      store.createMessagePair(conversation.id, { requestId, text });
+      assert.strictEqual(service.assertExplicitStartConsent(conversation.id, requestId), true);
+    }
+  } finally {
+    store.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
 async function verifyPhysicalAnalysisSurvivesStatusRevisionChurn() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mentor-physical-analysis-revision-'));
   const store = new MentorStore({ dbPath: path.join(tempDir, 'mentor.sqlite') });
@@ -452,7 +473,8 @@ async function verifyVoiceFirstPhysicalOrchestration() {
     const voiceTools = service.declarations(conversation.id, { voiceFirstPhysical: true })
       .map((tool) => tool.name);
     assert(voiceTools.includes('start_activity'));
-    assert(voiceTools.includes('start_physical_game'));
+    assert(!voiceTools.includes('start_physical_game'));
+    assert(!voiceTools.includes('attach_physical_game'));
     assert(!voiceTools.includes('play_move'));
     assert(!voiceTools.includes('set_orientation'));
 
@@ -475,6 +497,26 @@ async function verifyVoiceFirstPhysicalOrchestration() {
     assert.strictEqual(starts[0].learnerColor, 'black');
     assert.strictEqual(starts[0].expectedRevision, 7);
     assert.strictEqual(starts[0].sourceId, 'italian-game');
+
+    const attachedVoiceTools = service.declarations(conversation.id, { voiceFirstPhysical: true })
+      .map((tool) => tool.name);
+    assert(attachedVoiceTools.includes('play_physical_move'));
+    assert(!attachedVoiceTools.includes('start_physical_game'));
+    assert(!attachedVoiceTools.includes('attach_physical_game'));
+
+    const stalePair = store.createMessagePair(conversation.id, {
+      requestId: 'voice-stale-start',
+      text: 'Start another physical game directly.'
+    });
+    const staleLowLevelCall = await service.execute({
+      conversationId: conversation.id,
+      requestId: 'voice-stale-start',
+      assistantMessageId: stalePair.assistantMessage.id,
+      ordinal: 1,
+      call: { id: 'provider-stale-start', name: 'start_physical_game', args: {} },
+      channel: 'live-physical'
+    });
+    assert.strictEqual(staleLowLevelCall.response.error.code, 'voice_activity_start_required');
   } finally {
     store.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -482,6 +524,7 @@ async function verifyVoiceFirstPhysicalOrchestration() {
 }
 
 (async () => {
+  verifyNaturalVoiceActivityConsent();
   await verifyGuidedPhysicalFallback();
   await verifyPhysicalAnalysisSurvivesStatusRevisionChurn();
   await verifyStrandedMentorTurnRecoversWhenLiveReturns();
