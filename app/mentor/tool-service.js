@@ -2,6 +2,13 @@ const { Chess } = require('chess.js');
 
 const MAX_LINE_PLIES = 24;
 const MOVE_PATTERN = /^[a-h][1-8][a-h][1-8][qrbn]?$/;
+const PHYSICAL_ONLY_TOOL_NAMES = new Set([
+  'play_physical_move',
+  'pause_activity',
+  'resume_activity',
+  'confirm_physical_setup',
+  'resolve_opening_drill'
+]);
 const CUSTOM_ACTIVITY_PROPERTIES = {
   type: { type: 'string', enum: ['opening_drill', 'puzzle', 'guided_lesson'] },
   title: { type: 'string' },
@@ -22,6 +29,15 @@ const TOOL_DECLARATIONS = [{
       humanColor: { type: 'string', enum: ['white', 'black'] },
       difficultyLevel: { type: 'integer', minimum: 1, maximum: 15 }
     },
+    additionalProperties: false
+  }
+}, {
+  name: 'play_physical_move',
+  description: 'Play one Stockfish-verified move for Gemini during the active mentor-led physical turn. The backend validates and executes the move through the guarded physical planner.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: { uci: { type: 'string', description: 'One legal UCI move from the verified candidate list.' } },
+    required: ['uci'],
     additionalProperties: false
   }
 }, {
@@ -165,6 +181,7 @@ const TOOL_DECLARATIONS = [{
     type: 'object',
     properties: {
       type: { type: 'string', enum: ['practice_game', 'opening_drill', 'puzzle', 'guided_lesson'] },
+      opponentMode: { type: 'string', enum: ['mentor', 'stockfish'] },
       learnerColor: { type: 'string', enum: ['white', 'black'] },
       startFrom: { type: 'string', enum: ['standard', 'current'] },
       sourceId: { type: 'string' },
@@ -178,6 +195,18 @@ const TOOL_DECLARATIONS = [{
     required: ['type'],
     additionalProperties: false
   }
+}, {
+  name: 'pause_activity',
+  description: 'Pause the active physical mentor activity. A robot move already in progress finishes safely.',
+  parametersJsonSchema: { type: 'object', properties: {}, additionalProperties: false }
+}, {
+  name: 'resume_activity',
+  description: 'Resume the paused physical mentor activity without restarting it.',
+  parametersJsonSchema: { type: 'object', properties: {}, additionalProperties: false }
+}, {
+  name: 'confirm_physical_setup',
+  description: 'Confirm that the named pieces for a physical puzzle were placed correctly after occupancy calibration.',
+  parametersJsonSchema: { type: 'object', properties: {}, additionalProperties: false }
 }, {
   name: 'propose_activity',
   description: 'Validate a custom opening drill, puzzle, or guided lesson without starting it. Ask the learner before starting the returned activity.',
@@ -279,7 +308,7 @@ class MentorToolService {
     if (conversationId && this.physicalObserver?.isAttached(conversationId)) {
       return TOOL_DECLARATIONS.filter((tool) => this.physicalObserver.allowedTool(tool.name));
     }
-    return TOOL_DECLARATIONS.filter((tool) => tool.name !== 'resolve_opening_drill');
+    return TOOL_DECLARATIONS.filter((tool) => !PHYSICAL_ONLY_TOOL_NAMES.has(tool.name));
   }
 
   setActivityService(activityService) {
@@ -470,6 +499,7 @@ class MentorToolService {
         learnerColor: args.learnerColor || 'white',
         startFrom: args.startFrom || 'standard',
         sourceId: args.sourceId,
+        opponentMode: args.opponentMode || 'mentor',
         proposal: args.proposal,
         expectedRevision: state.revision,
         requestId,
@@ -477,6 +507,25 @@ class MentorToolService {
       });
       onProgress(1, 1);
       return { activity, board: compactBoardState(this.workspaceState(conversationId)) };
+    }
+
+    if (name === 'pause_activity') {
+      const activity = this.activityService?.pause(conversationId, 'mentor_paused');
+      onProgress(1, 1);
+      return { activity };
+    }
+
+    if (name === 'resume_activity') {
+      const activity = this.activityService?.resume(conversationId);
+      onProgress(1, 1);
+      return { activity };
+    }
+
+    if (name === 'confirm_physical_setup') {
+      if (!this.activityService?.confirmPhysicalSetup) throw new Error('Physical setup confirmation is unavailable.');
+      const activity = this.activityService.confirmPhysicalSetup(conversationId);
+      onProgress(1, 1);
+      return { activity };
     }
 
     if (name === 'propose_activity') {
@@ -562,6 +611,15 @@ class MentorToolService {
       this.activityService?.mentorMoveCommitted(conversationId, requestId, result);
       onProgress(1, 1);
       return { move: result.state.history.at(-1), board: compactBoardState(result.state) };
+    }
+
+    if (name === 'play_physical_move') {
+      if (typeof args.uci !== 'string' || !MOVE_PATTERN.test(args.uci)) {
+        throw new Error('play_physical_move requires one valid UCI move.');
+      }
+      const result = await this.activityService.playPhysicalMove(conversationId, requestId, args.uci, { signal });
+      onProgress(1, 1);
+      return result;
     }
 
     if (name === 'play_line') {

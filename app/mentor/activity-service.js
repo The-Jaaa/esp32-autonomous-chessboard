@@ -17,7 +17,10 @@ const ACTIVITY_TOOL_NAMES = new Set([
   'request_prediction',
   'request_hint',
   'end_activity',
-  'resolve_opening_drill'
+  'resolve_opening_drill',
+  'pause_activity',
+  'resume_activity',
+  'confirm_physical_setup'
 ]);
 const READ_ONLY_TOOLS = new Set([
   'get_board_state',
@@ -87,6 +90,7 @@ class MentorActivityService {
     this.logger = logger;
     this.leaseOwner = `activity-service:${this.createId()}`;
     this.inFlight = new Map();
+    this.physicalInFlight = new Map();
     this.runners = {
       isLiveActive: () => false,
       text: null,
@@ -343,6 +347,7 @@ class MentorActivityService {
 
   async startActivity(conversationId, options = {}) {
     if (this.physicalCoordinator?.isAttached?.(conversationId)) {
+      if (options.type === 'practice_game') return this.startPhysicalPractice(conversationId, options);
       return this.startPhysicalOpening(conversationId, options);
     }
     if (options.type === 'practice_game') return this.startPractice(conversationId, options);
@@ -361,6 +366,75 @@ class MentorActivityService {
       });
     }
     return this.startCatalogActivity(conversationId, options);
+  }
+
+  startPhysicalPractice(conversationId, {
+    learnerColor,
+    opponentMode = 'mentor',
+    expectedRevision,
+    requestId = null
+  } = {}) {
+    if (!['mentor', 'stockfish'].includes(opponentMode)) {
+      throw new MentorActivityError('Opponent mode must be mentor or stockfish.', 'invalid_opponent_mode');
+    }
+    if (this.store.getActiveActivity(conversationId)) {
+      throw new MentorActivityError('End the current activity before starting another.', 'activity_already_active', 409);
+    }
+    const physical = this.physicalCoordinator.requirePracticeStartState(conversationId, expectedRevision);
+    const selectedColor = learnerColor || physical.physical.humanColor;
+    if (selectedColor !== physical.physical.humanColor) {
+      throw new MentorActivityError(
+        `This physical session is configured for Human ${physical.physical.humanColor}. Start a new game to change sides.`,
+        'physical_activity_color_mismatch',
+        409
+      );
+    }
+    const mentorColor = oppositeColor(selectedColor);
+    const mentorStarts = physical.turn !== colorCode(selectedColor);
+    const activity = this.store.createActivity({
+      conversationId,
+      type: 'practice_game',
+      title: opponentMode === 'mentor' ? 'Guided game with Gemini' : 'Guided game with Stockfish',
+      goal: opponentMode === 'mentor'
+        ? 'Play a complete physical game while Gemini follows and explains a coherent plan.'
+        : 'Play a complete physical game against Stockfish with direct coaching after each turn.',
+      learnerColor: selectedColor,
+      mentorColor,
+      startFen: physical.fen,
+      startRevision: physical.revision,
+      boardRevision: physical.revision,
+      phase: mentorStarts ? 'mentor_turn' : 'learner_turn',
+      config: {
+        boardSource: 'physical',
+        opponentMode,
+        movePolicy: opponentMode === 'mentor' ? 'teaching' : 'stockfish',
+        serverInstanceId: physical.physical.serverInstanceId,
+        sessionGeneration: physical.physical.sessionGeneration
+      },
+      state: {
+        completedMentorTurns: 0,
+        fallbackMoves: 0,
+        lastPhysicalMoveId: null,
+        strategicPlan: null,
+        narrationPending: false,
+        pauseReason: null,
+        requestId
+      }
+    });
+    this.record(activity, 'physical_practice_ready', {
+      opponentMode,
+      learnerColor: selectedColor,
+      phase: activity.phase,
+      fen: physical.fen
+    });
+    this.physicalCoordinator.syncPhysicalActivity(activity);
+    this.physicalCoordinator?.announcePhysicalPractice?.(activity);
+    if (mentorStarts && opponentMode === 'mentor') {
+      this.schedulePhysicalMentorTurn(conversationId, 'activity_started');
+    } else if (mentorStarts && opponentMode === 'stockfish') {
+      this.physicalCoordinator?.startStockfishTurn?.(conversationId, activity);
+    }
+    return this.get(conversationId);
   }
 
   startPhysicalOpening(conversationId, {
@@ -447,7 +521,13 @@ class MentorActivityService {
       stepIndex: activity.stepIndex,
       totalSteps: activity.totalSteps,
       expectedUci: activity.config.line?.[activity.stepIndex] || null,
-      expectedActor: activity.stepIndex % 2 === 0 ? 'learner' : 'mentor',
+      type: activity.type,
+      opponentMode: activity.config.opponentMode || null,
+      learnerColor: activity.learnerColor,
+      mentorColor: activity.mentorColor,
+      expectedActor: activity.type === 'practice_game'
+        ? (activity.phase === 'learner_turn' ? 'learner' : 'mentor')
+        : activity.stepIndex % 2 === 0 ? 'learner' : 'mentor',
       hints: activity.config.hints || [],
       attempts: activity.attempts,
       hintLevel: activity.hints,
@@ -461,8 +541,9 @@ class MentorActivityService {
     const activity = this.store.getActiveActivity(conversationId);
     if (!this.isPhysicalActivity(activity)) return null;
     if (activity.status !== 'active' || activity.phase !== 'learner_turn') {
-      throw new MentorActivityError('The opening drill is not waiting for a learner move.', 'activity_not_learner_turn', 409);
+      throw new MentorActivityError('The activity is not waiting for a learner move.', 'activity_not_learner_turn', 409);
     }
+    if (activity.type === 'practice_game') return activity;
     const expectedUci = activity.config.line?.[activity.stepIndex];
     if (uci !== expectedUci) {
       const updated = this.store.updateActivity(activity.id, { attempts: activity.attempts + 1 });
@@ -497,11 +578,19 @@ class MentorActivityService {
     const activity = this.store.getActiveActivity(conversationId);
     if (!this.isPhysicalActivity(activity) || !['active', 'paused'].includes(activity.status)) return null;
     if (moveId && activity.state.lastPhysicalMoveId === moveId) return this.get(conversationId);
-    const expectedActor = activity.stepIndex % 2 === 0 ? 'learner' : 'mentor';
+    const expectedActor = activity.type === 'practice_game'
+      ? (activity.phase === 'learner_turn' ? 'learner' : 'mentor')
+      : activity.stepIndex % 2 === 0 ? 'learner' : 'mentor';
     const actor = side === 'human' ? 'learner' : 'mentor';
     const expectedUci = activity.config.line?.[activity.stepIndex];
-    if (activity.status !== 'active' || actor !== expectedActor || uci !== expectedUci) {
-      throw new MentorActivityError('The verified physical move does not match the active opening step.', 'physical_activity_move_mismatch', 409);
+    if (activity.status !== 'active' || actor !== expectedActor
+      || (activity.type !== 'practice_game' && uci !== expectedUci)) {
+      throw new MentorActivityError('The verified physical move does not match the active activity turn.', 'physical_activity_move_mismatch', 409);
+    }
+    if (activity.type === 'practice_game') {
+      return this.physicalPracticeMoveCommitted(activity, {
+        actor, side, uci, san, revision, moveId, gameStatus
+      });
     }
     const nextStep = activity.stepIndex + 1;
     const nextState = {
@@ -550,6 +639,37 @@ class MentorActivityService {
     });
     this.physicalCoordinator?.syncPhysicalActivity?.(updated);
     return this.get(conversationId);
+  }
+
+  physicalPracticeMoveCommitted(activity, { actor, side, uci, san, revision, moveId, gameStatus }) {
+    const nextState = {
+      ...activity.state,
+      lastPhysicalMoveId: moveId || `${side}:${uci}:${revision}`,
+      completedMentorTurns: Number(activity.state.completedMentorTurns || 0) + (actor === 'mentor' ? 1 : 0),
+      pauseReason: null,
+      narrationPending: actor === 'mentor'
+    };
+    const physicalGameOver = Boolean(gameStatus?.isGameOver || gameStatus?.checkmate || gameStatus?.draw);
+    const updated = this.store.updateActivity(activity.id, {
+      status: physicalGameOver ? 'complete' : 'active',
+      phase: physicalGameOver ? 'game_over' : actor === 'learner' ? 'mentor_turn' : 'learner_turn',
+      boardRevision: Number.isInteger(revision) ? revision : activity.boardRevision,
+      pendingRequestId: null,
+      state: nextState,
+      ...(physicalGameOver ? { completedAt: Date.now() } : {})
+    });
+    this.record(updated, physicalGameOver
+      ? 'physical_game_over'
+      : actor === 'learner' ? 'physical_learner_move' : 'physical_mentor_move', {
+      move: { uci, san, side },
+      gameStatus,
+      opponentMode: activity.config.opponentMode
+    });
+    this.physicalCoordinator?.syncPhysicalActivity?.(updated);
+    if (!physicalGameOver && actor === 'learner' && activity.config.opponentMode === 'mentor') {
+      this.schedulePhysicalMentorTurn(activity.conversationId, 'learner_move');
+    }
+    return this.get(activity.conversationId);
   }
 
   markPhysicalRouteBlocked(conversationId, details = {}) {
@@ -758,6 +878,10 @@ class MentorActivityService {
       });
       this.record(updated, 'resumed', { phase });
       this.physicalCoordinator?.syncPhysicalActivity?.(updated);
+      if (updated.type === 'practice_game' && updated.config.opponentMode === 'mentor'
+        && phase === 'mentor_turn') {
+        this.schedulePhysicalMentorTurn(conversationId, 'activity_resumed');
+      }
       return this.get(conversationId);
     }
     const board = this.chessService.getState(conversationId);
@@ -907,6 +1031,9 @@ class MentorActivityService {
     const activity = this.store.getActiveActivity(conversationId);
     if (!activity || !ACTIVE_STATUSES.has(activity.status)) return null;
     if (READ_ONLY_TOOLS.has(name) && name !== 'request_prediction') return activity;
+    if (this.isPhysicalActivity(activity) && name === 'play_physical_move') {
+      return this.validatePhysicalMentorMove(conversationId, requestId, activity, args.uci);
+    }
     if (name !== 'play_move') {
       throw new MentorActivityError(
         `${name} is unavailable while ${activity.title} is active. End the activity first.`,
@@ -932,6 +1059,64 @@ class MentorActivityService {
       this.assertTeachingCandidate(conversationId, requestId, activity, args.uci);
     }
     return activity;
+  }
+
+  validatePhysicalMentorMove(conversationId, requestId, activity, uci) {
+    if (activity.type !== 'practice_game' || activity.config.opponentMode !== 'mentor') {
+      throw new MentorActivityError('Gemini move selection is unavailable for this physical activity.', 'physical_mentor_move_unavailable', 409);
+    }
+    if (activity.status !== 'active' || activity.phase !== 'mentor_thinking'
+      || activity.pendingRequestId !== requestId) {
+      throw new MentorActivityError('The mentor cannot move outside its assigned physical turn.', 'activity_not_mentor_turn', 409);
+    }
+    const board = this.physicalCoordinator.requireCurrentPhysicalState(conversationId);
+    if (board.turn !== colorCode(activity.mentorColor) || !board.legalMoves.includes(uci)) {
+      throw new MentorActivityError(`The mentor controls ${activity.mentorColor} and must choose a legal move.`, 'activity_wrong_color', 409);
+    }
+    if (board.legalMoves.length > 1) {
+      this.assertPhysicalTeachingCandidate(conversationId, requestId, activity, uci);
+    }
+    return activity;
+  }
+
+  assertPhysicalTeachingCandidate(conversationId, requestId, activity, uci) {
+    const analysisCall = this.store.listToolCallsForRequest(conversationId, requestId)
+      .filter((call) => call.name === 'analyze_position' && call.status === 'complete'
+        && call.result?.analyzedRevision === activity.boardRevision)
+      .at(-1);
+    if (!analysisCall) {
+      throw new MentorActivityError('Analyze the current physical position before choosing the mentor move.', 'practice_analysis_required', 409);
+    }
+    const lines = analysisCall.result?.lines || [];
+    const candidate = lines.find((line) => line.move === uci);
+    const best = lines[0];
+    if (!candidate || !best || lines.slice(0, 3).every((line) => line.move !== uci)) {
+      throw new MentorActivityError('Choose one of Stockfish\'s top three verified physical candidates.', 'practice_move_not_grounded', 409);
+    }
+    if (best.score?.type === 'mate' && candidate.move !== best.move) {
+      throw new MentorActivityError('A forced mate is available; preserve the strongest mating line.', 'practice_mate_required', 409);
+    }
+    if (best.score?.type === 'cp' && candidate.score?.type === 'cp') {
+      const bestValue = scoreForSide(best.score, activity.mentorColor);
+      const candidateValue = scoreForSide(candidate.score, activity.mentorColor);
+      if (bestValue - candidateValue > 50) {
+        throw new MentorActivityError('That move is more than 50 centipawns below the verified best move.', 'practice_move_too_weak', 409);
+      }
+    }
+  }
+
+  async playPhysicalMove(conversationId, requestId, uci, { signal } = {}) {
+    const activity = this.store.getActiveActivity(conversationId);
+    this.validatePhysicalMentorMove(conversationId, requestId, activity, uci);
+    const result = await this.physicalCoordinator.playPhysicalMove(conversationId, {
+      activityId: activity.id,
+      generation: activity.generation,
+      requestId,
+      uci,
+      expectedRevision: activity.boardRevision,
+      signal
+    });
+    return { result, activity: this.get(conversationId) };
   }
 
   assertTeachingCandidate(conversationId, requestId, activity, uci) {
@@ -1069,6 +1254,122 @@ class MentorActivityService {
       .finally(() => this.inFlight.delete(conversationId));
     this.inFlight.set(conversationId, promise);
     return promise;
+  }
+
+  schedulePhysicalMentorTurn(conversationId, reason) {
+    if (this.physicalInFlight.has(conversationId)) return this.physicalInFlight.get(conversationId);
+    const promise = this.executePhysicalMentorTurn(conversationId, reason)
+      .catch((error) => {
+        this.logger.error?.('[MENTOR_PHYSICAL_ACTIVITY_TURN_FAILED]', JSON.stringify({
+          conversationId,
+          error: error.message,
+          stack: error.stack
+        }));
+        const activity = this.store.getActiveActivity(conversationId);
+        if (activity?.status === 'active' && activity.phase === 'mentor_thinking') {
+          this.pause(conversationId, 'mentor_turn_failed');
+        }
+      })
+      .finally(() => this.physicalInFlight.delete(conversationId));
+    this.physicalInFlight.set(conversationId, promise);
+    return promise;
+  }
+
+  physicalActivityPrompt(activity, board, { corrective = false } = {}) {
+    return [
+      '[MENTOR_PHYSICAL_ACTIVITY_TURN]',
+      corrective
+        ? 'Your previous response analyzed the physical position but did not make the required move.'
+        : `The learner completed a physical move. It is now your ${activity.mentorColor} turn.`,
+      `Activity: ${activity.title}. Learner: ${activity.learnerColor}. Mentor: ${activity.mentorColor}.`,
+      `Authoritative physical revision: ${board.revision}. FEN: ${board.fen}`,
+      activity.state.strategicPlan ? `Continue this strategic plan: ${activity.state.strategicPlan}` : 'Choose a coherent teaching plan and retain it across turns.',
+      'Call analyze_position in quick mode, then call play_physical_move exactly once with a top-three move no more than 50 centipawns below the best.',
+      'Forced mates and materially superior moves take priority over teaching flexibility.',
+      'Do not finish with analysis alone. Do not describe raw motors, paths, magnets, or sensors.',
+      'After verification, explain the learner move, your reply, and the current plan directly and without praise padding.'
+    ].join('\n');
+  }
+
+  async runPhysicalGeneratedTurn(conversationId, activity, board, requestId, corrective) {
+    const displayText = corrective ? 'Mentor is completing its physical move.' : 'Mentor is choosing a physical reply.';
+    const prompt = this.physicalActivityPrompt(activity, board, { corrective });
+    const useLive = this.runners.isLiveActive(conversationId) && this.runners.live;
+    const pair = useLive
+      ? this.runners.live({ conversationId, requestId, displayText, prompt, timeoutMs: 15000 })
+      : this.runners.text?.({ conversationId, requestId, displayText, prompt, timeoutMs: 15000 });
+    if (!pair) throw new MentorActivityError('No mentor response runner is available.', 'activity_runner_unavailable', 503);
+    return pair.completion ? pair.completion : pair;
+  }
+
+  async executePhysicalMentorTurn(conversationId, reason) {
+    let activity = this.store.getActiveActivity(conversationId);
+    if (!this.isPhysicalActivity(activity) || activity.type !== 'practice_game'
+      || activity.config.opponentMode !== 'mentor' || activity.status !== 'active'
+      || !['mentor_turn', 'mentor_thinking'].includes(activity.phase)) return;
+    const leased = this.store.claimActivityLease(activity.id, this.leaseOwner, 15000);
+    if (!leased) return;
+    activity = leased;
+    try {
+      let board = this.physicalCoordinator.requireCurrentPhysicalState(conversationId);
+      if (board.gameStatus.isGameOver) {
+        this.end(conversationId, 'game_over');
+        return;
+      }
+      if (board.turn !== colorCode(activity.mentorColor)) {
+        throw new MentorActivityError('The physical activity turn does not match the board.', 'activity_turn_mismatch', 409);
+      }
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        activity = this.store.getActiveActivity(conversationId);
+        if (!activity || activity.status !== 'active') return;
+        board = this.physicalCoordinator.requireCurrentPhysicalState(conversationId);
+        const requestId = `physical-activity:${activity.id}:${activity.generation + 1}:${board.revision}:${attempt}`;
+        activity = this.store.updateActivity(activity.id, {
+          phase: 'mentor_thinking',
+          boardRevision: board.revision,
+          pendingRequestId: requestId,
+          generation: activity.generation + 1
+        });
+        this.physicalCoordinator?.syncPhysicalActivity?.(activity);
+        this.record(activity, attempt === 0 ? 'physical_mentor_turn_started' : 'physical_mentor_turn_corrective', {
+          requestId, reason, revision: board.revision
+        });
+        const completion = await this.runPhysicalGeneratedTurn(conversationId, activity, board, requestId, attempt === 1);
+        const current = this.store.getActiveActivity(conversationId);
+        if (!current || current.status !== 'active' || current.phase === 'learner_turn') return;
+        if (completion?.status === 'cancelled') {
+          this.pause(conversationId, 'response_stopped');
+          return;
+        }
+      }
+      await this.executePhysicalFallback(conversationId);
+    } finally {
+      this.store.releaseActivityLease(activity.id, this.leaseOwner);
+    }
+  }
+
+  async executePhysicalFallback(conversationId) {
+    const activity = this.store.getActiveActivity(conversationId);
+    if (!activity || activity.status !== 'active' || activity.phase !== 'mentor_thinking') return;
+    const analysis = await this.physicalCoordinator.analyzePosition(conversationId, { mode: 'quick' });
+    const uci = analysis?.bestMove?.uci;
+    if (!uci) throw new MentorActivityError('Stockfish returned no physical fallback move.', 'activity_fallback_unavailable', 503);
+    const requestId = activity.pendingRequestId;
+    await this.physicalCoordinator.playPhysicalMove(conversationId, {
+      activityId: activity.id,
+      generation: activity.generation,
+      requestId,
+      uci,
+      expectedRevision: activity.boardRevision,
+      fallback: true
+    });
+    const current = this.store.getActiveActivity(conversationId);
+    if (current) {
+      const updated = this.store.updateActivity(current.id, {
+        state: { ...current.state, fallbackMoves: Number(current.state.fallbackMoves || 0) + 1 }
+      });
+      this.record(updated, 'physical_engine_fallback', { uci, reason: 'Gemini omitted a verified move after one corrective turn.' });
+    }
   }
 
   activityPrompt(activity, board, { corrective = false } = {}) {

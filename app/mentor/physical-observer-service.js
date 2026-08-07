@@ -18,6 +18,10 @@ const PHYSICAL_READ_TOOLS = new Set([
   'annotate_board',
   'get_activity_state',
   'start_activity',
+  'play_physical_move',
+  'pause_activity',
+  'resume_activity',
+  'confirm_physical_setup',
   'request_hint',
   'end_activity',
   'resolve_opening_drill'
@@ -365,6 +369,46 @@ class MentorPhysicalObserverService {
     return state;
   }
 
+  requirePracticeStartState(conversationId, expectedRevision) {
+    const state = this.getState(conversationId);
+    const physical = state.physical;
+    if (Number(expectedRevision) !== state.revision) {
+      throw new MentorPhysicalError('The physical board changed before the game started.', 'stale_revision', 409, { state });
+    }
+    if (!physical.board?.ready || physical.robotBusy || physical.pendingRobotJob
+      || physical.pendingUndo || physical.pendingRedo || physical.pendingPromotion
+      || !['ready', 'game_over'].includes(physical.phase)) {
+      throw new MentorPhysicalError(
+        'The physical board must be synchronized and idle before guided play starts.',
+        'physical_practice_setup_required',
+        409,
+        { state }
+      );
+    }
+    if (state.gameStatus.isGameOver) {
+      throw new MentorPhysicalError('Start a new physical game before guided play.', 'terminal_position', 409, { state });
+    }
+    return state;
+  }
+
+  playPhysicalMove(conversationId, options) {
+    const state = this.getState(conversationId);
+    if (Number(options.expectedRevision) !== state.revision) {
+      throw new MentorPhysicalError('The physical board changed before the mentor move was queued.', 'stale_revision', 409, { state });
+    }
+    return this.adapter?.playActivityMove?.(options)
+      || Promise.reject(new MentorPhysicalError('Physical mentor move execution is unavailable.', 'physical_move_unavailable', 503));
+  }
+
+  startStockfishTurn(conversationId, activity) {
+    this.requireCurrentBinding(conversationId);
+    return this.adapter?.startActivityStockfishTurn?.({
+      activityId: activity.id,
+      generation: activity.generation,
+      expectedRevision: activity.boardRevision
+    }) || null;
+  }
+
   syncPhysicalActivity(activity) {
     if (!activity || activity.config?.boardSource !== 'physical') {
       this.adapter?.setOpeningDrill?.(null);
@@ -428,6 +472,84 @@ class MentorPhysicalObserverService {
       conversation
     });
     return pair;
+  }
+
+  announcePhysicalPractice(activity) {
+    if (!activity || activity.config?.boardSource !== 'physical' || activity.type !== 'practice_game') return null;
+    const mode = activity.config.opponentMode === 'mentor' ? 'Mentor-led' : 'Stockfish-led';
+    const reply = activity.config.opponentMode === 'mentor'
+      ? `The ${mode} game is ready. You are ${activity.learnerColor}. I will choose verified replies, explain my plan directly, and tell you plainly when a move is weak.`
+      : `The ${mode} game is ready. You are ${activity.learnerColor}. Stockfish will play the opponent moves, and I will explain each completed turn directly.`;
+    const requestId = `physical-practice-start:${activity.id}:${activity.generation}`;
+    const live = this.liveService?.requestPhysicalTurn(activity.conversationId, {
+      requestId,
+      displayText: `${mode} physical game started.`,
+      prompt: `[PHYSICAL_PRACTICE_START]\n${reply}\nUse two concise spoken sentences. Do not call tools.`,
+      urgent: false,
+      fallbackAssistantText: reply,
+      timeoutMs: 30000,
+      queueKey: 'physical-practice'
+    });
+    if (live) return live;
+    return this.persistCoachingMessage(activity.conversationId, requestId, `${mode} physical game started.`, reply);
+  }
+
+  processPhysicalPracticeGuidance(conversationId, snapshot, event) {
+    if (event !== 'physical-move' || snapshot.side !== 'engine' || !snapshot.verified) return;
+    const activity = this.activityService?.get?.(conversationId);
+    if (activity?.config?.boardSource !== 'physical' || activity.type !== 'practice_game'
+      || activity.config.opponentMode !== 'stockfish') return;
+    const humanMove = [...(snapshot.moveLog || snapshot.physicalMoveLog || [])]
+      .reverse()
+      .find((move) => move.side === 'human');
+    if (!humanMove) return;
+    const expectedFen = snapshot.fen;
+    const expectedRevision = Number(snapshot.stateRevision || 0);
+    const requestId = `physical-practice-turn:${activity.id}:${humanMove.id}:${snapshot.lastMove?.at || expectedRevision}`;
+    const timer = setTimeout(async () => {
+      const current = this.snapshot;
+      if (!current?.board?.ready || current.fen !== expectedFen
+        || Number(current.stateRevision || 0) !== expectedRevision
+        || current.phase !== 'ready') return;
+      let analysis = null;
+      try {
+        analysis = await this.analyzeMove(conversationId, { mode: 'quick' });
+      } catch {
+        // The fallback still gives a concise turn summary when engine analysis is unavailable.
+      }
+      const classification = analysis?.classification || 'unclassified';
+      const best = analysis?.bestAlternative?.san || analysis?.before?.bestMove?.san || analysis?.before?.bestMove?.uci || null;
+      const fallback = ['inaccuracy', 'mistake', 'blunder'].includes(classification)
+        ? `${humanMove.san || humanMove.uci} was a ${classification}.${best ? ` ${best} was stronger.` : ''} The consequence is visible in the opponent's reply; address that before starting another plan.`
+        : `Turn complete. ${humanMove.san || humanMove.uci} was ${classification}.${best ? ` The main alternative was ${best}.` : ''} Now compare piece activity, king safety, and the next forcing move.`;
+      const prompt = [
+        '[PHYSICAL_PRACTICE_TURN]',
+        `Learner move: ${humanMove.uci} (${humanMove.san || humanMove.uci})`,
+        `Classification: ${classification}`,
+        `Centipawn loss: ${analysis?.centipawnLoss ?? 'unavailable'}`,
+        `Best alternative: ${best || 'unavailable'}`,
+        `Opponent reply: ${snapshot.san || snapshot.move}`,
+        `Activity goal: ${activity.goal}`,
+        'Explain the learner move, the opponent reply, and the current plan in two or three concise spoken sentences.',
+        'Be blunt but respectful. State mistakes plainly, explain the concrete consequence, and give the correction without praise padding. Do not call tools.'
+      ].join('\n');
+      try {
+        const live = this.liveService?.requestPhysicalTurn(conversationId, {
+          requestId,
+          displayText: `Turn complete after ${humanMove.san || humanMove.uci}.`,
+          prompt,
+          urgent: false,
+          fallbackAssistantText: fallback,
+          timeoutMs: 30000,
+          queueKey: 'physical-practice'
+        });
+        if (live) return;
+      } catch {
+        // Persist the deterministic explanation below.
+      }
+      this.persistCoachingMessage(conversationId, requestId, `Turn complete after ${humanMove.san || humanMove.uci}.`, fallback);
+    }, this.coachingDelayMs);
+    timer.unref?.();
   }
 
   retryPhysicalOpening(conversationId) {
@@ -775,12 +897,17 @@ class MentorPhysicalObserverService {
       .join(', ');
     const openingContext = activity?.config?.boardSource === 'physical'
       ? [
-          `Active physical opening drill: ${activity.title}`,
-          `Opening goal: ${activity.goal}`,
-          `Opening step: ${Math.min(activity.stepIndex + 1, activity.totalSteps)} of ${activity.totalSteps}`,
-          `Required next move: ${activity.config.line?.[activity.stepIndex] || '(line complete)'}`,
-          `Required actor: ${activity.stepIndex % 2 === 0 ? 'learner' : 'mentor robot'}`,
-          'The opening coordinator, not Gemini, enforces and executes the reviewed line.'
+          `Active physical activity: ${activity.title} (${activity.type})`,
+          `Activity goal: ${activity.goal}`,
+          activity.type === 'practice_game'
+            ? `Opponent mode: ${activity.config.opponentMode}. Current activity phase: ${activity.phase}.`
+            : `Opening step: ${Math.min(activity.stepIndex + 1, activity.totalSteps)} of ${activity.totalSteps}`,
+          activity.type === 'practice_game'
+            ? `Strategic plan: ${activity.state?.strategicPlan || '(not set yet)'}`
+            : `Required next move: ${activity.config.line?.[activity.stepIndex] || '(line complete)'}`,
+          activity.type === 'practice_game'
+            ? 'In mentor mode, use Stockfish evidence and play_physical_move on the assigned turn. In Stockfish mode, the backend chooses the robot move.'
+            : 'The opening coordinator enforces and executes the reviewed line.'
         ]
       : [];
     return [
@@ -799,9 +926,11 @@ class MentorPhysicalObserverService {
       `Robot busy: ${physical.robotBusy ? 'yes' : 'no'}`,
       ...openingContext,
       `Reviewed physical opening drills: ${reviewedOpenings}`,
-      'You may analyze or annotate this position, but you cannot move, reset, load, demonstrate, or otherwise control the physical board.',
+      activity?.type === 'practice_game' && activity.config?.opponentMode === 'mentor'
+        ? 'During your assigned mentor turn, you may use play_physical_move after Stockfish verification. You cannot access motors, routes, magnets, or command queues.'
+        : 'You may analyze or annotate this position, but you cannot directly move, reset, load, or demonstrate on the physical board.',
       'You may start and guide a reviewed physical opening drill only when the board is at the exact standard starting position.',
-      'Never say that you played a physical move. The backend robot chooses and executes the opponent moves.'
+      'Never claim a physical move succeeded until its tool result confirms exact hardware verification.'
     ].join('\n');
   }
 
@@ -1086,6 +1215,7 @@ class MentorPhysicalObserverService {
     }
     this.processGuidance(binding.conversationId, snapshot, updated);
     this.processOpeningGuidance(binding.conversationId, snapshot, event);
+    this.processPhysicalPracticeGuidance(binding.conversationId, snapshot, event);
     if (event === 'physical-move' && snapshot.side === 'engine' && snapshot.verified) {
       this.scheduleSelectiveCoaching(binding.conversationId, snapshot);
     }
