@@ -57,6 +57,23 @@ function moveColor(fen, uci) {
   return piece?.color || null;
 }
 
+function scriptedActor(activity, stepIndex = activity.stepIndex) {
+  const startsWhite = String(activity.startFen || STANDARD_FEN).split(/\s+/)[1] !== 'b';
+  const moveIsWhite = stepIndex % 2 === 0 ? startsWhite : !startsWhite;
+  const moveColorName = moveIsWhite ? 'white' : 'black';
+  return moveColorName === activity.learnerColor ? 'learner' : 'mentor';
+}
+
+function pieceChecklist(fen) {
+  const game = new Chess(fen);
+  const names = { p: 'pawn', n: 'knight', b: 'bishop', r: 'rook', q: 'queen', k: 'king' };
+  return game.board().flat().filter(Boolean).map((piece) => ({
+    square: piece.square,
+    color: piece.color === 'w' ? 'white' : 'black',
+    piece: names[piece.type]
+  })).sort((left, right) => left.square.localeCompare(right.square));
+}
+
 function activitySummary(activity, events = []) {
   if (!activity) return null;
   return { ...activity, events };
@@ -348,6 +365,7 @@ class MentorActivityService {
   async startActivity(conversationId, options = {}) {
     if (this.physicalCoordinator?.isAttached?.(conversationId)) {
       if (options.type === 'practice_game') return this.startPhysicalPractice(conversationId, options);
+      if (options.type === 'puzzle') return this.startPhysicalPuzzle(conversationId, options);
       return this.startPhysicalOpening(conversationId, options);
     }
     if (options.type === 'practice_game') return this.startPractice(conversationId, options);
@@ -429,9 +447,9 @@ class MentorActivityService {
     });
     this.physicalCoordinator.syncPhysicalActivity(activity);
     this.physicalCoordinator?.announcePhysicalPractice?.(activity);
-    if (mentorStarts && opponentMode === 'mentor') {
+    if (mentorStarts && physical.physical.phase === 'ready' && opponentMode === 'mentor') {
       this.schedulePhysicalMentorTurn(conversationId, 'activity_started');
-    } else if (mentorStarts && opponentMode === 'stockfish') {
+    } else if (mentorStarts && physical.physical.phase === 'ready' && opponentMode === 'stockfish') {
       this.physicalCoordinator?.startStockfishTurn?.(conversationId, activity);
     }
     return this.get(conversationId);
@@ -456,25 +474,33 @@ class MentorActivityService {
     if (!item || item.type !== 'opening_drill' || !item.supportsPhysical) {
       throw new MentorActivityError('Reviewed physical opening drill not found.', 'activity_source_not_found', 404);
     }
-    if (learnerColor !== 'white') {
-      throw new MentorActivityError('Physical opening drills currently use Human White.', 'physical_activity_white_only', 409);
-    }
     if (this.store.getActiveActivity(conversationId)) {
       throw new MentorActivityError('End the current activity before starting another.', 'activity_already_active', 409);
     }
     const physical = this.physicalCoordinator.requireOpeningStartState(conversationId, expectedRevision);
+    if (!['white', 'black'].includes(learnerColor)) {
+      throw new MentorActivityError('Learner color must be white or black.', 'invalid_learner_color');
+    }
+    if (physical.physical.humanColor !== learnerColor) {
+      throw new MentorActivityError(
+        `This physical session is configured for Human ${physical.physical.humanColor}. Start a new game to practice as ${learnerColor}.`,
+        'physical_activity_color_mismatch',
+        409
+      );
+    }
+    const firstActor = learnerColor === 'white' ? 'learner' : 'mentor';
     const activity = this.store.createActivity({
       conversationId,
       type: 'opening_drill',
       title: item.title,
       goal: item.goal,
-      learnerColor: 'white',
-      mentorColor: 'black',
+      learnerColor,
+      mentorColor: oppositeColor(learnerColor),
       sourceId: item.id,
       startFen: item.initialFen,
       startRevision: physical.revision,
       boardRevision: physical.revision,
-      phase: 'learner_turn',
+      phase: firstActor === 'learner' ? 'learner_turn' : 'mentor_turn',
       totalSteps: item.line.length,
       config: {
         line: item.line,
@@ -504,6 +530,114 @@ class MentorActivityService {
     });
     this.physicalCoordinator.syncPhysicalActivity(activity);
     this.physicalCoordinator?.announcePhysicalOpening?.(activity);
+    if (firstActor === 'mentor' && physical.physical.phase === 'ready') {
+      this.physicalCoordinator?.startScriptedTurn?.(conversationId, activity);
+    }
+    return this.get(conversationId);
+  }
+
+  startPhysicalPuzzle(conversationId, {
+    sourceId = null,
+    expectedRevision,
+    requestId = null
+  } = {}) {
+    if (this.store.getActiveActivity(conversationId)) {
+      throw new MentorActivityError('End the current activity before starting another.', 'activity_already_active', 409);
+    }
+    const current = this.physicalCoordinator.requireCurrentPhysicalState(conversationId);
+    if (Number(expectedRevision) !== current.revision) {
+      throw new MentorActivityError('The physical board changed before the puzzle started.', 'stale_revision', 409);
+    }
+    const level = Number(current.physical.configuredLevel || 1);
+    const band = level <= 5 ? 'beginner' : level <= 10 ? 'intermediate' : 'advanced';
+    const candidates = listCatalog('puzzle').filter((item) => item.supportsPhysical && item.difficultyBand === band);
+    const selectedId = sourceId || candidates[0]?.id;
+    const item = getCatalogItem(selectedId);
+    if (!item || item.type !== 'puzzle' || !item.supportsPhysical) {
+      throw new MentorActivityError('Reviewed physical puzzle not found.', 'activity_source_not_found', 404);
+    }
+    const learnerColor = item.fixedLearnerColor || (new Chess(item.initialFen).turn() === 'w' ? 'white' : 'black');
+    const prepared = this.physicalCoordinator.preparePhysicalPuzzle(conversationId, {
+      fen: item.initialFen,
+      learnerColor,
+      expectedRevision
+    });
+    const activity = this.store.createActivity({
+      conversationId,
+      type: 'puzzle',
+      title: item.title,
+      goal: item.goal,
+      learnerColor,
+      mentorColor: oppositeColor(learnerColor),
+      sourceId: item.id,
+      startFen: item.initialFen,
+      startRevision: prepared.revision,
+      boardRevision: prepared.revision,
+      phase: 'paused',
+      totalSteps: item.line.length,
+      config: {
+        line: item.line,
+        hints: item.hints || [],
+        topic: item.topic,
+        difficultyBand: item.difficultyBand,
+        curated: true,
+        boardSource: 'physical',
+        setupChecklist: pieceChecklist(item.initialFen),
+        serverInstanceId: prepared.physical.serverInstanceId,
+        sessionGeneration: prepared.physical.sessionGeneration
+      },
+      state: {
+        setupConfirmed: false,
+        setupOccupancyReady: false,
+        lastPhysicalMoveId: null,
+        lastHint: null,
+        pauseReason: 'puzzle_setup',
+        requestId
+      }
+    });
+    this.record(activity, 'physical_puzzle_setup_started', {
+      sourceId: item.id,
+      difficultyBand: item.difficultyBand,
+      learnerColor,
+      setupChecklist: activity.config.setupChecklist
+    });
+    this.physicalCoordinator.syncPhysicalActivity(activity);
+    this.physicalCoordinator?.announcePhysicalPuzzleSetup?.(activity);
+    return this.get(conversationId);
+  }
+
+  confirmPhysicalSetup(conversationId, requestId = null) {
+    const activity = this.store.getActiveActivity(conversationId);
+    if (!this.isPhysicalActivity(activity) || activity.type !== 'puzzle'
+      || activity.state.pauseReason !== 'puzzle_setup') {
+      throw new MentorActivityError('No physical puzzle setup is waiting for confirmation.', 'physical_setup_not_pending', 409);
+    }
+    if (requestId) {
+      const userText = this.store.getRequestMessages(conversationId, requestId)
+        .find((message) => message.role === 'user')?.content || '';
+      if (!/\b(confirm(?:ed)?|ready|done|correct|set up|setup|yes)\b/i.test(userText)) {
+        throw new MentorActivityError(
+          'Ask the learner to explicitly confirm that the listed physical pieces are correct.',
+          'physical_setup_confirmation_required',
+          409
+        );
+      }
+    }
+    const physical = this.physicalCoordinator.confirmPhysicalPuzzleSetup(conversationId, activity);
+    const firstActor = scriptedActor(activity, 0);
+    const updated = this.store.updateActivity(activity.id, {
+      phase: firstActor === 'learner' ? 'learner_turn' : 'mentor_turn',
+      boardRevision: physical.revision,
+      status: 'active',
+      state: { ...activity.state, setupConfirmed: true, setupOccupancyReady: true, pauseReason: null }
+    });
+    this.record(updated, 'physical_puzzle_setup_confirmed', {
+      revision: physical.revision,
+      firstActor,
+      expectedUci: updated.config.line[0]
+    });
+    this.physicalCoordinator.syncPhysicalActivity(updated);
+    if (firstActor === 'mentor') this.physicalCoordinator?.startScriptedTurn?.(conversationId, updated);
     return this.get(conversationId);
   }
 
@@ -525,9 +659,11 @@ class MentorActivityService {
       opponentMode: activity.config.opponentMode || null,
       learnerColor: activity.learnerColor,
       mentorColor: activity.mentorColor,
-      expectedActor: activity.type === 'practice_game'
+      expectedActor: activity.state?.pauseReason === 'puzzle_setup'
+        ? 'setup'
+        : activity.type === 'practice_game'
         ? (activity.phase === 'learner_turn' ? 'learner' : 'mentor')
-        : activity.stepIndex % 2 === 0 ? 'learner' : 'mentor',
+        : scriptedActor(activity),
       hints: activity.config.hints || [],
       attempts: activity.attempts,
       hintLevel: activity.hints,
@@ -580,7 +716,7 @@ class MentorActivityService {
     if (moveId && activity.state.lastPhysicalMoveId === moveId) return this.get(conversationId);
     const expectedActor = activity.type === 'practice_game'
       ? (activity.phase === 'learner_turn' ? 'learner' : 'mentor')
-      : activity.stepIndex % 2 === 0 ? 'learner' : 'mentor';
+      : scriptedActor(activity);
     const actor = side === 'human' ? 'learner' : 'mentor';
     const expectedUci = activity.config.line?.[activity.stepIndex];
     if (activity.status !== 'active' || actor !== expectedActor
@@ -602,15 +738,18 @@ class MentorActivityService {
     };
     const physicalGameOver = Boolean(gameStatus?.isGameOver || gameStatus?.checkmate || gameStatus?.draw);
     if (nextStep >= activity.totalSteps || physicalGameOver) {
+      const puzzleComplete = activity.type === 'puzzle';
       const updated = this.store.updateActivity(activity.id, {
-        status: 'paused',
-        phase: 'paused',
+        status: puzzleComplete ? 'complete' : 'paused',
+        phase: puzzleComplete ? 'complete' : 'paused',
         stepIndex: nextStep,
         boardRevision: Number.isInteger(revision) ? revision : activity.boardRevision,
         pendingRequestId: null,
-        state: { ...nextState, pauseReason: 'line_complete' }
+        state: { ...nextState, pauseReason: puzzleComplete ? null : 'line_complete' },
+        ...(puzzleComplete ? { completedAt: Date.now() } : {})
       });
-      this.record(updated, physicalGameOver ? 'physical_game_over' : 'physical_line_complete', {
+      this.record(updated, physicalGameOver ? 'physical_game_over'
+        : puzzleComplete ? 'physical_puzzle_complete' : 'physical_line_complete', {
         move: { uci, san, side },
         gameStatus
       });
@@ -623,7 +762,7 @@ class MentorActivityService {
       this.physicalCoordinator?.syncPhysicalActivity?.(updated);
       return this.get(conversationId);
     }
-    const nextActor = nextStep % 2 === 0 ? 'learner' : 'mentor';
+    const nextActor = scriptedActor(activity, nextStep);
     const updated = this.store.updateActivity(activity.id, {
       stepIndex: nextStep,
       phase: nextActor === 'learner' ? 'learner_turn' : 'mentor_turn',
@@ -704,9 +843,10 @@ class MentorActivityService {
   completePhysicalRepeat(conversationId, revision) {
     const activity = this.store.getActiveActivity(conversationId);
     if (!this.isPhysicalActivity(activity) || activity.state.pauseReason !== 'repeat_restore') return null;
+    const firstActor = scriptedActor(activity, 0);
     const updated = this.store.updateActivity(activity.id, {
       status: 'active',
-      phase: 'learner_turn',
+      phase: firstActor === 'learner' ? 'learner_turn' : 'mentor_turn',
       stepIndex: 0,
       attempts: 0,
       hints: 0,
@@ -723,6 +863,7 @@ class MentorActivityService {
     });
     this.record(updated, 'physical_repeat_ready', { expectedUci: activity.config.line[0] });
     this.physicalCoordinator?.syncPhysicalActivity?.(updated);
+    if (firstActor === 'mentor') this.physicalCoordinator?.startScriptedTurn?.(conversationId, updated);
     return this.get(conversationId);
   }
 
@@ -865,7 +1006,7 @@ class MentorActivityService {
     if (!activity) throw new MentorActivityError('No paused activity was found.', 'activity_not_found', 404);
     if (activity.status !== 'paused') return this.get(conversationId);
     if (this.isPhysicalActivity(activity)) {
-      if (['line_complete', 'repeat_restore', 'route_blocked'].includes(activity.state.pauseReason)) {
+      if (['line_complete', 'repeat_restore', 'route_blocked', 'puzzle_setup'].includes(activity.state.pauseReason)) {
         throw new MentorActivityError('Use the opening drill action controls for this paused state.', 'physical_opening_action_required', 409);
       }
       const phase = activity.state.pausedFromPhase || 'learner_turn';
@@ -1331,6 +1472,10 @@ class MentorActivityService {
           generation: activity.generation + 1
         });
         this.physicalCoordinator?.syncPhysicalActivity?.(activity);
+        const synchronized = this.physicalCoordinator.requireCurrentPhysicalState(conversationId);
+        if (synchronized.revision !== activity.boardRevision) {
+          activity = this.store.updateActivity(activity.id, { boardRevision: synchronized.revision });
+        }
         this.record(activity, attempt === 0 ? 'physical_mentor_turn_started' : 'physical_mentor_turn_corrective', {
           requestId, reason, revision: board.revision
         });

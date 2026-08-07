@@ -214,11 +214,13 @@ const PUZZLES = [{
   goal: 'Place the protected queen next to the king.',
   initialFen: '7k/8/5KQ1/8/8/8/8/8 w - - 0 1', line: ['g6g7'],
   hints: ['The white king protects g7.', 'Use the queen for a close-range check.', 'Play Qg7 mate.']
-}].map((item) => ({
+}].map((item, index) => ({
   ...item,
   type: 'puzzle',
-  skillBands: ['Beginner', 'Intermediate', 'Advanced'],
-  fixedLearnerColor: 'white'
+  skillBands: index < 4 ? ['Beginner'] : index < 8 ? ['Intermediate'] : ['Advanced'],
+  difficultyBand: index < 4 ? 'beginner' : index < 8 ? 'intermediate' : 'advanced',
+  supportsPhysical: true,
+  fixedLearnerColor: new Chess(item.initialFen).turn() === 'w' ? 'white' : 'black'
 }));
 
 const LESSONS = [{
@@ -294,6 +296,7 @@ function publicCatalogItem(item) {
     skillBands: item.skillBands,
     fixedLearnerColor: item.fixedLearnerColor || null,
     supportsPhysical: Boolean(item.supportsPhysical),
+    difficultyBand: item.difficultyBand || null,
     moveCount: item.line.length
   };
 }

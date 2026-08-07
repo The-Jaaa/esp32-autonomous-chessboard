@@ -5,6 +5,7 @@ const path = require('path');
 const { Chess } = require('chess.js');
 const { MentorStore, STANDARD_FEN } = require('../mentor/store');
 const { MentorActivityService } = require('../mentor/activity-service');
+const { getCatalogItem, listCatalog } = require('../mentor/curriculum');
 
 function physicalState(game, revision, humanColor = 'white') {
   return {
@@ -156,9 +157,120 @@ async function verifyStockfishPolicyAndColorChecks() {
   }
 }
 
+function verifyBothColorOpeningsAndPhysicalPuzzle() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mentor-physical-catalog-'));
+  const store = new MentorStore({ dbPath: path.join(tempDir, 'mentor.sqlite') });
+  let service;
+  const scriptedStarts = [];
+  let currentColor = 'black';
+  let currentRevision = 20;
+  let currentFen = STANDARD_FEN;
+  const coordinator = {
+    isAttached: () => true,
+    requireOpeningStartState: () => ({
+      ...physicalState(new Chess(STANDARD_FEN), currentRevision, currentColor),
+      history: []
+    }),
+    requireCurrentPhysicalState: () => physicalState(new Chess(currentFen), currentRevision, currentColor),
+    syncPhysicalActivity: () => {},
+    announcePhysicalOpening: () => {},
+    announcePhysicalPuzzleSetup: () => {},
+    startScriptedTurn: (_conversationId, activity) => scriptedStarts.push(activity.config.line[activity.stepIndex]),
+    preparePhysicalPuzzle: (_conversationId, { fen, learnerColor }) => {
+      currentFen = fen;
+      currentColor = learnerColor;
+      currentRevision += 1;
+      return physicalState(new Chess(fen), currentRevision, learnerColor);
+    },
+    confirmPhysicalPuzzleSetup: () => physicalState(new Chess(currentFen), currentRevision, currentColor)
+  };
+  service = new MentorActivityService({ store, chessService: {}, analysisService: {}, emit: () => {}, emitGlobal: () => {} });
+  service.setPhysicalCoordinator(coordinator);
+  try {
+    const openings = listCatalog('opening_drill');
+    assert.strictEqual(openings.length, 18);
+    const puzzles = listCatalog('puzzle');
+    assert.strictEqual(puzzles.length, 12);
+    assert.strictEqual(puzzles.filter((item) => item.difficultyBand === 'beginner').length, 4);
+    assert.strictEqual(puzzles.filter((item) => item.difficultyBand === 'intermediate').length, 4);
+    assert.strictEqual(puzzles.filter((item) => item.difficultyBand === 'advanced').length, 4);
+    assert(puzzles.every((item) => item.supportsPhysical));
+    for (const opening of openings) {
+      const conversation = store.createConversation();
+      const activity = service.startPhysicalOpening(conversation.id, {
+        type: 'opening_drill',
+        sourceId: opening.id,
+        learnerColor: 'black',
+        expectedRevision: currentRevision
+      });
+      assert.strictEqual(activity.phase, 'mentor_turn', `${opening.id} should begin with the robot for Human Black`);
+      assert.strictEqual(service.getPhysicalPolicy(conversation.id).expectedActor, 'mentor');
+      const item = getCatalogItem(opening.id);
+      const lineGame = new Chess(item.initialFen);
+      item.line.forEach((uci, index) => {
+        const move = lineGame.move({
+          from: uci.slice(0, 2), to: uci.slice(2, 4), promotion: uci[4]
+        });
+        service.physicalMoveCommitted(conversation.id, {
+          side: index % 2 === 0 ? 'engine' : 'human',
+          uci,
+          san: move.san,
+          revision: currentRevision + index + 1,
+          moveId: `${opening.id}-${index}`,
+          gameStatus: { checkmate: lineGame.isCheckmate(), draw: lineGame.isDraw() }
+        });
+      });
+      assert.strictEqual(service.get(conversation.id).state.pauseReason, 'line_complete');
+      service.end(conversation.id);
+    }
+    assert.strictEqual(scriptedStarts.length, 18);
+    assert(scriptedStarts.every((uci) => typeof uci === 'string' && uci.length >= 4));
+
+    currentColor = 'white';
+    currentFen = STANDARD_FEN;
+    const puzzleConversation = store.createConversation();
+    let activity = service.startPhysicalPuzzle(puzzleConversation.id, {
+      sourceId: 'back-rank-mate',
+      expectedRevision: currentRevision,
+      requestId: 'start-puzzle'
+    });
+    assert.strictEqual(activity.phase, 'paused');
+    assert.strictEqual(activity.state.pauseReason, 'puzzle_setup');
+    assert.strictEqual(activity.config.difficultyBand, 'beginner');
+    assert.deepStrictEqual(activity.config.setupChecklist, [
+      { square: 'e1', color: 'white', piece: 'rook' },
+      { square: 'f7', color: 'black', piece: 'pawn' },
+      { square: 'g1', color: 'white', piece: 'king' },
+      { square: 'g2', color: 'white', piece: 'pawn' },
+      { square: 'g7', color: 'black', piece: 'pawn' },
+      { square: 'g8', color: 'black', piece: 'king' },
+      { square: 'h2', color: 'white', piece: 'pawn' },
+      { square: 'h7', color: 'black', piece: 'pawn' }
+    ]);
+    activity = service.confirmPhysicalSetup(puzzleConversation.id);
+    assert.strictEqual(activity.phase, 'learner_turn');
+    assert.throws(
+      () => service.validatePhysicalLearnerMove(puzzleConversation.id, 'e1e2'),
+      (error) => error.code === 'activity_incorrect_move'
+    );
+    const puzzle = getCatalogItem('back-rank-mate');
+    const puzzleGame = new Chess(puzzle.initialFen);
+    const solution = puzzleGame.move({ from: 'e1', to: 'e8' });
+    service.physicalMoveCommitted(puzzleConversation.id, {
+      side: 'human', uci: 'e1e8', san: solution.san, revision: currentRevision + 1,
+      moveId: 'puzzle-solution', gameStatus: { checkmate: true, draw: false }
+    });
+    assert.strictEqual(service.get(puzzleConversation.id), null, 'completed puzzle no longer occupies the active slot');
+  } finally {
+    store.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
 (async () => {
   await verifyGuidedPhysicalFallback();
   await verifyStockfishPolicyAndColorChecks();
+  verifyBothColorOpeningsAndPhysicalPuzzle();
   console.log('Mentor physical curriculum guided-game regressions passed.');
 })().catch((error) => {
   console.error(error);

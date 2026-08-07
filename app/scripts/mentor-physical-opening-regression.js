@@ -90,7 +90,7 @@ function createActivityHarness() {
       assert.strictEqual(expectedRevision, 12);
       return {
         revision: 12,
-        physical: { serverInstanceId: 'server-test', sessionGeneration: 4 }
+        physical: { serverInstanceId: 'server-test', sessionGeneration: 4, humanColor: 'white' }
       };
     },
     syncPhysicalActivity: (activity) => synchronized.push(service.getPhysicalPolicy(activity.conversationId)),

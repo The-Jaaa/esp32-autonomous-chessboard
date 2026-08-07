@@ -355,8 +355,8 @@ class MentorPhysicalObserverService {
       throw new MentorPhysicalError('The physical board changed before the drill started.', 'stale_revision', 409, { state });
     }
     if (state.fen !== STANDARD_FEN || state.history.length !== 0
-      || physical.setupMode !== 'full' || physical.phase !== 'ready'
-      || !physical.board?.ready || physical.robotBusy
+      || physical.setupMode !== 'full' || !['setup', 'ready'].includes(physical.phase)
+      || (physical.phase === 'ready' && !physical.board?.ready) || physical.robotBusy
       || physical.pendingRobotJob || physical.pendingUndo || physical.pendingRedo
       || physical.robotGraveyardOccupied.length > 0) {
       throw new MentorPhysicalError(
@@ -375,9 +375,9 @@ class MentorPhysicalObserverService {
     if (Number(expectedRevision) !== state.revision) {
       throw new MentorPhysicalError('The physical board changed before the game started.', 'stale_revision', 409, { state });
     }
-    if (!physical.board?.ready || physical.robotBusy || physical.pendingRobotJob
+    if ((physical.phase === 'ready' && !physical.board?.ready) || physical.robotBusy || physical.pendingRobotJob
       || physical.pendingUndo || physical.pendingRedo || physical.pendingPromotion
-      || !['ready', 'game_over'].includes(physical.phase)) {
+      || !['setup', 'ready', 'game_over'].includes(physical.phase)) {
       throw new MentorPhysicalError(
         'The physical board must be synchronized and idle before guided play starts.',
         'physical_practice_setup_required',
@@ -401,12 +401,57 @@ class MentorPhysicalObserverService {
   }
 
   startStockfishTurn(conversationId, activity) {
-    this.requireCurrentBinding(conversationId);
+    const state = this.getState(conversationId);
     return this.adapter?.startActivityStockfishTurn?.({
       activityId: activity.id,
       generation: activity.generation,
-      expectedRevision: activity.boardRevision
+      expectedRevision: state.revision
     }) || null;
+  }
+
+  startScriptedTurn(conversationId, activity) {
+    const state = this.getState(conversationId);
+    return this.adapter?.startActivityScriptedTurn?.({
+      activityId: activity.id,
+      generation: activity.generation,
+      expectedRevision: state.revision,
+      uci: activity.config.line?.[activity.stepIndex]
+    }) || null;
+  }
+
+  preparePhysicalPuzzle(conversationId, { fen, learnerColor, expectedRevision }) {
+    const current = this.getState(conversationId);
+    if (Number(expectedRevision) !== current.revision) {
+      throw new MentorPhysicalError('The physical board changed before puzzle setup started.', 'stale_revision', 409, { state: current });
+    }
+    const result = this.adapter?.startCustomActivityGame?.({ fen, humanColor: learnerColor });
+    if (!result?.success) {
+      throw new MentorPhysicalError('The physical puzzle session could not be started.', 'physical_puzzle_start_failed', 500);
+    }
+    const snapshot = this.snapshot;
+    const detail = this.attach(conversationId, {
+      serverInstanceId: snapshot.serverInstanceId,
+      sessionGeneration: snapshot.sessionGeneration,
+      allowLiveSwitch: true,
+      coachingMode: 'off',
+      coachingOrigin: 'physical_puzzle'
+    });
+    return detail.state;
+  }
+
+  confirmPhysicalPuzzleSetup(conversationId, activity) {
+    const state = this.getState(conversationId);
+    if (state.fen !== activity.startFen || !state.physical.board?.ready
+      || state.physical.phase !== 'ready' || state.physical.robotBusy
+      || state.physical.pendingRobotJob) {
+      throw new MentorPhysicalError(
+        'The puzzle occupancy is not exact yet. Restore every listed square before confirming piece identity.',
+        'physical_puzzle_setup_incomplete',
+        409,
+        { state }
+      );
+    }
+    return state;
   }
 
   syncPhysicalActivity(activity) {
@@ -427,7 +472,9 @@ class MentorPhysicalObserverService {
     const reply = [
       `We will practice the ${activity.title}, where the main plan is to ${String(activity.goal || 'develop with purpose').replace(/\.$/, '')}.`,
       firstHint,
-      firstMove ? `You are White; begin with ${firstMove}.` : null
+      firstMove ? (activity.learnerColor === 'white'
+        ? `You are White; begin with ${firstMove}.`
+        : `You are Black. The robot will begin the reviewed line with ${firstMove}.`) : null
     ].filter(Boolean).join(' ');
     const requestId = `physical-opening-start:${activity.id}:${activity.generation}`;
     const prompt = [
@@ -437,7 +484,9 @@ class MentorPhysicalObserverService {
       `First reviewed move: ${firstMove}`,
       `Teaching cue: ${firstHint || '(none)'}`,
       'Introduce the opening before play begins. Explain its central strategic idea, what White is trying to achieve, and one technique the learner should watch for.',
-      `Finish by clearly asking the learner to play ${firstMove}.`,
+      activity.learnerColor === 'white'
+        ? `Finish by clearly asking the learner to play ${firstMove}.`
+        : `Finish by explaining that the robot will play ${firstMove}, then the learner will answer as Black.`,
       'Use three or four concise spoken sentences. Do not call tools or claim that a move has already been played.'
     ].join('\n');
     const live = this.liveService?.requestPhysicalTurn(activity.conversationId, {
@@ -472,6 +521,25 @@ class MentorPhysicalObserverService {
       conversation
     });
     return pair;
+  }
+
+  announcePhysicalPuzzleSetup(activity) {
+    const checklist = activity.config.setupChecklist
+      .map((item) => `${item.color} ${item.piece} on ${item.square}`)
+      .join(', ');
+    const reply = `Set up ${activity.title}: ${checklist}. When every piece is placed and the board shows no missing or extra squares, say that the setup is confirmed.`;
+    const requestId = `physical-puzzle-setup:${activity.id}:${activity.generation}`;
+    const live = this.liveService?.requestPhysicalTurn(activity.conversationId, {
+      requestId,
+      displayText: `${activity.title} setup required.`,
+      prompt: `[PHYSICAL_PUZZLE_SETUP]\n${reply}\nRead the checklist clearly. Do not call tools until the learner confirms setup.`,
+      urgent: false,
+      fallbackAssistantText: reply,
+      timeoutMs: 30000,
+      queueKey: 'physical-puzzle'
+    });
+    if (live) return live;
+    return this.persistCoachingMessage(activity.conversationId, requestId, `${activity.title} setup required.`, reply);
   }
 
   announcePhysicalPractice(activity) {
@@ -895,6 +963,10 @@ class MentorPhysicalObserverService {
       .filter((item) => item.type === 'opening_drill' && item.supportsPhysical)
       .map((item) => `${item.title} [${item.id}]`)
       .join(', ');
+    const reviewedPuzzles = listCatalog('puzzle')
+      .filter((item) => item.supportsPhysical)
+      .map((item) => `${item.title} [${item.id}, ${item.difficultyBand}]`)
+      .join(', ');
     const openingContext = activity?.config?.boardSource === 'physical'
       ? [
           `Active physical activity: ${activity.title} (${activity.type})`,
@@ -907,7 +979,9 @@ class MentorPhysicalObserverService {
             : `Required next move: ${activity.config.line?.[activity.stepIndex] || '(line complete)'}`,
           activity.type === 'practice_game'
             ? 'In mentor mode, use Stockfish evidence and play_physical_move on the assigned turn. In Stockfish mode, the backend chooses the robot move.'
-            : 'The opening coordinator enforces and executes the reviewed line.'
+            : activity.state?.pauseReason === 'puzzle_setup'
+              ? `Setup checklist: ${activity.config.setupChecklist?.map((item) => `${item.color} ${item.piece} ${item.square}`).join(', ')}`
+              : 'The activity coordinator enforces and executes the reviewed line.'
         ]
       : [];
     return [
@@ -926,10 +1000,11 @@ class MentorPhysicalObserverService {
       `Robot busy: ${physical.robotBusy ? 'yes' : 'no'}`,
       ...openingContext,
       `Reviewed physical opening drills: ${reviewedOpenings}`,
+      `Reviewed physical puzzles: ${reviewedPuzzles}`,
       activity?.type === 'practice_game' && activity.config?.opponentMode === 'mentor'
         ? 'During your assigned mentor turn, you may use play_physical_move after Stockfish verification. You cannot access motors, routes, magnets, or command queues.'
         : 'You may analyze or annotate this position, but you cannot directly move, reset, load, or demonstrate on the physical board.',
-      'You may start and guide a reviewed physical opening drill only when the board is at the exact standard starting position.',
+      'You may start a reviewed opening from the exact standard position or a reviewed puzzle through its guided custom setup.',
       'Never claim a physical move succeeded until its tool result confirms exact hardware verification.'
     ].join('\n');
   }
@@ -1232,15 +1307,16 @@ class MentorPhysicalObserverService {
     const teachingCue = activity.config.hints?.[completedPairIndex] || activity.goal || '';
     const nextPairIndex = Math.floor(activity.stepIndex / 2);
     const nextCue = activity.config.hints?.[nextPairIndex] || '';
-    const displayText = `Black played ${moveText}.`;
+    const opponentName = activity.mentorColor === 'white' ? 'White' : 'Black';
+    const displayText = `${opponentName} played ${moveText}.`;
     const reply = complete
-      ? `Black played ${moveText}. You completed the reviewed ${activity.title} line: ${activity.goal} Choose Repeat, Continue, or simply make a legal move to continue the game.`
-      : `Black played ${moveText}. ${teachingCue} Next, play ${nextUci}. ${nextCue}`.trim();
+      ? `${opponentName} played ${moveText}. You completed the reviewed ${activity.title} line: ${activity.goal} Choose Repeat, Continue, or simply make a legal move to continue the game.`
+      : `${opponentName} played ${moveText}. ${teachingCue} Next, play ${nextUci}. ${nextCue}`.trim();
     const requestId = `physical-opening:${activity.id}:${snapshot.lastMove?.at || snapshot.stateRevision}:${activity.stepIndex}`;
     const prompt = [
       '[PHYSICAL_OPENING_STEP]',
       `Opening: ${activity.title}`,
-      `Black just completed the reviewed move ${snapshot.move} (${moveText}).`,
+      `${opponentName} just completed the reviewed move ${snapshot.move} (${moveText}).`,
       complete
         ? 'The ten-ply reviewed line is complete. Summarize the opening structure, the main technique the learner practiced, and the usual middlegame plan. Explain that they may choose Repeat or Finish, or simply make any legal move to continue the game.'
         : `The required next learner move is ${nextUci}. Teaching cue for the completed move pair: ${teachingCue}. Teaching cue for the next step: ${nextCue || activity.goal}. Explain why both the learner's previous move and Black's reply belong to the opening, connect them to a technique such as central control, development, king safety, pawn structure, or piece coordination, then clearly ask for ${nextUci}.`,

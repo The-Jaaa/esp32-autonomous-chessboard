@@ -197,6 +197,7 @@ async function run() {
     toolService.declarations(first.id).map((tool) => tool.name),
     [
       'set_game_preferences',
+      'play_physical_move',
       'get_physical_game_status',
       'start_physical_game',
       'attach_physical_game',
@@ -208,6 +209,9 @@ async function run() {
       'annotate_board',
       'get_activity_state',
       'start_activity',
+      'pause_activity',
+      'resume_activity',
+      'confirm_physical_setup',
       'request_hint',
       'end_activity',
       'resolve_opening_drill'

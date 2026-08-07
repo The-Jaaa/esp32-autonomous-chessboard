@@ -523,7 +523,7 @@ class MentorToolService {
 
     if (name === 'confirm_physical_setup') {
       if (!this.activityService?.confirmPhysicalSetup) throw new Error('Physical setup confirmation is unavailable.');
-      const activity = this.activityService.confirmPhysicalSetup(conversationId);
+      const activity = this.activityService.confirmPhysicalSetup(conversationId, requestId);
       onProgress(1, 1);
       return { activity };
     }

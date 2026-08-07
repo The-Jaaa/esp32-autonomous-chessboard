@@ -1630,6 +1630,10 @@ function expectedOpeningMove(policy = physicalSession.mentorOpeningDrill) {
     .find((move) => moveToUci(move) === policy.expectedUci) || null;
 }
 
+function hasScriptedLearnerMove(policy = physicalSession.mentorOpeningDrill) {
+  return Boolean(policy?.expectedActor === 'learner' && policy.expectedUci);
+}
+
 function queueOpeningExpectedLedCommand(policy = physicalSession.mentorOpeningDrill) {
   const move = expectedOpeningMove(policy);
   if (!move || policy.expectedActor !== 'learner') return clearPhysicalLeds();
@@ -1651,7 +1655,18 @@ function setOpeningDrillPolicy(policy) {
   physicalSession.autoRobotReply = policy.type === 'practice_game'
     && policy.opponentMode === 'stockfish';
   const pauseReason = policy.state?.pauseReason || null;
-  if (pauseReason === 'line_complete') {
+  if (physicalSession.phase === 'setup') {
+    physicalSession.autoRobotReply = false;
+    physicalSession.statusText = `${policy.title}: finish physical setup before the activity begins.`;
+    queueCalibrationLedCommand(buildCalibrationReport(physicalSession.occupancy));
+  } else if (policy.expectedActor === 'setup') {
+    physicalSession.autoRobotReply = false;
+    if (physicalSession.phase !== 'setup') physicalSession.phase = 'mentor_puzzle_setup';
+    physicalSession.statusText = `${policy.title}: arrange the listed pieces, then confirm the setup by voice.`;
+    if (physicalSession.phase !== 'setup') {
+      queueCalibrationLedCommand(buildCalibrationReport(physicalSession.occupancy));
+    }
+  } else if (pauseReason === 'line_complete') {
     physicalSession.phase = 'mentor_drill_complete';
     physicalSession.statusText = `${policy.title} complete. Choose Repeat, Continue game, or Finish lesson.`;
     clearPhysicalLeds();
@@ -1803,7 +1818,7 @@ mentorFeature.physicalObserver.setAdapter({
       error.statusCode = 409;
       throw error;
     }
-    if (physicalSession.pendingRobotJob || !isRobotTurn()) {
+    if (physicalSession.phase !== 'robot_thinking' || physicalSession.pendingRobotJob || !isRobotTurn()) {
       const error = new Error('The physical robot is not ready for this mentor move.');
       error.code = 'physical_robot_not_ready';
       error.statusCode = 409;
@@ -1843,11 +1858,34 @@ mentorFeature.physicalObserver.setAdapter({
     const policy = physicalSession.mentorOpeningDrill;
     if (!policy || policy.activityId !== activityId || policy.generation !== generation
       || Number(expectedRevision) !== Number(physicalSession.stateRevision)
-      || physicalSession.pendingRobotJob || !isRobotTurn()) {
+      || physicalSession.phase !== 'robot_thinking' || physicalSession.pendingRobotJob || !isRobotTurn()) {
       return { success: false, code: 'physical_activity_turn_not_ready' };
     }
     setTimeout(() => queueRobotReply({ activityId }).catch((error) => setPhysicalError(error.message || String(error))), 0);
     return { success: true };
+  },
+  startActivityScriptedTurn: ({ activityId, generation, expectedRevision, uci }) => {
+    const policy = physicalSession.mentorOpeningDrill;
+    if (!policy || policy.activityId !== activityId || policy.generation !== generation
+      || policy.expectedUci !== uci || Number(expectedRevision) !== Number(physicalSession.stateRevision)
+      || physicalSession.phase !== 'robot_thinking' || physicalSession.pendingRobotJob || !isRobotTurn()) {
+      return { success: false, code: 'physical_activity_turn_not_ready' };
+    }
+    setTimeout(() => queueRobotReply({ forcedUci: uci, activityId }).catch((error) => setPhysicalError(error.message || String(error))), 0);
+    return { success: true };
+  },
+  startCustomActivityGame: ({ fen, humanColor }) => {
+    const defaults = mentorFeature.gameSettingsService.get().defaults;
+    const result = startPhysicalSession({
+      humanColor,
+      level: defaults.difficultyLevel,
+      profile: 'balanced',
+      graveyardSlots: DEFAULT_GRAVEYARD_SLOTS,
+      setupMode: 'custom',
+      initialFen: fen
+    });
+    physicalSession.autoRobotReply = false;
+    return result;
   },
   retryOpeningDrill: retryOpeningDrillPolicy,
   resolveOpeningDrill: resolveOpeningDrillPolicy
@@ -6259,13 +6297,15 @@ function processSyncWarningSnapshot(occupancy) {
     }
 
     physicalSession.phase = 'ready';
-    physicalSession.statusText = opening?.expectedActor === 'learner'
+    physicalSession.statusText = hasScriptedLearnerMove(opening)
       ? `Board restored. ${opening.title}: play ${opening.expectedUci}.`
-      : waitingForTurnStatus('Board restored.');
+      : opening?.expectedActor === 'learner'
+        ? `Board restored. ${opening.title}: your turn.`
+        : waitingForTurnStatus('Board restored.');
     logPhysicalEvent('sync_restored', 'Physical board occupancy matches the expected game state again.', {
       actualOccupancy: occupancy
     });
-    if (opening?.expectedActor === 'learner') queueOpeningExpectedLedCommand(opening);
+    if (hasScriptedLearnerMove(opening)) queueOpeningExpectedLedCommand(opening);
     else clearPhysicalLeds();
     emitPhysicalState('physical-board');
     return;
@@ -6375,15 +6415,25 @@ function processOpeningGateSnapshot(occupancy) {
 function processReadySnapshot(occupancy) {
   const expected = occupancyFromGame(physicalSession.game);
   const diff = diffOccupancy(expected, occupancy);
+  const activityPolicy = physicalSession.mentorOpeningDrill;
 
   if (diff.missing.length === 0 && diff.extra.length === 0) {
     clearPostRobotSettleGuard('Ready board snapshot matched expected position.');
     const opening = physicalSession.mentorOpeningDrill;
-    physicalSession.statusText = opening?.expectedActor === 'learner'
+    physicalSession.statusText = opening?.expectedActor === 'setup'
+      ? `${opening.title}: occupancy is exact. Confirm the listed piece identities by voice.`
+      : hasScriptedLearnerMove(opening)
       ? `${opening.title}: play ${opening.expectedUci}.`
-      : waitingForTurnStatus();
-    if (opening?.expectedActor === 'learner') queueOpeningExpectedLedCommand(opening);
+      : opening?.expectedActor === 'learner' ? `${opening.title}: your turn.` : waitingForTurnStatus();
+    if (hasScriptedLearnerMove(opening)) queueOpeningExpectedLedCommand(opening);
     else queueGameStatusLedCommand(physicalSession.game);
+    emitPhysicalState('physical-board');
+    return;
+  }
+
+  if (activityPolicy?.expectedActor === 'setup') {
+    physicalSession.statusText = `${activityPolicy.title}: restore the setup, then confirm the listed piece identities by voice.`;
+    queueBoardSyncWarningLedCommand(diff);
     emitPhysicalState('physical-board');
     return;
   }
@@ -6425,7 +6475,7 @@ function processReadySnapshot(occupancy) {
     }
 
     const opening = physicalSession.mentorOpeningDrill;
-    if (opening?.expectedActor === 'learner' && opening.expectedUci?.slice(0, 2) !== sourceSquare) {
+    if (hasScriptedLearnerMove(opening) && opening.expectedUci.slice(0, 2) !== sourceSquare) {
       const expectedSource = opening.expectedUci.slice(0, 2);
       const conversationId = activePhysicalMentorConversationId();
       if (conversationId) mentorFeature.activityService.notePhysicalIncorrectAttempt(conversationId, {
@@ -6447,7 +6497,7 @@ function processReadySnapshot(occupancy) {
     }
 
     let legalMoves = legalMovesForSource(physicalSession.game, sourceSquare);
-    if (opening?.expectedActor === 'learner') {
+    if (hasScriptedLearnerMove(opening)) {
       legalMoves = legalMoves.filter((move) => moveToUci(move) === opening.expectedUci);
     }
     if (legalMoves.length === 0) {
@@ -6474,10 +6524,10 @@ function processReadySnapshot(occupancy) {
       capture: Boolean(move.captured),
       special: Boolean(move.promotion) || move.flags?.includes('k') || move.flags?.includes('q') || move.flags?.includes('e')
     }));
-    physicalSession.statusText = opening?.expectedActor === 'learner'
+    physicalSession.statusText = hasScriptedLearnerMove(opening)
       ? `${opening.title}: place the piece on ${opening.expectedUci.slice(2, 4)}.`
       : `Piece lifted from ${sourceSquare}.`;
-    logPhysicalEvent('piece_lifted', opening?.expectedActor === 'learner'
+    logPhysicalEvent('piece_lifted', hasScriptedLearnerMove(opening)
       ? `Opening piece lifted from ${sourceSquare}; prescribed destination highlighted.`
       : `White piece lifted from ${sourceSquare}; legal destinations highlighted.`, {
       level: 'info',
@@ -6502,7 +6552,7 @@ async function processLiftedSnapshot(occupancy) {
   const sourceIndex = squareToIndex(sourceSquare);
   const opening = physicalSession.mentorOpeningDrill;
   let legalMoves = legalMovesForSource(physicalSession.game, sourceSquare);
-  if (opening?.expectedActor === 'learner') {
+  if (hasScriptedLearnerMove(opening)) {
     legalMoves = legalMoves.filter((move) => moveToUci(move) === opening.expectedUci);
   }
 
@@ -6510,14 +6560,14 @@ async function processLiftedSnapshot(occupancy) {
     physicalSession.phase = 'ready';
     physicalSession.selectedSource = null;
     physicalSession.legalTargets = [];
-    physicalSession.statusText = opening?.expectedActor === 'learner'
+    physicalSession.statusText = hasScriptedLearnerMove(opening)
       ? `Move cancelled. ${opening.title}: play ${opening.expectedUci}.`
       : 'Move cancelled; waiting for your move.';
     logPhysicalEvent('move_cancelled', `Piece returned to ${sourceSquare}; move cancelled.`, {
       actualOccupancy: occupancy,
       details: { sourceSquare }
     });
-    if (opening?.expectedActor === 'learner') queueOpeningExpectedLedCommand(opening);
+    if (hasScriptedLearnerMove(opening)) queueOpeningExpectedLedCommand(opening);
     else clearPhysicalLeds();
     emitPhysicalState('physical-board');
     return;
@@ -6556,7 +6606,7 @@ async function processLiftedSnapshot(occupancy) {
     }
   }
 
-  if (opening?.expectedActor === 'learner') {
+  if (hasScriptedLearnerMove(opening)) {
     const diff = diffOccupancy(occupancyFromGame(physicalSession.game), occupancy);
     if (diff.extra.length > 0) {
       const wrongTargets = diff.extra.map(indexToSquare).filter(Boolean);
@@ -6690,6 +6740,30 @@ async function processPhysicalSnapshot(occupancy, metadata = {}) {
         setTimeout(() => queueRobotReply().catch((error) => {
           setPhysicalError(error.message || String(error));
         }), 0);
+      } else if (physicalSession.phase === 'ready' && isRobotTurn()
+        && physicalSession.mentorOpeningDrill?.expectedActor === 'mentor') {
+        const policy = physicalSession.mentorOpeningDrill;
+        physicalSession.phase = 'robot_thinking';
+        if (policy.expectedUci) {
+          physicalSession.statusText = `${policy.title}: preparing ${policy.expectedUci}.`;
+          setTimeout(() => queueRobotReply({
+            forcedUci: policy.expectedUci,
+            activityId: policy.activityId
+          }).catch((error) => setPhysicalError(error.message || String(error))), 0);
+        } else if (policy.opponentMode === 'stockfish') {
+          physicalSession.statusText = `${policy.title}: Stockfish is choosing the opening move.`;
+          setTimeout(() => queueRobotReply({ activityId: policy.activityId })
+            .catch((error) => setPhysicalError(error.message || String(error))), 0);
+        } else if (policy.opponentMode === 'mentor') {
+          physicalSession.statusText = `${policy.title}: Gemini is choosing the opening move.`;
+          const conversationId = activePhysicalMentorConversationId();
+          if (conversationId) {
+            setTimeout(() => mentorFeature.activityService.schedulePhysicalMentorTurn(
+              conversationId,
+              'setup_complete'
+            ), 0);
+          }
+        }
       }
     } else {
       physicalSession.statusText = physicalSession.setupMode === 'partial'
