@@ -1088,6 +1088,21 @@ export default function MentorWorkspace() {
     }
   };
 
+  const retryPhysicalRobot = async () => {
+    if (!physicalAttached || physicalBusy) return;
+    setPhysicalBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      await mentorApi.retryPhysicalRobot();
+      setNotice('Robot retry started from the verified failed phase.');
+    } catch (physicalError) {
+      setError(physicalError.message);
+    } finally {
+      setPhysicalBusy(false);
+    }
+  };
+
   const reconcileStream = useCallback((id, requestId, attempt = 0) => {
     streamPollRef.current = setTimeout(async () => {
       try {
@@ -1600,6 +1615,18 @@ export default function MentorWorkspace() {
                 ? `${Math.max(0, Math.round((freshnessNow - workspaceState.physical.lastSnapshotAt) / 1000))}s`
                 : 'No sensor data'}</span>
             </div>
+            {workspaceState.physical.phase === 'sync_warning'
+              && workspaceState.physical.pendingRobotJob
+              && workspaceState.physical.board?.ready && (
+              <button
+                type="button"
+                className="mentor-physical-retry"
+                onClick={retryPhysicalRobot}
+                disabled={physicalBusy}
+              >
+                <RefreshCcw size={15} /> Retry robot move
+              </button>
+            )}
             {!VOICE_FIRST_PHYSICAL && <button
               className={`mentor-coaching-toggle ${physicalBoard.binding?.coachingMode === 'selective' ? 'is-active' : ''}`}
               type="button"

@@ -933,6 +933,24 @@
 .mentor-physical-status.is-stale .mentor-physical-status-dot { background: var(--warning-color); }
 .mentor-physical-status.is-error { border-color: var(--danger-color); }
 .mentor-physical-status.is-error .mentor-physical-status-dot { background: var(--danger-color); }
+.mentor-physical-retry {
+  min-height: 34px;
+  margin: 8px 22px 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid var(--warning-color);
+  border-radius: 5px;
+  color: var(--mentor-text);
+  background: color-mix(in srgb, var(--warning-color) 12%, var(--surface-panel));
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+}
+.mentor-physical-retry:hover { background: color-mix(in srgb, var(--warning-color) 20%, var(--surface-panel)); }
+.mentor-physical-retry:disabled { opacity: .55; cursor: default; }
 .mentor-coaching-toggle {
   width: 100%; min-height: 34px; display: flex; align-items: center; justify-content: space-between;
   padding: 0 10px; border: 1px solid var(--mentor-border); border-radius: 5px;

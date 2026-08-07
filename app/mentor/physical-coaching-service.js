@@ -3,6 +3,30 @@ const { Chess } = require('chess.js');
 const UCI_PATTERN = /^[a-h][1-8][a-h][1-8][qrbn]?$/;
 const SQUARE_PATTERN = /\b[a-h][1-8]\b/g;
 const PIECE_NAMES = { p: 'pawn', n: 'knight', b: 'bishop', r: 'rook', q: 'queen', k: 'king' };
+const COACHING_RESPONSE_SCHEMA = {
+  type: 'object',
+  properties: {
+    learnerMove: { type: 'string' },
+    opponentMove: { type: 'string' },
+    classification: { type: 'string' },
+    text: { type: 'string' },
+    planUci: { type: 'array', items: { type: 'string' }, maxItems: 3 },
+    claims: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: ['piece_on', 'move', 'capture'] },
+          piece: { type: 'string' },
+          square: { type: 'string' },
+          uci: { type: 'string' }
+        },
+        required: ['type']
+      }
+    }
+  },
+  required: ['learnerMove', 'opponentMove', 'classification', 'text', 'planUci', 'claims']
+};
 
 function responseText(response) {
   if (typeof response?.text === 'string') return response.text;
@@ -189,7 +213,15 @@ class GeminiPhysicalCoachingGenerator {
         corrections.length ? `Correct these previous validation failures: ${corrections.join(' ')}` : '',
         JSON.stringify(evidence)
       ].filter(Boolean).join('\n'),
-      config: { responseModalities: ['TEXT'], abortSignal: signal }
+      config: {
+        responseModalities: ['TEXT'],
+        responseMimeType: 'application/json',
+        responseJsonSchema: COACHING_RESPONSE_SCHEMA,
+        thinkingConfig: { thinkingBudget: 0 },
+        temperature: 0.1,
+        maxOutputTokens: 500,
+        abortSignal: signal
+      }
     });
     return parseJson(responseText(response));
   }

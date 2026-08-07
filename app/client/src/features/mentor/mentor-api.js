@@ -19,6 +19,25 @@ async function request(path, options = {}) {
   return body;
 }
 
+async function requestPhysical(path, options = {}) {
+  const response = await fetch(`/api/physical${path}`, {
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers
+    },
+    ...options
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok || body.success === false) {
+    const error = new Error(body.error || `Request failed (${response.status}).`);
+    error.status = response.status;
+    error.code = body.code;
+    error.state = body.state;
+    throw error;
+  }
+  return body;
+}
+
 export const mentorApi = {
   getAudioDevices() {
     return request('/audio/devices');
@@ -58,6 +77,9 @@ export const mentorApi = {
       method: 'PATCH',
       body: JSON.stringify({ mode })
     });
+  },
+  retryPhysicalRobot() {
+    return requestPhysical('/retry-robot', { method: 'POST', body: '{}' });
   },
   listConversations(query = '') {
     return request(`/conversations?query=${encodeURIComponent(query)}`);

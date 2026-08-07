@@ -1,6 +1,7 @@
 const assert = require('assert');
 const { Chess } = require('chess.js');
 const {
+  GeminiPhysicalCoachingGenerator,
   PhysicalCoachingService,
   buildPhysicalCoachingEvidence,
   deterministicCoaching,
@@ -143,6 +144,31 @@ async function main() {
   assert.match(fallback.text, /Stockfish replied Nf6/);
   assert.match(fallback.text, /d4, g6, Nc3/);
   assert.doesNotMatch(fallback.text, /h5|captur|trapped/i);
+
+  const previousApiKey = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = 'regression-key';
+  let generationRequest = null;
+  try {
+    const optimizedGenerator = new GeminiPhysicalCoachingGenerator({
+      ai: {
+        models: {
+          async generateContent(request) {
+            generationRequest = request;
+            return { text: JSON.stringify(valid) };
+          }
+        }
+      }
+    });
+    const optimized = await optimizedGenerator.generate(evidence, [], new AbortController().signal);
+    assert.strictEqual(optimized.text, valid.text);
+    assert.strictEqual(generationRequest.config.responseMimeType, 'application/json');
+    assert.strictEqual(generationRequest.config.thinkingConfig.thinkingBudget, 0);
+    assert.strictEqual(generationRequest.config.temperature, 0.1);
+    assert(generationRequest.config.maxOutputTokens <= 500);
+  } finally {
+    if (previousApiKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = previousApiKey;
+  }
 
   const timeoutStartedAt = Date.now();
   const boundedService = new PhysicalCoachingService({
