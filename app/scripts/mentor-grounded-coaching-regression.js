@@ -100,6 +100,28 @@ async function main() {
   };
   assert.strictEqual(validateCoachingDraft(valid, evidence).valid, true);
 
+  const futureCaptureEvidence = {
+    ...evidence,
+    finalFen: 'r2k4/2N5/8/8/8/8/8/4K3 w - - 0 1',
+    pieces: {
+      a8: 'black rook',
+      c7: 'white knight',
+      d8: 'black king',
+      e1: 'white king'
+    },
+    positionAnalysis: {
+      ...evidence.positionAnalysis,
+      lines: [{ rank: 1, uci: ['c7a8'], san: ['Nxa8'], score: { type: 'cp', value: 400 } }]
+    }
+  };
+  const verifiedFutureCapture = {
+    ...valid,
+    text: 'Nf3 was good, and Stockfish replied Nf6. The verified continuation captures the rook on a8 with Nxa8.',
+    planUci: ['c7a8'],
+    claims: [{ type: 'capture', uci: 'c7a8' }]
+  };
+  assert.strictEqual(validateCoachingDraft(verifiedFutureCapture, futureCaptureEvidence).valid, true);
+
   const hallucinated = {
     ...valid,
     text: 'Nf3 was good, but the bishop on h5 is trapped and Stockfish captured it.',
@@ -112,6 +134,15 @@ async function main() {
   assert.strictEqual(rejected.valid, false);
   assert(rejected.errors.some((error) => error.includes('h5')));
   assert(rejected.errors.some((error) => error.includes('capture')));
+
+  const concreteThreat = {
+    ...valid,
+    text: 'Nf3 was good, and Stockfish replied Nf6. The knight attacks the queen on d8.'
+  };
+  assert(
+    validateCoachingDraft(concreteThreat, evidence).errors
+      .some((error) => error.includes('Concrete attack'))
+  );
 
   let calls = 0;
   const regenerated = new PhysicalCoachingService({

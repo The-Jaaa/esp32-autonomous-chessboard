@@ -128,8 +128,8 @@ async function protocolRegressions() {
   assert.strictEqual(SPEAKER_FEED_AHEAD_MS, 2500);
   assert.strictEqual(MAX_SPEAKER_QUEUE_BYTES, 24000 * 2 * 42);
   assert.strictEqual(MAX_BUFFERED_RESPONSE_BYTES, 24000 * 2 * 40);
-  assert.strictEqual(SPEAKER_START_BUFFER_MS, 3000);
-  assert.strictEqual(SPEAKER_START_BUFFER_BYTES, 24000 * 2 * 3);
+  assert.strictEqual(SPEAKER_START_BUFFER_MS, 10000);
+  assert.strictEqual(SPEAKER_START_BUFFER_BYTES, 24000 * 2 * 10);
   assert.strictEqual(SPEAKER_END_RESEND_MS, 250);
   const codecSamples = Array.from({ length: 240 }, (_, index) => (
     Math.round(Math.sin(index * Math.PI / 24) * 12000)
@@ -229,9 +229,9 @@ async function protocolRegressions() {
     sampleRate: 24000
   }).destination, 'board');
   await new Promise((resolve) => setTimeout(resolve, 25));
-  assert.strictEqual(board.frames.length, 0, 'Board audio must wait for the complete response.');
+  assert.strictEqual(board.frames.length, 0, 'Board audio must wait for the startup buffer.');
 
-  const queuedPcm = Buffer.alloc(192000, 7);
+  const queuedPcm = Buffer.alloc(480000, 7);
   assert.strictEqual(service.routeAudio({
     conversationId: 'conversation-a',
     sessionId: 'session-a',

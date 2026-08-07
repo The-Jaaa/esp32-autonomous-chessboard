@@ -153,6 +153,36 @@ function allowedSquares(evidence) {
   return squares;
 }
 
+function verifiedLineCaptures(evidence) {
+  const captures = new Set();
+  for (const line of evidence.positionAnalysis.lines) {
+    const game = new Chess(evidence.finalFen);
+    for (const uci of line.uci) {
+      if (!UCI_PATTERN.test(uci)) break;
+      let move = null;
+      try {
+        move = game.move({
+          from: uci.slice(0, 2),
+          to: uci.slice(2, 4),
+          promotion: uci[4]
+        });
+      } catch {
+        break;
+      }
+      if (!move) break;
+      if (move.captured) captures.add(uci);
+    }
+  }
+  return captures;
+}
+
+function hasConcreteTacticalClaim(text) {
+  const pieceOrSquare = String.raw`(?:king|queen|rook|bishop|knight|pawn|[a-h][1-8])`;
+  const tactic = String.raw`(?:attack(?:s|ed|ing)?|threaten(?:s|ed|ing)?|trap(?:s|ped|ping)?|fork(?:s|ed|ing)?|pin(?:s|ned|ning)?|skewer(?:s|ed|ing)?)`;
+  return new RegExp(String.raw`\b${tactic}\b[^.!?]{0,60}\b${pieceOrSquare}\b`, 'i').test(text)
+    || new RegExp(String.raw`\b${pieceOrSquare}\b[^.!?]{0,60}\b${tactic}\b`, 'i').test(text);
+}
+
 function validateCoachingDraft(draft, evidence) {
   const errors = [];
   if (!draft || typeof draft !== 'object') return { valid: false, errors: ['Response is not an object.'] };
@@ -170,6 +200,7 @@ function validateCoachingDraft(draft, evidence) {
   const permittedSquares = allowedSquares(evidence);
   if (squares.some((square) => !permittedSquares.has(square))) errors.push('Text references a square outside the verified position or lines.');
   const claims = Array.isArray(draft.claims) ? draft.claims : [];
+  const lineCaptures = verifiedLineCaptures(evidence);
   for (const claim of claims) {
     if (claim?.type === 'piece_on') {
       if (evidence.pieces[claim.square] !== claim.piece) errors.push(`Incorrect piece claim on ${claim.square}.`);
@@ -180,17 +211,25 @@ function validateCoachingDraft(draft, evidence) {
     } else if (claim?.type === 'capture') {
       const actualCapture = [evidence.humanMove, evidence.robotMove]
         .some((move) => move?.uci === claim.uci && move.captured);
-      if (!actualCapture) errors.push(`Unverified capture claim ${claim.uci}.`);
+      if (!actualCapture && !lineCaptures.has(claim.uci)) {
+        errors.push(`Unverified capture claim ${claim.uci}.`);
+      }
     } else {
       errors.push('Unsupported factual claim type.');
     }
   }
+  const actualCaptures = [evidence.humanMove, evidence.robotMove]
+    .filter((move) => move?.captured)
+    .map((move) => move.uci);
+  const planCaptures = plan.filter((uci) => lineCaptures.has(uci));
   if (/\b(?:capture|captured|takes|took|wins? a piece)\b/i.test(draft.text || '')
-      && !claims.some((claim) => claim.type === 'capture')) {
+      && !claims.some((claim) => claim.type === 'capture')
+      && actualCaptures.length === 0
+      && planCaptures.length === 0) {
     errors.push('Capture language is not backed by a validated capture claim.');
   }
-  if (/\b(?:attack|attacks|attacked|threat|threatens|trapped)\b/i.test(draft.text || '')) {
-    errors.push('Unstructured attack or threat claims are not allowed in automatic coaching.');
+  if (hasConcreteTacticalClaim(draft.text || '')) {
+    errors.push('Concrete attack or threat claims require structured evidence.');
   }
   return { valid: errors.length === 0, errors };
 }
@@ -207,7 +246,8 @@ class GeminiPhysicalCoachingGenerator {
       model: this.model,
       contents: [
         'Return one JSON object only with keys learnerMove, opponentMove, classification, text, planUci, and claims.',
-        'Use only the supplied facts. Do not infer attacks, threats, captures, or piece locations.',
+        'Use only the supplied facts. Do not infer captures or piece locations.',
+        'Avoid concrete attack, threat, fork, pin, skewer, or trapped-piece claims; explain the verified move quality, consequence, and supplied plan instead.',
         'claims may contain only {type:"piece_on",piece,square}, {type:"move",uci}, or {type:"capture",uci}.',
         'planUci must be a prefix of one supplied Stockfish line. Write two or three concise, direct coaching sentences.',
         corrections.length ? `Correct these previous validation failures: ${corrections.join(' ')}` : '',
