@@ -1827,10 +1827,26 @@ mentorFeature.physicalObserver.setAdapter({
       error.statusCode = 409;
       throw error;
     }
+    if (physicalSession.phase === 'ready' && !physicalSession.pendingRobotJob && isRobotTurn()
+      && policy.expectedActor === 'mentor') {
+      const diff = diffOccupancy(occupancyFromGame(physicalSession.game), physicalSession.occupancy);
+      if (diff.missing.length === 0 && diff.extra.length === 0) {
+        physicalSession.phase = 'robot_thinking';
+        physicalSession.statusText = `${policy.title}: Gemini move verified; preparing physical execution.`;
+        logPhysicalEvent('mentor_move_readiness_recovered', physicalSession.statusText, {
+          details: { activityId, generation, requestId, uci }
+        });
+      }
+    }
     if (physicalSession.phase !== 'robot_thinking' || physicalSession.pendingRobotJob || !isRobotTurn()) {
       const error = new Error('The physical robot is not ready for this mentor move.');
       error.code = 'physical_robot_not_ready';
       error.statusCode = 409;
+      error.details = {
+        phase: physicalSession.phase,
+        pendingRobotJob: Boolean(physicalSession.pendingRobotJob),
+        robotTurn: isRobotTurn()
+      };
       throw error;
     }
     const executionId = `physical-activity:${activityId}:${generation}:${requestId}:${uci}`;

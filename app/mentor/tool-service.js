@@ -522,10 +522,28 @@ class MentorToolService {
 
     if (name === 'start_activity') {
       if (!this.activityService) throw new Error('Mentor activities are unavailable.');
+      const activeActivity = this.activityService.get?.(conversationId) || null;
+      const requestedType = args.type || 'practice_game';
+      const requestedOpponent = args.opponentMode || 'mentor';
+      const requestedColor = args.learnerColor || this.gameSettingsService?.get()?.defaults?.humanColor || 'white';
+      const sameActiveActivity = activeActivity
+        && activeActivity.status === 'active'
+        && activeActivity.type === requestedType
+        && activeActivity.learnerColor === requestedColor
+        && (requestedType !== 'practice_game' || activeActivity.config?.opponentMode === requestedOpponent)
+        && (!args.sourceId || activeActivity.sourceId === args.sourceId);
+      if (sameActiveActivity) {
+        onProgress(1, 1);
+        return {
+          activity: activeActivity,
+          board: compactBoardState(this.workspaceState(conversationId)),
+          alreadyActive: true
+        };
+      }
       this.activityService.assertExplicitStartConsent(conversationId, requestId);
       const voiceFirstPhysical = channel === 'live-physical';
       if (voiceFirstPhysical) {
-        const learnerColor = args.learnerColor || this.gameSettingsService?.get()?.defaults?.humanColor || 'white';
+        const learnerColor = requestedColor;
         if (args.learnerColor && this.gameSettingsService) {
           this.gameSettingsService.updateFromMentor(conversationId, { humanColor: learnerColor });
         }

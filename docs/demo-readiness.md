@@ -358,3 +358,34 @@ Stockfish-led play, learner color, or playing against Gemini. The complete
 Mentor and physical suites, voice-first browser checks, client lint/build, and
 backend syntax checks pass. A final real-board startup and first-reply retest
 remains required.
+
+### Guided-Turn Coaching And Narration Reliability
+
+A full guided-game trial exposed two visible red tool failures and two turn
+coordination defects. Gemini redundantly called `start_activity` after the same
+game was already active. Its first guarded move could also arrive while the
+physical adapter reported `ready` rather than `robot_thinking`, causing a
+corrective turn and duplicate narration. Finally, a verified learner move made
+while the previous narration was still active could be committed physically
+without receiving its queued Mentor turn.
+
+Matching activity starts are now idempotent and never reset the game. A matching
+activity/turn with exact occupancy may safely recover the transient
+`ready -> robot_thinking` boundary before queueing the guarded move; unsafe or
+ambiguous phases still fail normally. Physical turn requests received during
+active narration are coalesced and run as soon as that narration completes.
+Superseded response generations cannot launch a corrective turn for a newer
+position.
+
+Guided Mentor turns now require quick analysis of the learner's exact last move
+as well as current-position candidate analysis. After the robot reply verifies,
+Gemini must state the engine classification plainly, explain the consequence,
+and connect the position to a concrete two-to-three-ply plan for both sides.
+Weak moves are labeled directly, with the stronger alternative, and generic or
+repeated development commentary is explicitly disallowed.
+
+Regression coverage includes duplicate activity startup, missing learner-move
+analysis, status-revision execution, and a learner move committed during active
+narration. Complete Mentor and physical suites, browser checks, client
+lint/build, and backend syntax checks pass. Firmware and `offline_core` remain
+unchanged; a real guided-game retest remains required.

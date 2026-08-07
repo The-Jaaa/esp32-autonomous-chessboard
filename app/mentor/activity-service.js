@@ -108,6 +108,7 @@ class MentorActivityService {
     this.leaseOwner = `activity-service:${this.createId()}`;
     this.inFlight = new Map();
     this.physicalInFlight = new Map();
+    this.pendingPhysicalTurns = new Map();
     this.runners = {
       isLiveActive: () => false,
       text: null,
@@ -1239,10 +1240,29 @@ class MentorActivityService {
     if (board.turn !== colorCode(activity.mentorColor) || !board.legalMoves.includes(uci)) {
       throw new MentorActivityError(`The mentor controls ${activity.mentorColor} and must choose a legal move.`, 'activity_wrong_color', 409);
     }
+    this.assertPhysicalLearnerMoveAnalyzed(conversationId, requestId, board);
     if (board.legalMoves.length > 1) {
       this.assertPhysicalTeachingCandidate(conversationId, requestId, activity, board, uci);
     }
     return activity;
+  }
+
+  assertPhysicalLearnerMoveAnalyzed(conversationId, requestId, board) {
+    const learnerMove = board.history?.at(-1);
+    if (!learnerMove || learnerMove.side !== 'human') return;
+    const analysisCall = this.store.listToolCallsForRequest(conversationId, requestId)
+      .filter((call) => call.name === 'analyze_move' && call.status === 'complete'
+        && call.result?.sourceKey === board.sourceKey
+        && call.result?.analyzedFen === board.fen
+        && call.result?.move?.uci === (learnerMove.uci || learnerMove.move))
+      .at(-1);
+    if (!analysisCall) {
+      throw new MentorActivityError(
+        'Analyze the learner\'s latest physical move before choosing and explaining the mentor reply.',
+        'practice_learner_move_analysis_required',
+        409
+      );
+    }
   }
 
   assertPhysicalTeachingCandidate(conversationId, requestId, activity, board, uci) {
@@ -1438,7 +1458,10 @@ class MentorActivityService {
   }
 
   schedulePhysicalMentorTurn(conversationId, reason) {
-    if (this.physicalInFlight.has(conversationId)) return this.physicalInFlight.get(conversationId);
+    if (this.physicalInFlight.has(conversationId)) {
+      this.pendingPhysicalTurns.set(conversationId, reason);
+      return this.physicalInFlight.get(conversationId);
+    }
     const promise = this.executePhysicalMentorTurn(conversationId, reason)
       .catch((error) => {
         this.logger.error?.('[MENTOR_PHYSICAL_ACTIVITY_TURN_FAILED]', JSON.stringify({
@@ -1451,7 +1474,17 @@ class MentorActivityService {
           this.pause(conversationId, 'mentor_turn_failed');
         }
       })
-      .finally(() => this.physicalInFlight.delete(conversationId));
+      .finally(() => {
+        this.physicalInFlight.delete(conversationId);
+        const pendingReason = this.pendingPhysicalTurns.get(conversationId);
+        this.pendingPhysicalTurns.delete(conversationId);
+        const activity = this.store.getActiveActivity(conversationId);
+        if (pendingReason && this.isPhysicalActivity(activity)
+          && activity.status === 'active'
+          && ['mentor_turn', 'mentor_thinking'].includes(activity.phase)) {
+          this.schedulePhysicalMentorTurn(conversationId, pendingReason);
+        }
+      });
     this.physicalInFlight.set(conversationId, promise);
     return promise;
   }
@@ -1465,11 +1498,15 @@ class MentorActivityService {
       `Activity: ${activity.title}. Learner: ${activity.learnerColor}. Mentor: ${activity.mentorColor}.`,
       `Authoritative physical revision: ${board.revision}. FEN: ${board.fen}`,
       activity.state.strategicPlan ? `Continue this strategic plan: ${activity.state.strategicPlan}` : 'Choose a coherent teaching plan and retain it across turns.',
-      'Call analyze_position in quick mode, then call play_physical_move exactly once with a top-three move no more than 50 centipawns below the best.',
-      'Include a concise plan with play_physical_move. Keep an existing plan when it remains sound; replace it only when the position requires a new plan.',
+      'If the latest verified move belongs to the learner, first call analyze_move in quick mode without a UCI so it grades that exact move.',
+      'Then call analyze_position in quick mode and call play_physical_move exactly once with a top-three move no more than 50 centipawns below the best.',
+      'Do not speak an explanation before play_physical_move succeeds. A tool error means the move did not happen.',
+      'Include a concrete two-to-three-ply strategic plan with play_physical_move. Name the intended follow-up, the learner threat you are addressing, and what would make the plan change.',
       'Forced mates and materially superior moves take priority over teaching flexibility.',
       'Do not finish with analysis alone. Do not describe raw motors, paths, magnets, or sensors.',
-      'After verification, explain the learner move, your reply, and the current plan directly and without praise padding.'
+      'After verification, give exactly one coaching response. State the learner move classification verbatim: best, good, inaccuracy, mistake, blunder, forced, or the mate override.',
+      'Explain the immediate consequence, your verified reply, and the next two or three likely ideas for both sides. For an inaccuracy or worse, say plainly that it was bad and give the stronger alternative.',
+      'Avoid generic praise, repeated development slogans, and repeating an explanation from an earlier failed attempt.'
     ].join('\n');
   }
 
@@ -1523,6 +1560,7 @@ class MentorActivityService {
         const completion = await this.runPhysicalGeneratedTurn(conversationId, activity, board, requestId, attempt === 1);
         const current = this.store.getActiveActivity(conversationId);
         if (!current || current.status !== 'active' || current.phase === 'learner_turn') return;
+        if (current.pendingRequestId !== requestId) return;
         if (completion?.status === 'cancelled') {
           this.pause(conversationId, 'response_stopped');
           return;

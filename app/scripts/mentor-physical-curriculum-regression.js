@@ -8,14 +8,14 @@ const { MentorActivityService } = require('../mentor/activity-service');
 const { MentorToolService } = require('../mentor/tool-service');
 const { getCatalogItem, listCatalog } = require('../mentor/curriculum');
 
-function physicalState(game, revision, humanColor = 'white') {
+function physicalState(game, revision, humanColor = 'white', history = []) {
   return {
     sourceKey: 'physical:server-test:9',
     fen: game.fen(),
     revision,
     turn: game.turn(),
     legalMoves: game.moves({ verbose: true }).map((move) => `${move.from}${move.to}${move.promotion || ''}`).sort(),
-    history: [],
+    history,
     gameStatus: {
       isGameOver: game.isGameOver(),
       checkmate: game.isCheckmate(),
@@ -63,12 +63,13 @@ async function verifyPhysicalAnalysisSurvivesStatusRevisionChurn() {
   const store = new MentorStore({ dbPath: path.join(tempDir, 'mentor.sqlite') });
   const game = new Chess(STANDARD_FEN);
   let revision = 1;
+  let history = [];
   const queued = [];
   let service;
   const coordinator = {
     isAttached: () => true,
     requirePracticeStartState: () => physicalState(game, revision),
-    requireCurrentPhysicalState: () => physicalState(game, revision),
+    requireCurrentPhysicalState: () => physicalState(game, revision, 'white', history),
     syncPhysicalActivity: () => {},
     announcePhysicalPractice: () => null,
     playPhysicalMove: async (_conversationId, options) => {
@@ -85,6 +86,7 @@ async function verifyPhysicalAnalysisSurvivesStatusRevisionChurn() {
       learnerColor: 'white', opponentMode: 'mentor', expectedRevision: revision
     });
     game.move('e4');
+    history = [{ side: 'human', uci: 'e2e4', move: 'e2e4', san: 'e4' }];
     revision = 2;
     const requestId = `physical-activity:${activity.id}:2:2:0`;
     activity = store.updateActivity(activity.id, {
@@ -119,6 +121,33 @@ async function verifyPhysicalAnalysisSurvivesStatusRevisionChurn() {
       }
     });
 
+    await assert.rejects(
+      service.playPhysicalMove(conversation.id, requestId, 'g8f6', {
+        strategicPlan: 'Develop and contest the center.'
+      }),
+      (error) => error.code === 'practice_learner_move_analysis_required'
+    );
+
+    const moveAnalysis = store.createToolCall({
+      conversationId: conversation.id,
+      requestId,
+      assistantMessageId: pair.assistantMessage.id,
+      providerCallId: 'learner-move-analysis',
+      ordinal: 2,
+      name: 'analyze_move'
+    }).toolCall;
+    store.updateToolCall(moveAnalysis.id, {
+      status: 'complete',
+      result: {
+        sourceKey: 'physical:server-test:9',
+        analyzedFen: game.fen(),
+        analyzedRevision: revision,
+        move: { uci: 'e2e4', san: 'e4', color: 'w' },
+        classification: 'good',
+        centipawnLoss: 20
+      }
+    });
+
     revision = 5;
     await service.playPhysicalMove(conversation.id, requestId, 'g8f6', {
       strategicPlan: 'Develop and contest the center.'
@@ -126,6 +155,44 @@ async function verifyPhysicalAnalysisSurvivesStatusRevisionChurn() {
     assert.strictEqual(queued.length, 1);
     assert.strictEqual(queued[0].expectedRevision, 5, 'execution uses the latest physical status revision');
     assert.strictEqual(store.getActiveActivity(conversation.id).boardRevision, 5);
+  } finally {
+    store.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+async function verifyMoveDuringNarrationQueuesNextTurn() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mentor-physical-narration-queue-'));
+  const store = new MentorStore({ dbPath: path.join(tempDir, 'mentor.sqlite') });
+  const game = new Chess(STANDARD_FEN);
+  const service = new MentorActivityService({ store, chessService: {}, analysisService: {}, emit: () => {} });
+  service.setPhysicalCoordinator({
+    isAttached: () => true,
+    requirePracticeStartState: () => physicalState(game, 1),
+    syncPhysicalActivity: () => {},
+    announcePhysicalPractice: () => null
+  });
+  const conversation = store.createConversation();
+  let releaseFirst;
+  const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
+  const calls = [];
+  service.executePhysicalMentorTurn = async (_conversationId, reason) => {
+    calls.push(reason);
+    if (calls.length === 1) await firstGate;
+  };
+
+  try {
+    const activity = service.startPhysicalPractice(conversation.id, {
+      learnerColor: 'white', opponentMode: 'mentor', expectedRevision: 1
+    });
+    store.updateActivity(activity.id, { phase: 'mentor_turn' });
+    const first = service.schedulePhysicalMentorTurn(conversation.id, 'current_narration');
+    service.schedulePhysicalMentorTurn(conversation.id, 'learner_moved_during_narration');
+    assert.strictEqual(calls.length, 1);
+    releaseFirst();
+    await first;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepStrictEqual(calls, ['current_narration', 'learner_moved_during_narration']);
   } finally {
     store.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -447,12 +514,22 @@ async function verifyVoiceFirstPhysicalOrchestration() {
     }
   };
   const activityService = {
+    current: null,
     assertExplicitStartConsent: () => true,
     validateTool: () => true,
     startActivity: async (_conversationId, options) => {
       starts.push(options);
-      return { id: 'physical-opening', config: { boardSource: 'physical' } };
-    }
+      activityService.current = {
+        id: 'physical-opening',
+        type: options.type,
+        status: 'active',
+        learnerColor: options.learnerColor,
+        sourceId: options.sourceId,
+        config: { boardSource: 'physical', opponentMode: options.opponentMode }
+      };
+      return activityService.current;
+    },
+    get: () => activityService.current
   };
   const gameSettingsService = {
     get: () => ({ defaults }),
@@ -498,6 +575,25 @@ async function verifyVoiceFirstPhysicalOrchestration() {
     assert.strictEqual(starts[0].expectedRevision, 7);
     assert.strictEqual(starts[0].sourceId, 'italian-game');
 
+    const duplicatePair = store.createMessagePair(conversation.id, {
+      requestId: 'voice-opening-black-duplicate',
+      text: 'Start the Italian Game again.'
+    });
+    const duplicate = await service.execute({
+      conversationId: conversation.id,
+      requestId: 'voice-opening-black-duplicate',
+      assistantMessageId: duplicatePair.assistantMessage.id,
+      ordinal: 1,
+      call: {
+        id: 'provider-opening-black-duplicate',
+        name: 'start_activity',
+        args: { type: 'opening_drill', sourceId: 'italian-game', learnerColor: 'black' }
+      },
+      channel: 'live-physical'
+    });
+    assert.strictEqual(duplicate.response.output.alreadyActive, true);
+    assert.strictEqual(starts.length, 1, 'matching duplicate activity start does not restart the game');
+
     const attachedVoiceTools = service.declarations(conversation.id, { voiceFirstPhysical: true })
       .map((tool) => tool.name);
     assert(attachedVoiceTools.includes('play_physical_move'));
@@ -527,6 +623,7 @@ async function verifyVoiceFirstPhysicalOrchestration() {
   verifyNaturalVoiceActivityConsent();
   await verifyGuidedPhysicalFallback();
   await verifyPhysicalAnalysisSurvivesStatusRevisionChurn();
+  await verifyMoveDuringNarrationQueuesNextTurn();
   await verifyStrandedMentorTurnRecoversWhenLiveReturns();
   await verifyStockfishPolicyAndColorChecks();
   verifyBothColorOpeningsAndPhysicalPuzzle();
