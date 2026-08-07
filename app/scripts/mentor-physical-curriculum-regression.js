@@ -5,6 +5,7 @@ const path = require('path');
 const { Chess } = require('chess.js');
 const { MentorStore, STANDARD_FEN } = require('../mentor/store');
 const { MentorActivityService } = require('../mentor/activity-service');
+const { MentorToolService } = require('../mentor/tool-service');
 const { getCatalogItem, listCatalog } = require('../mentor/curriculum');
 
 function physicalState(game, revision, humanColor = 'white') {
@@ -267,10 +268,101 @@ function verifyBothColorOpeningsAndPhysicalPuzzle() {
   }
 }
 
+async function verifyVoiceFirstPhysicalOrchestration() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mentor-voice-physical-'));
+  const store = new MentorStore({ dbPath: path.join(tempDir, 'mentor.sqlite') });
+  const conversation = store.createConversation();
+  const pair = store.createMessagePair(conversation.id, {
+    requestId: 'voice-opening-black',
+    text: 'Teach me the Italian Game as Black.'
+  });
+  let attached = false;
+  let defaults = { humanColor: 'white', difficultyLevel: 3 };
+  const ensured = [];
+  const starts = [];
+  const physicalState = {
+    source: 'physical',
+    fen: STANDARD_FEN,
+    pgn: '',
+    turnName: 'White',
+    revision: 7,
+    orientation: 'black',
+    gameStatus: { status: 'ongoing', resultText: 'Game in progress', isGameOver: false },
+    history: [],
+    legalMoves: [],
+    annotations: { highlights: [], arrows: [] },
+    physical: { humanColor: 'black', robotColor: 'white' }
+  };
+  const physicalObserver = {
+    isAttached: () => attached,
+    allowedTool: () => true,
+    getState: () => physicalState,
+    ensureVoiceActivityBoard: (_conversationId, options) => {
+      ensured.push(options);
+      attached = true;
+    }
+  };
+  const activityService = {
+    assertExplicitStartConsent: () => true,
+    validateTool: () => true,
+    startActivity: async (_conversationId, options) => {
+      starts.push(options);
+      return { id: 'physical-opening', config: { boardSource: 'physical' } };
+    }
+  };
+  const gameSettingsService = {
+    get: () => ({ defaults }),
+    updateFromMentor: (_conversationId, patch) => {
+      defaults = { ...defaults, ...patch };
+      return { defaults };
+    }
+  };
+  const service = new MentorToolService({
+    store,
+    chessService: { getState: () => { throw new Error('Virtual state must not be used.'); } },
+    activityService,
+    physicalObserver,
+    gameSettingsService
+  });
+
+  try {
+    const voiceTools = service.declarations(conversation.id, { voiceFirstPhysical: true })
+      .map((tool) => tool.name);
+    assert(voiceTools.includes('start_activity'));
+    assert(voiceTools.includes('start_physical_game'));
+    assert(!voiceTools.includes('play_move'));
+    assert(!voiceTools.includes('set_orientation'));
+
+    const result = await service.execute({
+      conversationId: conversation.id,
+      requestId: 'voice-opening-black',
+      assistantMessageId: pair.assistantMessage.id,
+      ordinal: 1,
+      call: {
+        id: 'provider-opening-black',
+        name: 'start_activity',
+        args: { type: 'opening_drill', sourceId: 'italian-game', learnerColor: 'black' }
+      },
+      channel: 'live-physical'
+    });
+    assert(result.response.output);
+    assert.deepStrictEqual(ensured, [{ requestId: 'voice-opening-black', learnerColor: 'black' }]);
+    assert.strictEqual(defaults.humanColor, 'black');
+    assert.strictEqual(starts.length, 1);
+    assert.strictEqual(starts[0].learnerColor, 'black');
+    assert.strictEqual(starts[0].expectedRevision, 7);
+    assert.strictEqual(starts[0].sourceId, 'italian-game');
+  } finally {
+    store.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
 (async () => {
   await verifyGuidedPhysicalFallback();
   await verifyStockfishPolicyAndColorChecks();
   verifyBothColorOpeningsAndPhysicalPuzzle();
+  await verifyVoiceFirstPhysicalOrchestration();
   console.log('Mentor physical curriculum guided-game regressions passed.');
 })().catch((error) => {
   console.error(error);

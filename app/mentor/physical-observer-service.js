@@ -704,7 +704,8 @@ class MentorPhysicalObserverService {
     sessionGeneration,
     allowLiveSwitch = false,
     coachingMode = 'prompt_pending',
-    coachingOrigin = 'manual'
+    coachingOrigin = 'manual',
+    orientation = null
   } = {}) {
     if (!this.store.getConversation(conversationId)) {
       throw new MentorPhysicalError('Conversation not found.', 'conversation_not_found', 404);
@@ -731,7 +732,7 @@ class MentorPhysicalObserverService {
       serverInstanceId,
       sessionGeneration: Number(sessionGeneration),
       stateRevision: Number(this.snapshot.stateRevision || 0),
-      orientation: virtualState.orientation,
+      orientation: ['white', 'black'].includes(orientation) ? orientation : virtualState.orientation,
       coachingMode,
       coachingOrigin
     });
@@ -806,12 +807,16 @@ class MentorPhysicalObserverService {
           409
         );
       }
-      throw new MentorPhysicalError(
-        'A physical game is already active. Ask the learner to confirm attaching to the existing game.',
-        'physical_game_attach_confirmation_required',
-        409,
-        { physicalStatus: status }
-      );
+      const detail = this.attach(conversationId, {
+        serverInstanceId: status.serverInstanceId,
+        sessionGeneration: status.sessionGeneration,
+        allowLiveSwitch: true,
+        coachingMode: 'prompt_pending',
+        coachingOrigin: 'mentor_attach'
+      });
+      const result = { started: false, attached: true, physicalBoard: detail };
+      if (requestId) this.store.savePhysicalAction(conversationId, requestId, 'attach', result);
+      return result;
     }
     if (!status.sensorFresh) {
       throw new MentorPhysicalError(
@@ -837,6 +842,102 @@ class MentorPhysicalObserverService {
       if (requestId) this.store.savePhysicalAction(conversationId, requestId, 'start', null, error.code || 'physical_start_failed');
       throw error;
     }
+  }
+
+  isPristineActivityBoard() {
+    const snapshot = this.snapshot;
+    return Boolean(
+      snapshot?.active
+      && snapshot.fen === STANDARD_FEN
+      && (snapshot.physicalMoveLog || snapshot.moveLog || []).length === 0
+      && ['setup', 'ready'].includes(snapshot.phase)
+      && !snapshot.robotBusy
+      && !snapshot.pendingRobotJob
+      && !snapshot.pendingUndo
+      && !snapshot.pendingRedo
+      && !snapshot.pendingPromotion
+    );
+  }
+
+  ensureVoiceActivityBoard(conversationId, { requestId, learnerColor } = {}) {
+    if (!['white', 'black'].includes(learnerColor)) {
+      throw new MentorPhysicalError('Learner color must be white or black.', 'invalid_learner_color');
+    }
+    if (this.isAttached(conversationId)) {
+      const current = this.getState(conversationId);
+      if (current.physical.humanColor === learnerColor) return this.detail(conversationId);
+      if (!this.isPristineActivityBoard()) {
+        throw new MentorPhysicalError(
+          `The active physical game uses Human ${current.physical.humanColor}. End it before starting a ${learnerColor} activity.`,
+          'physical_activity_color_conflict',
+          409
+        );
+      }
+      this.clearPendingGuidance(conversationId);
+      this.clearPendingOpeningGuidance(conversationId);
+      this.clearPendingCoaching(conversationId);
+      const detached = this.store.detachPhysicalBinding(conversationId, 'activity_restart');
+      this.emit(conversationId, 'mentor-physical-binding-updated', {
+        conversationId,
+        physicalBoard: { binding: detached, state: null }
+      });
+      this.adapter?.startDefaultGame?.({ allowPristineRestart: true });
+      return this.attach(conversationId, {
+        serverInstanceId: this.snapshot.serverInstanceId,
+        sessionGeneration: this.snapshot.sessionGeneration,
+        allowLiveSwitch: true,
+        coachingMode: 'selective',
+        coachingOrigin: 'gemini_started',
+        orientation: learnerColor
+      });
+    }
+
+    const status = this.getPhysicalGameStatus(conversationId);
+    if (status.boundConversationId && status.boundConversationId !== conversationId) {
+      throw new MentorPhysicalError(
+        'The active physical game is attached to another conversation.',
+        'physical_board_already_attached',
+        409
+      );
+    }
+    if (status.available) {
+      const activeColor = this.snapshot?.humanColor || 'white';
+      if (activeColor !== learnerColor) {
+        if (!this.isPristineActivityBoard()) {
+          throw new MentorPhysicalError(
+            `The active physical game uses Human ${activeColor}. End it before starting a ${learnerColor} activity.`,
+            'physical_activity_color_conflict',
+            409
+          );
+        }
+        this.adapter?.startDefaultGame?.({ allowPristineRestart: true });
+      }
+    } else {
+      if (!status.sensorFresh) {
+        throw new MentorPhysicalError(
+          'The ESP32 sensor connection is stale. Reconnect the board before starting a physical activity.',
+          'physical_sensor_stale',
+          409
+        );
+      }
+      this.adapter?.startDefaultGame?.();
+    }
+    const detail = this.attach(conversationId, {
+      serverInstanceId: this.snapshot.serverInstanceId,
+      sessionGeneration: this.snapshot.sessionGeneration,
+      allowLiveSwitch: true,
+      coachingMode: 'selective',
+      coachingOrigin: 'gemini_started',
+      orientation: learnerColor
+    });
+    if (requestId) {
+      this.store.savePhysicalAction(conversationId, `${requestId}:activity-board`, 'start', {
+        started: !status.available,
+        attached: true,
+        physicalBoard: detail
+      });
+    }
+    return detail;
   }
 
   attachPhysicalGame(conversationId, { requestId, requireIntent = true } = {}) {
@@ -992,7 +1093,7 @@ class MentorPhysicalObserverService {
         ]
       : [];
     return [
-      'Current workspace source: physical chessboard (read-only).',
+      'Current workspace source: physical chessboard with guarded activity control.',
       `FEN: ${state.fen}`,
       `PGN: ${state.pgn || '(none)'}`,
       `Turn: ${state.turnName}`,
@@ -1010,7 +1111,7 @@ class MentorPhysicalObserverService {
       `Reviewed physical puzzles: ${reviewedPuzzles}`,
       activity?.type === 'practice_game' && activity.config?.opponentMode === 'mentor'
         ? 'During your assigned mentor turn, you may use play_physical_move after Stockfish verification. You cannot access motors, routes, magnets, or command queues.'
-        : 'You may analyze or annotate this position, but you cannot directly move, reset, load, or demonstrate on the physical board.',
+        : 'You may analyze or annotate this position. Physical moves are available only through an active guarded activity.',
       'You may start a reviewed opening from the exact standard position or a reviewed puzzle through its guided custom setup.',
       'Never claim a physical move succeeded until its tool result confirms exact hardware verification.'
     ].join('\n');

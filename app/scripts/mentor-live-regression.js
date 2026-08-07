@@ -128,7 +128,8 @@ async function socketRegressions() {
     ai: {},
     dbPath: ':memory:',
     provider,
-    liveConnector: connector
+    liveConnector: connector,
+    voiceFirstPhysical: false
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const baseUrl = `http://127.0.0.1:${server.address().port}`;

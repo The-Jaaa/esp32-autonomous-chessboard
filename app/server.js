@@ -1776,7 +1776,7 @@ mentorFeature.physicalObserver.setAdapter({
       ? Math.max(0, Date.now() - Math.max(physicalSession.lastSnapshotAt || 0, physicalSession.lastPollAt || 0))
       : null
   }),
-  startDefaultGame: () => {
+  startDefaultGame: ({ allowPristineRestart = false } = {}) => {
     const lastBoardContactAt = Math.max(physicalSession.lastSnapshotAt || 0, physicalSession.lastPollAt || 0);
     const sensorAgeMs = lastBoardContactAt
       ? Math.max(0, Date.now() - lastBoardContactAt)
@@ -1789,10 +1789,19 @@ mentorFeature.physicalObserver.setAdapter({
       throw error;
     }
     if (physicalSession.active && physicalSession.phase !== 'idle') {
-      const error = new Error('A physical game is already active. Attach to it instead of starting another game.');
-      error.code = 'physical_game_active';
-      error.statusCode = 409;
-      throw error;
+      const pristine = physicalSession.game.fen() === PHYSICAL_START_FEN
+        && physicalSession.moveLog.length === 0
+        && ['setup', 'ready'].includes(physicalSession.phase)
+        && !physicalSession.pendingRobotJob
+        && !physicalSession.pendingUndo
+        && !physicalSession.pendingRedo
+        && !physicalSession.pendingPromotion;
+      if (!allowPristineRestart || !pristine) {
+        const error = new Error('A physical game is already active. Attach to it instead of starting another game.');
+        error.code = 'physical_game_active';
+        error.statusCode = 409;
+        throw error;
+      }
     }
     const defaults = mentorFeature.gameSettingsService.get().defaults;
     return startPhysicalSession({

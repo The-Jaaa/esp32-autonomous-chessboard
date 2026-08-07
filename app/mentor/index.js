@@ -37,7 +37,8 @@ function createMentorFeature({
   speakerService = null,
   model = 'gemini-3.5-flash',
   liveModel = DEFAULT_LIVE_MODEL,
-  liveVoice = DEFAULT_LIVE_VOICE
+  liveVoice = DEFAULT_LIVE_VOICE,
+  voiceFirstPhysical = true
 }) {
   const store = new MentorStore(dbPath ? { dbPath } : {});
   const gameSettingsService = new GameSettingsService({
@@ -122,7 +123,8 @@ function createMentorFeature({
     connector,
     emit,
     model: liveModel,
-    voiceName: liveVoice
+    voiceName: liveVoice,
+    voiceFirstPhysical
   });
   physicalObserver.setDependencies({
     textService: service,

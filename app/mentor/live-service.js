@@ -41,6 +41,9 @@ const LIVE_SYSTEM_INSTRUCTION = [
   'Start a structured activity only after the learner explicitly agrees.',
   'The primary mentor product uses the physical board. If the learner says Let us play without naming an opponent, ask whether they want Mentor-led or Stockfish-led play.',
   'An explicit physical game, reviewed opening, or puzzle request is consent to use the matching high-level activity tools.',
+  'The primary Live workspace is physical-only. Never use virtual play_move, play_line, load_position, or reset_board for a learner activity.',
+  'Calling start_activity establishes or attaches the physical board first. Include learnerColor and opponentMode when the learner specifies them.',
+  'Flipping orientation only changes the app view; it never changes the learner side and never replaces start_activity.',
   'For openings, respect the requested opening and learner color. For puzzles, guide setup and wait for explicit physical setup confirmation.',
   'During an assigned activity turn, analyze first and then make exactly one mentor move, unless you explicitly request a prediction.',
   'Do not leave an assigned mentor turn at analysis alone.',
@@ -362,6 +365,7 @@ class MentorLiveService {
     emit = () => {},
     model = DEFAULT_LIVE_MODEL,
     voiceName = DEFAULT_LIVE_VOICE,
+    voiceFirstPhysical = false,
     createId = randomUUID,
     logger = console
   }) {
@@ -376,6 +380,7 @@ class MentorLiveService {
     this.emit = emit;
     this.model = model;
     this.voiceName = voiceName;
+    this.voiceFirstPhysical = voiceFirstPhysical;
     this.createId = createId;
     this.logger = logger;
     this.bySocket = new Map();
@@ -455,8 +460,8 @@ class MentorLiveService {
         systemInstruction: {
           parts: [{ text: LIVE_SYSTEM_INSTRUCTION }]
         },
-        tools: this.toolService?.declarations(record.conversationId)?.length
-          ? [{ functionDeclarations: this.toolService.declarations(record.conversationId) }]
+        tools: this.toolService?.declarations(record.conversationId, { voiceFirstPhysical: this.voiceFirstPhysical })?.length
+          ? [{ functionDeclarations: this.toolService.declarations(record.conversationId, { voiceFirstPhysical: this.voiceFirstPhysical }) }]
           : undefined
       },
       callbacks: {
@@ -1025,7 +1030,8 @@ class MentorLiveService {
           assistantMessageId: turn.pair.assistantMessage.id,
           ordinal: turn.toolOrdinal,
           call,
-          signal: controller.signal
+          signal: controller.signal,
+          channel: this.voiceFirstPhysical ? 'live-physical' : 'live'
         });
         this.clearDeliveredBoardContext(record, result);
         if (!execution.cancelled && !turn.cancelled && !turn.cancelledToolIds.has(call.id)) {

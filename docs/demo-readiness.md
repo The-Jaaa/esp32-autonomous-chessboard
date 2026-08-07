@@ -286,3 +286,27 @@ Real-board acceptance remains required before this milestone is marked
 demonstration-ready: Mentor-led three-turn play, Stockfish-led difficulty
 handoff, a Human Black reviewed opening, one physical puzzle with wrong-move
 recovery and a hint, Pause/Resume, and urgent mismatch guidance.
+
+### Voice Activity Startup Correction
+
+The first real voice-first trial exposed three orchestration failures. A
+Mentor-led request could fail its activity-consent check and then mutate the
+hidden virtual board; a Stockfish activity could start virtually while the
+learner moved physical pieces; and an Italian-as-Black request could flip only
+the virtual orientation after physical attachment failed. Gemini then described
+those actions as successful even though no physical activity owned the board.
+
+Production Gemini Live now receives only physical startup/activity tools until
+the conversation is attached. A Live `start_activity` transaction establishes
+or attaches the physical board first, applies the requested learner color,
+aligns orientation to that color, and only then creates the activity. A pristine
+standard-position session may be restarted safely to change sides; a progressed
+game returns a conflict instead of being discarded. Orientation remains a view
+setting and cannot substitute for learner color or activity creation.
+
+The exact failure is covered by a regression requiring an unattached request
+for the Italian Game as Black to establish physical ownership, preserve Black
+as the learner, and never expose virtual `play_move` or `set_orientation` as
+startup alternatives. The complete Mentor and physical suites, client lint,
+client build, backend syntax, and diff checks pass. The corrected real-board
+startup paths still require a short retest.

@@ -163,7 +163,7 @@ class MentorActivityService {
     const userMessage = this.store.getRequestMessages(conversationId, requestId)
       .find((message) => message.role === 'user');
     const text = String(userMessage?.content || '').trim();
-    const explicit = /^(yes\b|yeah\b|yep\b|sure\b|ok(?:ay)?\b|sounds good\b|do it\b|go ahead\b|start\b|begin\b|let'?s\b|please start\b|i(?:'d| would) like to\b|i want to\b|play a\b|give me a\b|teach me\b|help me practice\b)/i.test(text);
+    const explicit = /^(yes\b|yeah\b|yep\b|sure\b|ok(?:ay)?\b|sounds good\b|do it\b|go ahead\b|start\b|begin\b|let'?s\b|please start\b|i(?:'d| would) like to\b|i want to\b|i(?:'ll| will) (?:go|play|take|be)\b|mentor(?:-led)?\b|stockfish(?:-led)?\b|play a\b|give me a\b|teach me\b|help me practice\b)/i.test(text);
     if (!explicit) {
       throw new MentorActivityError(
         'Ask for the learner’s explicit agreement before starting an activity.',

@@ -9,6 +9,14 @@ const PHYSICAL_ONLY_TOOL_NAMES = new Set([
   'confirm_physical_setup',
   'resolve_opening_drill'
 ]);
+const VOICE_FIRST_UNATTACHED_TOOL_NAMES = new Set([
+  'set_game_preferences',
+  'get_physical_game_status',
+  'start_physical_game',
+  'attach_physical_game',
+  'get_activity_state',
+  'start_activity'
+]);
 const CUSTOM_ACTIVITY_PROPERTIES = {
   type: { type: 'string', enum: ['opening_drill', 'puzzle', 'guided_lesson'] },
   title: { type: 'string' },
@@ -311,9 +319,12 @@ class MentorToolService {
     this.inFlight = new Map();
   }
 
-  declarations(conversationId = null) {
+  declarations(conversationId = null, { voiceFirstPhysical = false } = {}) {
     if (conversationId && this.physicalObserver?.isAttached(conversationId)) {
       return TOOL_DECLARATIONS.filter((tool) => this.physicalObserver.allowedTool(tool.name));
+    }
+    if (voiceFirstPhysical) {
+      return TOOL_DECLARATIONS.filter((tool) => VOICE_FIRST_UNATTACHED_TOOL_NAMES.has(tool.name));
     }
     return TOOL_DECLARATIONS.filter((tool) => !PHYSICAL_ONLY_TOOL_NAMES.has(tool.name));
   }
@@ -369,7 +380,7 @@ class MentorToolService {
     return execution;
   }
 
-  async executeOnce({ conversationId, requestId, assistantMessageId, ordinal, call, signal }) {
+  async executeOnce({ conversationId, requestId, assistantMessageId, ordinal, call, signal, channel = 'text' }) {
     const name = String(call?.name || 'unknown_tool');
     const args = call?.args && typeof call.args === 'object' ? call.args : {};
     const providerCallId = String(call?.id || `${name}-${ordinal}`);
@@ -410,6 +421,7 @@ class MentorToolService {
         requestId,
         toolCall,
         signal,
+        channel,
         onProgress: (progressCurrent, progressTotal) => {
           toolCall = this.update(conversationId, toolCall.id, 'mentor-tool-progress', {
             status: 'running',
@@ -453,7 +465,7 @@ class MentorToolService {
   }
 
   async runTool(name, args, context) {
-    const { conversationId, requestId, toolCall, signal, onProgress } = context;
+    const { conversationId, requestId, toolCall, signal, onProgress, channel } = context;
     if (name === 'set_game_preferences') {
       if (!this.gameSettingsService) throw new Error('Game settings are unavailable.');
       const result = this.gameSettingsService.updateFromMentor(conversationId, args);
@@ -500,10 +512,21 @@ class MentorToolService {
     if (name === 'start_activity') {
       if (!this.activityService) throw new Error('Mentor activities are unavailable.');
       this.activityService.assertExplicitStartConsent(conversationId, requestId);
+      const voiceFirstPhysical = channel === 'live-physical';
+      if (voiceFirstPhysical) {
+        const learnerColor = args.learnerColor || this.gameSettingsService?.get()?.defaults?.humanColor || 'white';
+        if (args.learnerColor && this.gameSettingsService) {
+          this.gameSettingsService.updateFromMentor(conversationId, { humanColor: learnerColor });
+        }
+        this.physicalObserver?.ensureVoiceActivityBoard(conversationId, {
+          requestId,
+          learnerColor
+        });
+      }
       const state = this.workspaceState(conversationId);
       const activity = await this.activityService.startActivity(conversationId, {
         type: args.type,
-        learnerColor: args.learnerColor || 'white',
+        learnerColor: args.learnerColor || this.gameSettingsService?.get()?.defaults?.humanColor || 'white',
         startFrom: args.startFrom || 'standard',
         sourceId: args.sourceId,
         opponentMode: args.opponentMode || 'mentor',
