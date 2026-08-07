@@ -667,6 +667,29 @@ export default function MentorWorkspace() {
   const boardInteractionLocked = Boolean(physicalAttached || mentorRequestBusy || pendingBoardAction || activityMoveLocked || activityBusy);
   const boardSetupLocked = Boolean(physicalAttached || mentorRequestBusy || pendingBoardAction || activity || activityBusy);
 
+  const selectPhysicalPromotion = useCallback(async (piece) => {
+    const promotion = physicalBoard?.state?.physical?.pendingPromotion;
+    if (!promotion) return;
+    setPhysicalBusy(true);
+    try {
+      const response = await fetch('/api/physical/promotion/select', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          piece,
+          transactionId: promotion.id,
+          expectedSessionGeneration: physicalBoard.state.sessionGeneration
+        })
+      });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.error || 'Promotion selection failed.');
+    } catch (promotionError) {
+      setError(promotionError.message);
+    } finally {
+      setPhysicalBusy(false);
+    }
+  }, [physicalBoard]);
+
   useEffect(() => {
     if (!physicalAttached) return undefined;
     setFreshnessNow(Date.now());
@@ -1492,6 +1515,24 @@ export default function MentorWorkspace() {
               <span>{coachingStatus?.text || (physicalBoard.binding?.coachingMode === 'selective' ? 'Selective coaching on' : physicalBoard.binding?.coachingMode === 'prompt_pending' ? 'Coaching choice pending' : 'Coaching paused')}</span>
               <strong>{physicalBoard.binding?.coachingMode === 'selective' ? 'On' : 'Off'}</strong>
             </button>
+            {workspaceState.physical.pendingPromotion && (
+              <div className="mentor-promotion-panel">
+                <strong>Promotion on {workspaceState.physical.pendingPromotion.to}</strong>
+                <span>{workspaceState.physical.statusText}</span>
+                <div>
+                  {['q', 'r', 'b', 'n'].map((piece) => (
+                    <button
+                      key={piece}
+                      type="button"
+                      className={workspaceState.physical.pendingPromotion.selectedPiece === piece ? 'is-active' : ''}
+                      disabled={workspaceState.physical.pendingPromotion.actor !== 'human' || physicalBusy}
+                      onClick={() => selectPhysicalPromotion(piece)}
+                    >{piece.toUpperCase()}</button>
+                  ))}
+                </div>
+                <small>Board letter: {(workspaceState.physical.pendingPromotion.displayedPiece || '-').toUpperCase()} · {Math.min(500, workspaceState.physical.pendingPromotion.stableForMs || 0)} / 500 ms stable</small>
+              </div>
+            )}
           </>
         ) : physicalBoard?.binding?.status === 'stale' ? (
           <div className="mentor-physical-status is-stale"><span className="mentor-physical-status-dot" /><div><strong>Previous physical session ended</strong><small>Attach the new game explicitly when it is ready.</small></div></div>

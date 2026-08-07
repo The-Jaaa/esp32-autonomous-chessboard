@@ -117,6 +117,21 @@ function parseGraveyardSlots(text) {
     .filter(Boolean);
 }
 
+function validateCustomPhysicalFen(value) {
+  const fen = String(value || '').trim();
+  if (!fen) throw new Error('Enter a FEN position.');
+  const game = new Chess(fen);
+  const pieces = game.board().flat().filter(Boolean);
+  if (pieces.filter((piece) => piece.type === 'k' && piece.color === 'w').length !== 1
+      || pieces.filter((piece) => piece.type === 'k' && piece.color === 'b').length !== 1) {
+    throw new Error('The position must contain exactly one king per color.');
+  }
+  if (game.board()[0].some((piece) => piece?.type === 'p') || game.board()[7].some((piece) => piece?.type === 'p')) {
+    throw new Error('Pawns cannot start on rank 1 or rank 8.');
+  }
+  return game.fen();
+}
+
 function formatPhysicalLogTime(timestamp) {
   if (!timestamp) return '';
   const date = new Date(timestamp);
@@ -184,11 +199,16 @@ export default function GameBoard() {
     nextGraveyardSlot: 0,
     canRedoPhysical: false,
     physicalRedoCount: 0,
+    pendingPromotion: null,
     physicalMoveLog: []
   });
   const [physicalLogs, setPhysicalLogs] = useState([]);
   const [graveyardText, setGraveyardText] = useState(DEFAULT_GRAVEYARD_TEXT);
   const [physicalSetupMode, setPhysicalSetupMode] = useState('full');
+  const [customFenDialogOpen, setCustomFenDialogOpen] = useState(false);
+  const [customPhysicalFen, setCustomPhysicalFen] = useState('7k/P7/8/8/8/8/8/7K w - - 0 1');
+  const [customFenError, setCustomFenError] = useState('');
+  const [pendingVirtualPromotion, setPendingVirtualPromotion] = useState(null);
 
   // ── Mutable refs for values needed inside stable callbacks ──
   const depthRef = useRef(1);
@@ -452,7 +472,18 @@ export default function GameBoard() {
     }
 
     try {
-      const move = g.move({ from: sourceSquare, to: targetSquare, promotion: 'q' });
+      const promotionMoves = g.moves({ square: sourceSquare, verbose: true })
+        .filter((candidate) => candidate.to === targetSquare && candidate.promotion);
+      if (promotionMoves.length > 0) {
+        setPendingVirtualPromotion({
+          from: sourceSquare,
+          to: targetSquare,
+          fen: g.fen(),
+          choices: promotionMoves.map((candidate) => candidate.promotion)
+        });
+        return false;
+      }
+      const move = g.move({ from: sourceSquare, to: targetSquare });
       if (!move) {
         console.log('[onDrop] move() returned falsy');
         return false;
@@ -467,6 +498,25 @@ export default function GameBoard() {
       return false;
     }
   }, [syncDisplay, onUserMove]);
+
+  const commitVirtualPromotion = useCallback((piece) => {
+    const pending = pendingVirtualPromotion;
+    const g = gameRef.current;
+    if (!pending || g.fen() !== pending.fen || !pending.choices.includes(piece)) {
+      setPendingVirtualPromotion(null);
+      return;
+    }
+    try {
+      const move = g.move({ from: pending.from, to: pending.to, promotion: piece });
+      if (!move) return;
+      setPendingVirtualPromotion(null);
+      syncDisplay();
+      onUserMove(move.san);
+    } catch (error) {
+      console.error('Virtual promotion failed:', error);
+      setPendingVirtualPromotion(null);
+    }
+  }, [onUserMove, pendingVirtualPromotion, syncDisplay]);
 
   const onSquareClick = useCallback(({ square }) => {
     if (physicalModeRef.current) return;
@@ -538,7 +588,8 @@ export default function GameBoard() {
         lastPhysicalFenRef.current = nextState.fen;
         setFen(nextState.fen);
         setHistory(Array.isArray(nextState.history) ? nextState.history : []);
-        setUndoStack([]);
+    setUndoStack([]);
+    setPendingVirtualPromotion(null);
         setOptionSquares({});
         setCoachAdvice('');
         updateEvaluation(nextState.fen);
@@ -551,6 +602,9 @@ export default function GameBoard() {
   const handleStartPhysicalGame = useCallback(async () => {
     try {
       const graveyardSlots = parseGraveyardSlots(graveyardText);
+      const initialFen = physicalSetupMode === 'custom'
+        ? validateCustomPhysicalFen(customPhysicalFen)
+        : undefined;
       const response = await fetch('/api/physical/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -559,6 +613,7 @@ export default function GameBoard() {
             level: gameSettings.defaults.difficultyLevel,
             profile: opponentProfileRef.current,
             setupMode: physicalSetupMode,
+            initialFen,
             graveyardSlots
           })
       });
@@ -574,7 +629,28 @@ export default function GameBoard() {
         lastError: { message: err.message }
       }));
     }
-  }, [applyPhysicalState, gameSettings.defaults.difficultyLevel, gameSettings.defaults.humanColor, graveyardText, physicalSetupMode]);
+  }, [applyPhysicalState, customPhysicalFen, gameSettings.defaults.difficultyLevel, gameSettings.defaults.humanColor, graveyardText, physicalSetupMode]);
+
+  const handlePhysicalPromotionSelect = useCallback(async (piece) => {
+    const promotion = physicalState.pendingPromotion;
+    if (!promotion) return;
+    try {
+      const response = await fetch('/api/physical/promotion/select', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          piece,
+          transactionId: promotion.id,
+          expectedSessionGeneration: physicalState.sessionGeneration
+        })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.error || 'Promotion selection failed.');
+      applyPhysicalState(data.state);
+    } catch (error) {
+      setPhysicalState((current) => ({ ...current, lastError: { message: error.message } }));
+    }
+  }, [applyPhysicalState, physicalState.pendingPromotion, physicalState.sessionGeneration]);
 
   const handleRetryRobotMove = useCallback(async () => {
     try {
@@ -1034,10 +1110,10 @@ export default function GameBoard() {
   const diagnosticSquareResolved = parseDiagnosticSquare(diagSquare);
   const visiblePhysicalLogs = physicalLogs.slice(-12).reverse();
   const physicalUndoDisabled = physicalState.active
-    ? !physicalState.canUndoPhysical || physicalState.robotBusy || ['setup', 'piece_lifted', 'castle_pending_rook', 'sync_warning', 'error', 'undo_waiting_human_restore'].includes(physicalState.phase)
+    ? !physicalState.canUndoPhysical || physicalState.robotBusy || Boolean(physicalState.pendingPromotion) || ['setup', 'piece_lifted', 'castle_pending_rook', 'sync_warning', 'error', 'undo_waiting_human_restore'].includes(physicalState.phase)
     : history.length === 0 || isEngineThinking;
   const physicalRedoDisabled = physicalState.active
-    ? !physicalState.canRedoPhysical || physicalState.robotBusy || ['setup', 'piece_lifted', 'castle_pending_rook', 'sync_warning', 'error', 'undo_waiting_human_restore'].includes(physicalState.phase)
+    ? !physicalState.canRedoPhysical || physicalState.robotBusy || Boolean(physicalState.pendingPromotion) || ['setup', 'piece_lifted', 'castle_pending_rook', 'sync_warning', 'error', 'undo_waiting_human_restore'].includes(physicalState.phase)
     : undoStack.length === 0 || isEngineThinking;
   const displayedMoveLog = physicalState.active
     ? (Array.isArray(physicalState.physicalMoveLog) ? physicalState.physicalMoveLog : [])
@@ -1202,15 +1278,52 @@ export default function GameBoard() {
           >
             <option value="full">Full Starting Set</option>
             <option value="partial">Partial Starting Set</option>
+            <option value="custom">Custom FEN Position</option>
           </select>
+          {physicalSetupMode === 'custom' && (
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => { setCustomFenError(''); setCustomFenDialogOpen(true); }}
+              disabled={physicalState.robotBusy}
+              style={{ width: '100%', marginBottom: '10px' }}
+            >
+              Configure Custom Position
+            </button>
+          )}
           <button
             onClick={handleStartPhysicalGame}
             className="btn btn-primary"
             disabled={physicalState.robotBusy}
             style={{ width: '100%', marginBottom: '10px' }}
           >
-            {physicalState.active ? 'Recalibrate Board' : physicalSetupMode === 'partial' ? 'Start Partial Game' : 'Start Physical Game'}
+            {physicalState.active ? 'Recalibrate Board' : physicalSetupMode === 'partial' ? 'Start Partial Game' : physicalSetupMode === 'custom' ? 'Start Custom Position' : 'Start Physical Game'}
           </button>
+
+          {physicalState.pendingPromotion && (
+            <div className="physical-promotion-panel" style={{ padding: '10px', marginBottom: '10px', border: '1px solid #a855f7', background: 'rgba(168,85,247,0.1)', borderRadius: '6px' }}>
+              <strong style={{ display: 'block', marginBottom: '4px' }}>Promotion on {physicalState.pendingPromotion.to}</strong>
+              <span style={{ display: 'block', color: 'var(--text-secondary)', fontSize: '0.78rem', marginBottom: '8px' }}>
+                {physicalState.statusText}
+              </span>
+              <div style={{ display: 'flex', gap: '6px' }}>
+                {['q', 'r', 'b', 'n'].map((piece) => (
+                  <button
+                    key={piece}
+                    type="button"
+                    className={`btn ${physicalState.pendingPromotion.selectedPiece === piece ? 'btn-primary' : 'btn-secondary'}`}
+                    disabled={physicalState.pendingPromotion.actor !== 'human'}
+                    onClick={() => handlePhysicalPromotionSelect(piece)}
+                    title={`Promote to ${piece === 'q' ? 'queen' : piece === 'r' ? 'rook' : piece === 'b' ? 'bishop' : 'knight'}`}
+                    style={{ flex: 1, padding: '7px 0' }}
+                  >{piece.toUpperCase()}</button>
+                ))}
+              </div>
+              <small style={{ display: 'block', marginTop: '7px', color: 'var(--text-secondary)' }}>
+                Board letter: {(physicalState.pendingPromotion.displayedPiece || '-').toUpperCase()} · Stability: {Math.min(500, physicalState.pendingPromotion.stableForMs || 0)} / 500 ms
+              </small>
+            </div>
+          )}
 
           <div style={{
             padding: '10px',
@@ -1526,6 +1639,55 @@ export default function GameBoard() {
           </div>
         </div>
       </main>
+
+      {pendingVirtualPromotion && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Choose promotion piece" style={{ position: 'fixed', inset: 0, zIndex: 100, display: 'grid', placeItems: 'center', background: 'rgba(2,6,23,0.76)' }}>
+          <div style={{ width: '320px', padding: '20px', border: '1px solid var(--panel-border)', borderRadius: '8px', background: '#0f172a', color: 'var(--text-primary)' }}>
+            <h2 style={{ margin: '0 0 6px', fontSize: '1.15rem' }}>Choose promotion</h2>
+            <p style={{ margin: '0 0 16px', color: 'var(--text-secondary)' }}>Select the piece for {pendingVirtualPromotion.to}.</p>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '8px' }}>
+              {['q', 'r', 'b', 'n'].map((piece) => (
+                <button key={piece} className="btn btn-primary" type="button" onClick={() => commitVirtualPromotion(piece)}>{piece.toUpperCase()}</button>
+              ))}
+            </div>
+            <button type="button" className="btn btn-secondary" onClick={() => setPendingVirtualPromotion(null)} style={{ width: '100%', marginTop: '10px' }}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {customFenDialogOpen && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Custom physical position" style={{ position: 'fixed', inset: 0, zIndex: 100, display: 'grid', placeItems: 'center', background: 'rgba(2,6,23,0.8)' }}>
+          <div style={{ width: 'min(760px, 86vw)', display: 'grid', gridTemplateColumns: '1fr 280px', gap: '18px', padding: '20px', border: '1px solid var(--panel-border)', borderRadius: '8px', background: '#0f172a', color: 'var(--text-primary)' }}>
+            <div>
+              <h2 style={{ margin: '0 0 6px', fontSize: '1.15rem' }}>Custom physical position</h2>
+              <p style={{ color: 'var(--text-secondary)', fontSize: '0.82rem' }}>Arrange the real pieces exactly like this preview before calibration completes.</p>
+              <textarea value={customPhysicalFen} onChange={(event) => { setCustomPhysicalFen(event.target.value); setCustomFenError(''); }} rows={4} style={{ width: '100%', boxSizing: 'border-box', padding: '10px', background: '#020617', color: 'var(--text-primary)', border: '1px solid var(--panel-border)', borderRadius: '6px', resize: 'vertical' }} />
+              {customFenError && <p style={{ color: 'var(--danger-color)', fontSize: '0.8rem' }}>{customFenError}</p>}
+              <div style={{ display: 'flex', gap: '8px', marginTop: '14px' }}>
+                <button type="button" className="btn btn-primary" onClick={() => {
+                  try {
+                    setCustomPhysicalFen(validateCustomPhysicalFen(customPhysicalFen));
+                    setCustomFenError('');
+                    setCustomFenDialogOpen(false);
+                  } catch (error) {
+                    setCustomFenError(error.message);
+                  }
+                }}>Use Position</button>
+                <button type="button" className="btn btn-secondary" onClick={() => setCustomFenDialogOpen(false)}>Cancel</button>
+              </div>
+            </div>
+            <div style={{ width: '280px', height: '280px' }}>
+              <Chessboard options={{
+                position: (() => { try { return new Chess(customPhysicalFen).fen(); } catch { return fen; } })(),
+                boardOrientation: gameSettings.defaults.humanColor,
+                allowDragging: false,
+                darkSquareStyle: { backgroundColor: '#1e293b' },
+                lightSquareStyle: { backgroundColor: '#e2e8f0' }
+              }} />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

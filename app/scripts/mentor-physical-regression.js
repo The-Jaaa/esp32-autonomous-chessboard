@@ -256,6 +256,22 @@ async function run() {
   assert.match(warningGuidance.prompt, /Speak this exact recovery instruction now:/);
   assert.match(warningGuidance.prompt, /Do not answer an earlier learner request/);
 
+  const promotionGuidanceA = guidanceFor(snapshot({
+    stateRevision: 4,
+    phase: 'robot_promotion_awaiting_replacement',
+    statusText: 'Replace the Black pawn on a1 with a queen.',
+    pendingPromotion: { id: 'promotion-1', actor: 'robot', color: 'b', to: 'a1', selectedPiece: 'q' }
+  }));
+  const promotionGuidanceB = guidanceFor(snapshot({
+    stateRevision: 5,
+    phase: 'robot_promotion_awaiting_replacement',
+    statusText: 'Verifying Black queen on a1...',
+    pendingPromotion: { id: 'promotion-1', actor: 'robot', color: 'b', to: 'a1', selectedPiece: 'q' }
+  }));
+  assert.strictEqual(promotionGuidanceA.urgent, false);
+  assert.strictEqual(promotionGuidanceA.key, promotionGuidanceB.key, 'one promotion replacement must have one spoken prompt');
+  assert.match(promotionGuidanceA.reply, /a1.*queen/i);
+
   const plannedCheck = guidanceFor(snapshot({
     stateRevision: 4,
     phase: 'robot_busy',

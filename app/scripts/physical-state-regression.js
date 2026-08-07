@@ -409,9 +409,11 @@ async function run() {
   promotionLifted[squareToIndex('g7')] = false;
   await processPhysicalSnapshot(promotionLifted, { source: 'regression-test' });
   state = serializePhysicalState();
-  assert.strictEqual(state.phase, 'sync_warning', 'lifting a pawn with only promotion moves should be recoverable');
-  assert.match(state.statusText, /no legal moves/i);
-  assert.strictEqual(state.syncWarningReason?.type, 'no_legal_moves_lift');
+  assert.strictEqual(state.phase, 'piece_lifted', 'lifting a promotable pawn should arm promotion targets');
+  assert.deepStrictEqual(
+    state.legalTargets.map((target) => target.move).sort(),
+    ['g7g8b', 'g7g8n', 'g7g8q', 'g7g8r']
+  );
 
   const stalemateSetupFen = '7k/5K2/8/6Q1/8/8/8/8 w - - 0 1';
   resetPhysicalSession(stalemateSetupFen);
@@ -761,7 +763,7 @@ async function run() {
       'no-legal-move rook lift enters sync_warning',
       'placing rook back returns physical board to ready',
       'mid-capture occupancy snapshot does not prematurely commit robot move',
-      'promotion-only pawn lift is treated as no legal physical move',
+      'promotion-only pawn lift exposes all four physical choices',
       'stalemate is reported as draw in physical mode',
       'gameStatus and celebration LEDs are emitted for draw',
       'human castling waits for rook and commits O-O',

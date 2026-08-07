@@ -202,3 +202,52 @@ state, phase-only retries, stale/out-of-order/duplicate reports, logical-state
 immutability, and existing capture/castling behavior. Firmware and
 `offline_core` are unchanged. Real-board acceptance of the Human Black settings
 gate and the new phased clearance sequence remains pending.
+
+The shared-settings and unified-transfer physical gates were subsequently
+accepted on the real board. Human White/Black play, difficulty handoff,
+actor-based Undo/Redo, temporary knight clearance, reviewed-opening clearance,
+capture, and castling completed without unresolved synchronization or duplicate
+phase errors.
+
+## Online Physical Promotions
+
+Companion virtual and server-controlled physical games now support queen,
+rook, bishop, and knight promotions. Physical promotion is transactional: the
+pawn first reaches the final rank, the player removes it, the board or app
+selects an identity, and the replacement must remain sensor-stable for 500 ms
+before chess FEN, history, turn, or game result commits. Robot promotions use
+the same motion planner and pause indefinitely for the exact requested piece.
+
+The production firmware renders large promotion letters across the measured
+16x16 NeoPixel matrix. It cycles `Q`, `R`, `B`, and `N` every 2.5 seconds,
+reports the displayed identity with sensor snapshots, and performs all
+`strip.show()` calls on core 1 through an LED-command mailbox. Promotion prompts
+take priority over game-over animations, use refined Q/R glyphs, and highlight
+the replacement square in amber alongside the requested letter. Promotion
+display code has no motor or magnet access. The accepted production compile
+baseline is `1,083,819` bytes flash and `48,768` bytes static RAM.
+
+Physical Undo requires the promoted piece to be replaced by a pawn before
+reverse motion begins. Redo moves the pawn forward, then repeats the original
+replacement gate. Capture-promotion graveyard state remains transactional and
+is not rolled back when a later replacement is still pending.
+
+Custom physical setup accepts a validated FEN with exactly one king per color
+and no pawns on ranks 1 or 8. Calibration compares sensors to that exact
+occupancy while preserving turn, castling, en-passant, difficulty, side, and
+personality. A robot-to-move position schedules one robot reply after setup.
+
+Automated acceptance covers custom setup, all Q/R/B/N human choices, quiet and
+capture promotion, robot replacement, app locking, removal/stability gates,
+promotion Undo/Redo, matrix bijection, Mentor prompt deduplication, existing
+physical regressions, the complete Mentor suite, client lint/build, backend
+syntax, and production firmware compilation.
+
+Real-board acceptance passed on COM11. A custom White promotion cycled to a
+knight and committed `a8=N` as an insufficient-material draw; promotion Undo
+required pawn replacement before returning it to `a7`, and app-locked bishop
+selection committed `a8=B`. A Black-to-move custom fixture executed `a2a1q`,
+held a fixed queen prompt, accepted the empty-then-occupied replacement, and
+Mentor Live announced the resulting check through the board speaker. The final
+standard-position regression committed human `e4` and verified robot `d5` with
+exact occupancy, no pending work, and no synchronization or motion error.

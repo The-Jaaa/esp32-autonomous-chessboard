@@ -26,7 +26,6 @@ function planMove(fen, uci, graveyardSlots = DEFAULT_Z_GRAVEYARD_SLOTS) {
 
 function planAll(fen, graveyardSlots = DEFAULT_Z_GRAVEYARD_SLOTS) {
   return withPhysicalPlanningContext(fen, graveyardSlots, (game) => game.moves({ verbose: true })
-    .filter((move) => !move.promotion || move.promotion === 'q')
     .map((move) => {
       try {
         return {
@@ -253,8 +252,8 @@ function run() {
   const promotionPlans = planAll(promotionPosition);
   assert.strictEqual(
     promotionPlans.filter((result) => result.move.startsWith('g7g8') && result.success).length,
-    0,
-    'physical planner should omit all promotion moves'
+    4,
+    'physical planner should route all four legal promotion choices'
   );
 
   const openingBlack = new Chess(PHYSICAL_START_FEN);
@@ -304,7 +303,7 @@ function run() {
       capturedRemovalSafety: 'h5xh4 removal does not route through h5 attacker source',
       efficientCaptures: ['d5e4 direct-after-removal', 'e4f3 direct-after-removal'],
       graveyardOrder: ['Z4 first', 'Z5 second', 'full graveyard rejects'],
-      promotionsDisabled: true,
+      promotionRoutes: 4,
       openingPawnReplies: pawnPlans.length,
       openingKnightRepliesWithClearance: knightPlans.length,
       whiteKnightClearance: ['a2-a4 for queenside', 'h2-h4 for kingside and undo'],

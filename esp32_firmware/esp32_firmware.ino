@@ -114,6 +114,25 @@ String pendingJobResultJson;
 bool hasPendingJobResult = false;
 String lastMotionFailedPhase = "";
 int lastMotionFailedStep = -1;
+constexpr uint8_t LED_COMMAND_QUEUE_CAPACITY = 16;
+String pendingLedCommands[LED_COMMAND_QUEUE_CAPACITY];
+uint8_t pendingLedCommandHead = 0;
+uint8_t pendingLedCommandTail = 0;
+uint8_t pendingLedCommandCount = 0;
+
+struct PromotionLedDisplay {
+  bool active = false;
+  String transactionId;
+  String state;
+  char displayedPiece = 0;
+  char lockedPiece = 0;
+  int targetIndex = -1;
+  uint8_t choiceIndex = 0;
+  uint32_t intervalMs = 2500;
+  uint32_t lastChangeMs = 0;
+};
+
+PromotionLedDisplay promotionLedDisplay;
 
 #if ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS
 struct OfflineQuietHardwareJob {
@@ -197,6 +216,10 @@ bool movePieceToCoordinate(int fromIndex, long targetX, long targetY);
 bool verifySquareState(int index, bool expectedOccupied, uint32_t timeoutMs);
 bool nudgeUntilDetected(int targetIndex);
 void applyLedCommand(JsonObject command);
+bool enqueueLedCommand(JsonObject command);
+void serviceLedCommandQueue();
+void servicePromotionLedDisplay(uint32_t now);
+void applyPromotionLedCommand(JsonObject command);
 void setSquareColor(int squareNumber, uint8_t r, uint8_t g, uint8_t b);
 void updateLedAnimation();
 uint32_t colorWheel(byte position);
@@ -307,6 +330,8 @@ void loop() {
   }
 
   scanSensors();
+  serviceLedCommandQueue();
+  servicePromotionLedDisplay(millis());
 #if ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS || \
     ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS || \
     ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS || \
@@ -503,6 +528,18 @@ bool postSnapshot(bool force) {
   for (int i = 0; i < 64; i++) {
     occupancy.add(stableOccupancy[i]);
   }
+  if (xSemaphoreTake(sharedMutex, pdMS_TO_TICKS(2)) == pdTRUE) {
+    if (promotionLedDisplay.active) {
+      JsonObject promotion = doc.createNestedObject("promotionDisplay");
+      promotion["transactionId"] = promotionLedDisplay.transactionId;
+      promotion["state"] = promotionLedDisplay.state;
+      if (promotionLedDisplay.displayedPiece) {
+        char piece[2] = {promotionLedDisplay.displayedPiece, '\0'};
+        promotion["displayedPiece"] = piece;
+      }
+    }
+    xSemaphoreGive(sharedMutex);
+  }
 
   String payload;
   serializeJson(doc, payload);
@@ -534,7 +571,7 @@ void applyImmediateLedCommands(const String& response) {
   for (JsonObject command : commands) {
     const char* type = command["type"] | "";
     if (strcmp(type, "led") == 0) {
-      applyLedCommand(command);
+      enqueueLedCommand(command);
     }
   }
 }
@@ -587,7 +624,7 @@ void pollPhysicalCommands() {
     const char* type = command["type"] | "";
 
     if (strcmp(type, "led") == 0) {
-      applyLedCommand(command);
+      enqueueLedCommand(command);
     } else if (strcmp(type, "request-snapshot") == 0) {
       markSnapshotDirty();
       postSnapshot(true);
@@ -1927,8 +1964,165 @@ bool nudgeUntilDetected(int targetIndex) {
   return verifySquareState(targetIndex, true, 180);
 }
 
+bool enqueueLedCommand(JsonObject command) {
+  String commandJson;
+  serializeJson(command, commandJson);
+  if (xSemaphoreTake(sharedMutex, pdMS_TO_TICKS(5)) != pdTRUE) return false;
+  if (pendingLedCommandCount >= LED_COMMAND_QUEUE_CAPACITY) {
+    xSemaphoreGive(sharedMutex);
+    Serial.println("[LED] command queue full; command dropped.");
+    return false;
+  }
+  pendingLedCommands[pendingLedCommandTail] = commandJson;
+  pendingLedCommandTail = (pendingLedCommandTail + 1) % LED_COMMAND_QUEUE_CAPACITY;
+  pendingLedCommandCount++;
+  xSemaphoreGive(sharedMutex);
+  return true;
+}
+
+void serviceLedCommandQueue() {
+  String commandJson;
+  if (xSemaphoreTake(sharedMutex, pdMS_TO_TICKS(2)) == pdTRUE) {
+    if (pendingLedCommandCount > 0) {
+      commandJson = pendingLedCommands[pendingLedCommandHead];
+      pendingLedCommands[pendingLedCommandHead] = "";
+      pendingLedCommandHead = (pendingLedCommandHead + 1) % LED_COMMAND_QUEUE_CAPACITY;
+      pendingLedCommandCount--;
+    }
+    xSemaphoreGive(sharedMutex);
+  }
+  if (commandJson.length() == 0) return;
+  DynamicJsonDocument doc(12288);
+  if (deserializeJson(doc, commandJson)) {
+    Serial.println("[LED] queued command parse failed.");
+    return;
+  }
+  applyLedCommand(doc.as<JsonObject>());
+}
+
+int promotionMatrixPixelToStrip(int row, int column) {
+  if (row < 0 || row >= 16 || column < 0 || column >= 16) return -1;
+  const int fileIndex = row / 2;  // A through H.
+  const int rank = column / 2 + 1;
+  const int rawGroup = 7 - fileIndex;  // H is raw group zero.
+  const int rankOffset = (rawGroup % 2 == 0) ? (8 - rank) : (rank - 1);
+  const int rawSquare = rawGroup * 8 + rankOffset;
+  const int localRow = row % 2;
+  const int localColumn = column % 2;
+  const int localPosition = localRow * 2 + localColumn;  // TL, TR, BL, BR.
+  static const uint8_t offsetsByFile[8][4] = {
+    {1, 2, 0, 3},  // A
+    {2, 1, 3, 0},  // B
+    {0, 3, 1, 2},  // C
+    {2, 1, 3, 0},  // D
+    {1, 2, 0, 3},  // E
+    {2, 1, 3, 0},  // F
+    {1, 2, 0, 3},  // G
+    {3, 0, 2, 1}   // H
+  };
+  return rawSquare * 4 + offsetsByFile[fileIndex][localPosition];
+}
+
+const uint8_t* promotionGlyph(char piece) {
+  static const uint8_t queen[9] = {0x3E, 0x41, 0x41, 0x41, 0x41, 0x49, 0x45, 0x3E, 0x03};
+  static const uint8_t rook[9] = {0x7E, 0x41, 0x41, 0x41, 0x7E, 0x48, 0x44, 0x42, 0x41};
+  static const uint8_t bishop[9] = {0x7E, 0x41, 0x41, 0x41, 0x7E, 0x41, 0x41, 0x41, 0x7E};
+  static const uint8_t knight[9] = {0x41, 0x61, 0x61, 0x51, 0x49, 0x45, 0x43, 0x43, 0x41};
+  static const uint8_t pawn[9] = {0x7E, 0x41, 0x41, 0x41, 0x7E, 0x40, 0x40, 0x40, 0x40};
+  switch (piece) {
+    case 'q': return queen;
+    case 'r': return rook;
+    case 'b': return bishop;
+    case 'n': return knight;
+    case 'p': return pawn;
+    default: return nullptr;
+  }
+}
+
+void drawPromotionGlyph(char piece) {
+  const uint8_t* glyph = promotionGlyph(piece);
+  strip.clear();
+  if (!glyph) {
+    strip.show();
+    return;
+  }
+  constexpr int top = 3;
+  constexpr int left = 4;
+  const uint32_t color = strip.Color(180, 80, 255);
+  for (int row = 0; row < 9; row++) {
+    for (int column = 0; column < 7; column++) {
+      if ((glyph[row] & (1U << (6 - column))) == 0) continue;
+      const int pixel = promotionMatrixPixelToStrip(top + row, left + column);
+      if (pixel >= 0) strip.setPixelColor(pixel, color);
+    }
+  }
+  if (promotionLedDisplay.targetIndex >= 0 && promotionLedDisplay.targetIndex < 64) {
+    setSquareColor(promotionLedDisplay.targetIndex, 255, 180, 40);
+  }
+  strip.show();
+}
+
+void applyPromotionLedCommand(JsonObject command) {
+  // Promotion instructions must take priority over a running game-over animation.
+  activeLedAnimation = LED_ANIM_NONE;
+  ledAnimationKingA = -1;
+  ledAnimationKingB = -1;
+
+  const char* state = command["state"] | "clear";
+  const char* transactionId = command["transactionId"] | "";
+  const char* pieceText = command["piece"] | "";
+  const char piece = pieceText[0] ? static_cast<char>(tolower(pieceText[0])) : 0;
+
+  if (strcmp(state, "clear") == 0) {
+    promotionLedDisplay = PromotionLedDisplay{};
+    strip.clear();
+    strip.show();
+    markSnapshotDirty();
+    return;
+  }
+
+  promotionLedDisplay.active = true;
+  promotionLedDisplay.transactionId = transactionId;
+  promotionLedDisplay.state = state;
+  promotionLedDisplay.targetIndex = command["targetIndex"] | -1;
+  promotionLedDisplay.intervalMs = command["intervalMs"] | 2500;
+  promotionLedDisplay.lastChangeMs = millis();
+  promotionLedDisplay.choiceIndex = 0;
+  promotionLedDisplay.lockedPiece = piece;
+  if (strcmp(state, "cycle") == 0) {
+    promotionLedDisplay.displayedPiece = 'q';
+  } else if (strcmp(state, "pawn") == 0) {
+    promotionLedDisplay.displayedPiece = 'p';
+  } else if (piece) {
+    promotionLedDisplay.displayedPiece = piece;
+  } else {
+    promotionLedDisplay.displayedPiece = 'p';
+  }
+  drawPromotionGlyph(promotionLedDisplay.displayedPiece);
+  markSnapshotDirty();
+}
+
+void servicePromotionLedDisplay(uint32_t now) {
+  if (!promotionLedDisplay.active || promotionLedDisplay.state != "cycle") return;
+  if (now - promotionLedDisplay.lastChangeMs < promotionLedDisplay.intervalMs) return;
+  static const char choices[4] = {'q', 'r', 'b', 'n'};
+  promotionLedDisplay.choiceIndex = (promotionLedDisplay.choiceIndex + 1) % 4;
+  promotionLedDisplay.displayedPiece = choices[promotionLedDisplay.choiceIndex];
+  promotionLedDisplay.lastChangeMs = now;
+  drawPromotionGlyph(promotionLedDisplay.displayedPiece);
+  markSnapshotDirty();
+}
+
 void applyLedCommand(JsonObject command) {
   const char* mode = command["mode"] | "";
+  if (strcmp(mode, "promotion-display") == 0) {
+    applyPromotionLedCommand(command);
+    return;
+  }
+  if (promotionLedDisplay.active) {
+    promotionLedDisplay = PromotionLedDisplay{};
+    markSnapshotDirty();
+  }
   activeLedAnimation = LED_ANIM_NONE;
   ledAnimationKingA = -1;
   ledAnimationKingB = -1;

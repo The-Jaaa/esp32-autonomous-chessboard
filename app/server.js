@@ -796,6 +796,8 @@ app.post('/api/engine-move', async (req, res) => {
 
 const FILES = 'abcdefgh';
 const PHYSICAL_START_FEN = new Chess().fen();
+const PHYSICAL_PROMOTION_CHOICES = ['q', 'r', 'b', 'n'];
+const PHYSICAL_PROMOTION_STABLE_MS = 500;
 
 // Raw ESP square indexes are the physical sensor/LED/gantry indexes, not chess
 // board order. This table matches the measured board wiring/orientation:
@@ -874,7 +876,6 @@ const PHYSICAL_LED_COLORS = {
   draw: { r: 170, g: 70, b: 255 }
 };
 
-const PHYSICAL_PROMOTIONS_ENABLED = false;
 const PHYSICAL_OWNERSHIP_PROTOCOL_VERSION = 1;
 const PHYSICAL_SENSOR_FRESH_MS = 5000;
 const PHYSICAL_SERVER_INSTANCE_ID = randomUUID();
@@ -886,11 +887,13 @@ const physicalSession = {
   mentorStateSignature: '',
   phase: 'idle',
   setupMode: 'full',
+  initialFen: PHYSICAL_START_FEN,
   game: new Chess(),
   occupancy: Array(64).fill(false),
   selectedSource: null,
   pendingCaptureTarget: null,
   pendingCastleMove: null,
+  pendingPromotion: null,
   legalTargets: [],
   humanColor: 'white',
   robotColor: 'black',
@@ -1021,6 +1024,40 @@ function pieceAtStart(square) {
 
 function physicalStartOccupancy() {
   return occupancyFromGame(new Chess(PHYSICAL_START_FEN));
+}
+
+function physicalSetupOccupancy() {
+  return occupancyFromFen(physicalSession.initialFen || PHYSICAL_START_FEN);
+}
+
+function validatePhysicalCustomFen(fen) {
+  if (typeof fen !== 'string' || !fen.trim()) {
+    throw new Error('Custom physical setup requires a FEN.');
+  }
+
+  let game;
+  try {
+    game = new Chess(fen.trim());
+  } catch (error) {
+    throw new Error(`Invalid custom physical FEN: ${error.message}`);
+  }
+
+  let whiteKings = 0;
+  let blackKings = 0;
+  for (const row of game.board()) {
+    for (const piece of row) {
+      if (!piece) continue;
+      if (piece.type === 'k' && piece.color === 'w') whiteKings += 1;
+      if (piece.type === 'k' && piece.color === 'b') blackKings += 1;
+      if (piece.type === 'p' && ['1', '8'].includes(piece.square[1])) {
+        throw new Error(`Custom physical FEN cannot start with a pawn on ${piece.square}.`);
+      }
+    }
+  }
+  if (whiteKings !== 1 || blackKings !== 1) {
+    throw new Error('Custom physical FEN must contain exactly one king per color.');
+  }
+  return game.fen();
 }
 
 function occupiedIndices(occupancy) {
@@ -1304,6 +1341,41 @@ function buildFullCalibrationReport(occupancy) {
   };
 }
 
+function buildCustomCalibrationReport(occupancy) {
+  const expected = physicalSetupOccupancy();
+  const diff = diffOccupancy(expected, occupancy);
+  return {
+    mode: 'custom',
+    ready: diff.missing.length === 0 && diff.extra.length === 0,
+    missing: diff.missing,
+    extra: diff.extra,
+    missingSquares: diff.missing.map(indexToSquare),
+    extraSquares: diff.extra.map(indexToSquare)
+  };
+}
+
+function summarizePendingPromotion(promotion = physicalSession.pendingPromotion) {
+  if (!promotion) return null;
+  return {
+    id: promotion.id,
+    actor: promotion.actor,
+    operation: promotion.operation || 'move',
+    color: promotion.color,
+    from: promotion.from,
+    to: promotion.to,
+    choices: [...promotion.choices],
+    selectedPiece: promotion.selectedPiece || null,
+    displayedPiece: promotion.displayedPiece || null,
+    selectionSource: promotion.selectionSource || null,
+    stage: promotion.stage,
+    removalObserved: Boolean(promotion.removalObserved),
+    stableSince: promotion.stableSince || null,
+    stableForMs: promotion.stableSince ? Math.max(0, Date.now() - promotion.stableSince) : 0,
+    move: promotion.moveUci || null,
+    san: promotion.san || null
+  };
+}
+
 function buildPartialCalibrationReport(occupancy) {
   const expectedStart = physicalStartOccupancy();
   const present = [];
@@ -1334,9 +1406,9 @@ function buildPartialCalibrationReport(occupancy) {
 }
 
 function buildCalibrationReport(occupancy) {
-  return physicalSession.setupMode === 'partial'
-    ? buildPartialCalibrationReport(occupancy)
-    : buildFullCalibrationReport(occupancy);
+  if (physicalSession.setupMode === 'partial') return buildPartialCalibrationReport(occupancy);
+  if (physicalSession.setupMode === 'custom') return buildCustomCalibrationReport(occupancy);
+  return buildFullCalibrationReport(occupancy);
 }
 
 function buildPartialGameFromOccupancy(occupancy) {
@@ -1398,6 +1470,7 @@ function serializePhysicalState() {
     robotColor: physicalSession.robotColor,
     phase: physicalSession.phase,
     setupMode: physicalSession.setupMode,
+    initialFen: physicalSession.initialFen,
     statusText: physicalSession.statusText,
     gameStatus: buildGameStatus(physicalSession.game),
     fen: physicalSession.game.fen(),
@@ -1411,6 +1484,7 @@ function serializePhysicalState() {
     selectedSource: physicalSession.selectedSource,
     pendingCaptureTarget: physicalSession.pendingCaptureTarget,
     pendingCastleMove: physicalSession.pendingCastleMove,
+    pendingPromotion: summarizePendingPromotion(),
     legalTargets: physicalSession.legalTargets,
     robotBusy: physicalSession.phase === 'robot_busy'
       || physicalSession.phase === 'robot_thinking'
@@ -1492,11 +1566,13 @@ function physicalMentorStateSignature() {
     configuredLevel: physicalSession.level,
     activeSearchLevel: physicalSession.activeSearchLevel,
     setupMode: physicalSession.setupMode,
+    initialFen: physicalSession.initialFen,
     fen: physicalSession.game.fen(),
     occupied: occupiedIndices(physicalSession.occupancy),
     selectedSource: physicalSession.selectedSource,
     pendingCaptureTarget: physicalSession.pendingCaptureTarget,
     pendingCastleMove: physicalSession.pendingCastleMove,
+    pendingPromotion: summarizePendingPromotion(),
     legalTargets: physicalSession.legalTargets,
     pendingRobotJob: summarizePendingRobotJob(),
     pendingUndo: physicalSession.pendingUndo ? {
@@ -2063,13 +2139,15 @@ function queueCalibrationLedCommand(report) {
       }
     });
 
-  const expected = physicalStartOccupancy();
+  const expected = report.mode === 'partial'
+    ? physicalStartOccupancy()
+    : physicalSetupOccupancy();
   const missingRequired = new Set(report.mode === 'partial' ? report.missing : []);
   const squares = [];
   for (let index = 0; index < 64; index++) {
     if (expected[index] && physicalSession.occupancy[index]) {
       squares.push(makeLedSquare(index, 'correct'));
-    } else if (report.mode === 'full' && expected[index] && !physicalSession.occupancy[index]) {
+    } else if (report.mode !== 'partial' && expected[index] && !physicalSession.occupancy[index]) {
       squares.push(makeLedSquare(index, 'missing', 'pulse'));
     } else if (report.mode === 'partial' && missingRequired.has(index)) {
       squares.push(makeLedSquare(index, 'missing', 'pulse'));
@@ -2246,7 +2324,6 @@ function legalMovesForSource(game, sourceSquare) {
 }
 
 function isPhysicalMoveAllowed(move) {
-  if (!PHYSICAL_PROMOTIONS_ENABLED && move.promotion) return false;
   return true;
 }
 
@@ -2471,6 +2548,7 @@ async function finalizeHumanPhysicalMove(move, occupancy) {
   physicalSession.selectedSource = null;
   physicalSession.pendingCaptureTarget = null;
   physicalSession.pendingCastleMove = null;
+  physicalSession.pendingPromotion = null;
   physicalSession.legalTargets = [];
   physicalSession.syncWarningReason = null;
   physicalSession.lastMove = { side: 'human', move: moveToUci(applied), san: applied.san, at: Date.now() };
@@ -2643,6 +2721,403 @@ function isRobotGraveyardSlotOccupied(slot) {
     physicalSession.robotGraveyardOccupied.includes(key)
     || physicalSession.robotGraveyardPending.includes(key)
   );
+}
+
+function promotionPieceName(piece) {
+  return ({ q: 'queen', r: 'rook', b: 'bishop', n: 'knight', p: 'pawn' })[String(piece || '').toLowerCase()] || 'piece';
+}
+
+function promotionColorName(color) {
+  return color === 'b' ? 'Black' : 'White';
+}
+
+function queuePromotionLedCommand(promotion, state = promotion?.stage) {
+  if (!promotion) return null;
+  promotion.ledState = state;
+  const selectedPiece = promotion.selectedPiece || null;
+  return queueRawLedCommand('promotion-display', {
+    transactionId: promotion.id,
+    state,
+    targetIndex: squareToIndex(promotion.to),
+    color: promotion.color,
+    piece: selectedPiece,
+    choices: promotion.choices || PHYSICAL_PROMOTION_CHOICES,
+    intervalMs: 2500
+  });
+}
+
+function promotionMoveFromGame(game, uci) {
+  return game.moves({ verbose: true })
+    .find((move) => moveToUci(move) === uci) || null;
+}
+
+function promotionExpectedOccupancy(game, move) {
+  const copy = new Chess(game.fen());
+  const applied = copy.move({ from: move.from, to: move.to, promotion: move.promotion });
+  if (!applied) throw new Error(`Promotion ${moveToUci(move)} is no longer legal.`);
+  return occupancyFromGame(copy);
+}
+
+function schedulePromotionConfirmationSnapshot(promotion) {
+  const id = promotion?.id;
+  setTimeout(() => {
+    if (physicalSession.pendingPromotion?.id !== id) return;
+    queuePhysicalCommand({
+      type: 'request-snapshot',
+      reason: 'promotion-stability-confirmation',
+      transactionId: id
+    });
+  }, PHYSICAL_PROMOTION_STABLE_MS + 20);
+}
+
+function setPromotionStage(promotion, stage, statusText, ledState = stage) {
+  const ledChanged = promotion.stage !== stage || promotion.ledState !== ledState;
+  promotion.stage = stage;
+  promotion.stableSince = null;
+  promotion.stableForMs = 0;
+  physicalSession.phase = stage;
+  physicalSession.statusText = statusText;
+  if (ledChanged) queuePromotionLedCommand(promotion, ledState);
+  emitPhysicalState('physical-board', { pendingPromotion: summarizePendingPromotion(promotion) });
+}
+
+function beginHumanPromotion(moves, occupancy) {
+  const promotions = moves
+    .filter((move) => PHYSICAL_PROMOTION_CHOICES.includes(move.promotion))
+    .sort((a, b) => PHYSICAL_PROMOTION_CHOICES.indexOf(a.promotion) - PHYSICAL_PROMOTION_CHOICES.indexOf(b.promotion));
+  if (promotions.length !== PHYSICAL_PROMOTION_CHOICES.length) {
+    throw new Error('Physical promotion did not expose all Q/R/B/N choices.');
+  }
+  const first = promotions[0];
+  const expected = promotionExpectedOccupancy(physicalSession.game, first);
+  const diff = diffOccupancy(expected, occupancy);
+  if (diff.missing.length || diff.extra.length) return false;
+
+  const promotion = {
+    id: `promotion-${Date.now()}-${physicalSession.nextCommandId++}`,
+    actor: 'human',
+    operation: 'move',
+    color: first.color,
+    from: first.from,
+    to: first.to,
+    choices: [...PHYSICAL_PROMOTION_CHOICES],
+    moves: Object.fromEntries(promotions.map((move) => [move.promotion, moveToUci(move)])),
+    selectedPiece: null,
+    displayedPiece: 'q',
+    selectionSource: null,
+    moveUci: null,
+    san: null,
+    stage: 'human_promotion_awaiting_removal',
+    removalObserved: false,
+    stableSince: null,
+    stableForMs: 0,
+    beforeFen: physicalSession.game.fen(),
+    preOccupancy: occupancyFromGame(physicalSession.game),
+    postOccupancy: expected
+  };
+  physicalSession.pendingPromotion = promotion;
+  physicalSession.occupancy = occupancy;
+  physicalSession.selectedSource = null;
+  physicalSession.pendingCaptureTarget = null;
+  physicalSession.legalTargets = [];
+  setPromotionStage(
+    promotion,
+    'human_promotion_awaiting_removal',
+    `Promotion ready on ${first.to}. Remove the pawn to choose Q, R, B, or N.`,
+    'prompt'
+  );
+  logPhysicalEvent('human_promotion_started', physicalSession.statusText, {
+    actualOccupancy: occupancy,
+    details: summarizePendingPromotion(promotion)
+  });
+  return true;
+}
+
+function beginFixedPromotion({ actor, operation, move, occupancy, pendingJob = null, entry = null }) {
+  if (!move?.promotion || !PHYSICAL_PROMOTION_CHOICES.includes(move.promotion)) {
+    return { success: false, error: 'A valid promotion move is required.' };
+  }
+  const expected = promotionExpectedOccupancy(physicalSession.game, move);
+  const diff = diffOccupancy(expected, occupancy);
+  if (diff.missing.length || diff.extra.length) {
+    return { success: false, recoverable: true, error: 'Promotion motion occupancy does not match the expected pawn placement.', diff };
+  }
+  const promotion = {
+    id: `promotion-${Date.now()}-${physicalSession.nextCommandId++}`,
+    actor,
+    operation,
+    color: move.color,
+    from: move.from,
+    to: move.to,
+    choices: [move.promotion],
+    moves: { [move.promotion]: moveToUci(move) },
+    selectedPiece: move.promotion,
+    displayedPiece: move.promotion,
+    selectionSource: 'required',
+    moveUci: moveToUci(move),
+    san: move.san,
+    stage: 'robot_promotion_awaiting_replacement',
+    removalObserved: false,
+    stableSince: null,
+    stableForMs: 0,
+    beforeFen: physicalSession.game.fen(),
+    preOccupancy: occupancyFromGame(physicalSession.game),
+    postOccupancy: expected,
+    pendingJobId: pendingJob?.id || null,
+    entry
+  };
+  physicalSession.pendingPromotion = promotion;
+  physicalSession.occupancy = occupancy;
+  setPromotionStage(
+    promotion,
+    'robot_promotion_awaiting_replacement',
+    `Replace the ${promotionColorName(move.color)} pawn on ${move.to} with a ${promotionPieceName(move.promotion)}.`,
+    'locked'
+  );
+  logPhysicalEvent('robot_promotion_replacement_required', physicalSession.statusText, {
+    commandId: pendingJob?.id || null,
+    actualOccupancy: occupancy,
+    details: summarizePendingPromotion(promotion)
+  });
+  return { success: true, pendingPromotion: true };
+}
+
+function beginUndoPromotionPawnRestore(entry, occupancy) {
+  const promotion = {
+    id: `promotion-undo-${Date.now()}-${physicalSession.nextCommandId++}`,
+    actor: 'undo',
+    operation: 'undo',
+    color: entry.color,
+    from: entry.from,
+    to: entry.to,
+    choices: ['p'],
+    moves: {},
+    selectedPiece: 'p',
+    displayedPiece: 'p',
+    selectionSource: 'required',
+    moveUci: entry.uci,
+    san: entry.san,
+    stage: 'undo_promotion_awaiting_replacement',
+    removalObserved: false,
+    stableSince: null,
+    stableForMs: 0,
+    beforeFen: physicalSession.game.fen(),
+    preOccupancy: occupancyFromGame(physicalSession.game),
+    postOccupancy: occupancyFromGame(physicalSession.game),
+    entry
+  };
+  physicalSession.pendingPromotion = promotion;
+  physicalSession.occupancy = occupancy;
+  setPromotionStage(
+    promotion,
+    'undo_promotion_awaiting_replacement',
+    `Before undo, replace the promoted piece on ${entry.to} with a ${promotionColorName(entry.color)} pawn.`,
+    'pawn'
+  );
+  logPhysicalEvent('undo_promotion_pawn_required', physicalSession.statusText, {
+    actualOccupancy: occupancy,
+    details: summarizePendingPromotion(promotion)
+  });
+  return { success: true, promotionPending: true, state: serializePhysicalState() };
+}
+
+function cancelPendingHumanPromotion(occupancy) {
+  const promotion = physicalSession.pendingPromotion;
+  physicalSession.pendingPromotion = null;
+  physicalSession.occupancy = occupancy;
+  physicalSession.phase = 'ready';
+  physicalSession.selectedSource = null;
+  physicalSession.pendingCaptureTarget = null;
+  physicalSession.legalTargets = [];
+  physicalSession.statusText = waitingForTurnStatus('Promotion cancelled.');
+  queueRawLedCommand('promotion-display', { transactionId: promotion?.id || null, state: 'clear' });
+  logPhysicalEvent('human_promotion_cancelled', 'Promotion cancelled after the original position was restored.', {
+    actualOccupancy: occupancy,
+    details: summarizePendingPromotion(promotion)
+  });
+  emitPhysicalState('physical-board');
+}
+
+async function commitPendingPromotion(occupancy) {
+  const promotion = physicalSession.pendingPromotion;
+  if (!promotion?.selectedPiece) return { success: false, error: 'No promotion identity is selected.' };
+
+  if (promotion.operation === 'undo') {
+    const entryId = promotion.entry?.id;
+    const prepared = physicalSession.pendingUndo?.promotionPreparedEntryIds || [];
+    if (entryId && !prepared.includes(entryId)) prepared.push(entryId);
+    if (physicalSession.pendingUndo) physicalSession.pendingUndo.promotionPreparedEntryIds = prepared;
+    physicalSession.pendingPromotion = null;
+    queueRawLedCommand('promotion-display', { transactionId: promotion.id, state: 'clear' });
+    logPhysicalEvent('undo_promotion_pawn_verified', `Pawn replacement verified on ${promotion.to}; undo motion may begin.`, {
+      actualOccupancy: occupancy,
+      details: summarizePendingPromotion(promotion)
+    });
+    return queueNextPhysicalUndoStep();
+  }
+
+  const selectedUci = promotion.moves?.[promotion.selectedPiece];
+  const move = selectedUci ? promotionMoveFromGame(physicalSession.game, selectedUci) : null;
+  if (!move) return { success: false, error: `Promotion ${selectedUci || ''} is no longer legal.` };
+
+  queueRawLedCommand('promotion-display', { transactionId: promotion.id, state: 'clear' });
+  if (promotion.actor === 'human') {
+    physicalSession.pendingPromotion = null;
+    await finalizeHumanPhysicalMove(move, occupancy);
+    return { success: true, committed: true };
+  }
+
+  if (promotion.operation === 'redo') {
+    physicalSession.pendingPromotion = null;
+    return completePendingRedoRobotJob(occupancy, { promotionConfirmed: true });
+  }
+
+  physicalSession.pendingPromotion = null;
+  return completePendingRobotMove(occupancy);
+}
+
+async function processPendingPromotionSnapshot(occupancy, metadata = {}) {
+  const promotion = physicalSession.pendingPromotion;
+  if (!promotion) return false;
+  physicalSession.occupancy = occupancy;
+
+  const preDiff = diffOccupancy(promotion.preOccupancy, occupancy);
+  if (promotion.actor === 'human' && preDiff.missing.length === 0 && preDiff.extra.length === 0) {
+    cancelPendingHumanPromotion(occupancy);
+    return true;
+  }
+
+  const targetIndex = squareToIndex(promotion.to);
+  const expected = promotion.postOccupancy;
+  const expectedWithoutTarget = [...expected];
+  expectedWithoutTarget[targetIndex] = false;
+  const emptyDiff = diffOccupancy(expectedWithoutTarget, occupancy);
+  const completeDiff = diffOccupancy(expected, occupancy);
+  const targetEmpty = emptyDiff.missing.length === 0 && emptyDiff.extra.length === 0;
+  const targetOccupied = completeDiff.missing.length === 0 && completeDiff.extra.length === 0;
+
+  const display = metadata?.promotionDisplay;
+  if (display?.transactionId === promotion.id && PHYSICAL_PROMOTION_CHOICES.includes(display.displayedPiece)) {
+    promotion.displayedPiece = display.displayedPiece;
+  }
+
+  if (targetEmpty) {
+    promotion.removalObserved = true;
+    promotion.stableSince = null;
+    promotion.stableForMs = 0;
+    if (promotion.operation === 'undo') {
+      setPromotionStage(
+        promotion,
+        'undo_promotion_awaiting_replacement',
+        `Place the ${promotionColorName(promotion.color)} pawn on ${promotion.to} to continue undo.`,
+        'pawn'
+      );
+    } else if (promotion.actor === 'human' && !promotion.selectedPiece) {
+      setPromotionStage(promotion, 'human_promotion_cycling', `Choose a promotion piece for ${promotion.to}; place the replacement while its letter is shown.`, 'cycle');
+    } else {
+      setPromotionStage(
+        promotion,
+        promotion.actor === 'human' ? 'human_promotion_cycling' : 'robot_promotion_awaiting_replacement',
+        `Place the ${promotionColorName(promotion.color)} ${promotionPieceName(promotion.selectedPiece)} on ${promotion.to}.`,
+        'locked'
+      );
+    }
+    return true;
+  }
+
+  if (targetOccupied) {
+    if (!promotion.removalObserved) {
+      physicalSession.statusText = promotion.operation === 'undo'
+        ? `Remove the promoted piece from ${promotion.to} before placing the pawn.`
+        : `Remove the pawn from ${promotion.to} before placing the promotion piece.`;
+      emitPhysicalState('physical-board');
+      return true;
+    }
+    if (!promotion.selectedPiece) {
+      const displayed = display?.transactionId === promotion.id ? display.displayedPiece : promotion.displayedPiece;
+      if (!PHYSICAL_PROMOTION_CHOICES.includes(displayed)) {
+        physicalSession.statusText = 'Waiting for the board to report the displayed promotion letter.';
+        emitPhysicalState('physical-board');
+        return true;
+      }
+      promotion.selectedPiece = displayed;
+      promotion.selectionSource = 'board';
+      promotion.moveUci = promotion.moves?.[displayed] || null;
+      promotion.san = promotion.moveUci
+        ? promotionMoveFromGame(physicalSession.game, promotion.moveUci)?.san || null
+        : null;
+    }
+    const now = Date.now();
+    if (!promotion.stableSince) {
+      promotion.stableSince = now;
+      promotion.stableForMs = 0;
+      physicalSession.phase = promotion.operation === 'undo'
+        ? 'undo_promotion_awaiting_replacement'
+        : promotion.actor === 'human'
+          ? 'human_promotion_confirming'
+          : 'robot_promotion_awaiting_replacement';
+      promotion.stage = physicalSession.phase;
+      physicalSession.statusText = `Verifying ${promotionColorName(promotion.color)} ${promotionPieceName(promotion.selectedPiece)} on ${promotion.to}...`;
+      queuePromotionLedCommand(promotion, 'locked');
+      schedulePromotionConfirmationSnapshot(promotion);
+      emitPhysicalState('physical-board');
+      return true;
+    }
+    promotion.stableForMs = now - promotion.stableSince;
+    if (promotion.stableForMs >= PHYSICAL_PROMOTION_STABLE_MS) {
+      const result = await commitPendingPromotion(occupancy);
+      if (!result.success) setPhysicalError(result.error, { pendingPromotion: summarizePendingPromotion(promotion) });
+      return true;
+    }
+    emitPhysicalState('physical-board');
+    return true;
+  }
+
+  promotion.stableSince = null;
+  promotion.stableForMs = 0;
+  const diff = diffOccupancy(promotion.postOccupancy, occupancy);
+  setPhysicalSyncWarning('Promotion paused because another square changed. Restore the board while leaving the promotion square as instructed.', {
+    ...diff,
+    reason: { type: 'promotion_disturbance', transactionId: promotion.id }
+  });
+  return true;
+}
+
+function selectPhysicalPromotionIdentity({ piece, transactionId, expectedSessionGeneration }) {
+  const promotion = physicalSession.pendingPromotion;
+  if (!promotion) {
+    return { success: false, status: 409, error: 'No physical promotion is waiting for a selection.' };
+  }
+  if (Number(expectedSessionGeneration) !== physicalSession.sessionGeneration) {
+    return { success: false, status: 409, error: 'The physical session changed. Refresh before selecting a promotion.' };
+  }
+  if (transactionId !== promotion.id) {
+    return { success: false, status: 409, error: 'The promotion transaction changed. Refresh before selecting a promotion.' };
+  }
+  if (promotion.actor !== 'human') {
+    return { success: false, status: 409, error: `The robot requires a ${promotionPieceName(promotion.selectedPiece)}; its promotion identity cannot be changed.` };
+  }
+  const normalizedPiece = String(piece || '').toLowerCase();
+  if (!PHYSICAL_PROMOTION_CHOICES.includes(normalizedPiece)) {
+    return { success: false, status: 400, error: 'Promotion piece must be Q, R, B, or N.' };
+  }
+
+  promotion.selectedPiece = normalizedPiece;
+  promotion.displayedPiece = normalizedPiece;
+  promotion.selectionSource = 'app';
+  promotion.moveUci = promotion.moves?.[normalizedPiece] || null;
+  promotion.san = promotion.moveUci
+    ? promotionMoveFromGame(physicalSession.game, promotion.moveUci)?.san || null
+    : null;
+  promotion.stableSince = null;
+  promotion.stableForMs = 0;
+  physicalSession.statusText = `Promotion locked to ${promotionColorName(promotion.color)} ${promotionPieceName(normalizedPiece)}. Remove the pawn, then place that piece on ${promotion.to}.`;
+  queuePromotionLedCommand(promotion, 'locked');
+  logPhysicalEvent('human_promotion_selected', physicalSession.statusText, {
+    details: summarizePendingPromotion(promotion)
+  });
+  emitPhysicalState('physical-board');
+  return { success: true, state: serializePhysicalState() };
 }
 
 function reservePendingRobotGraveyardSlot(slot) {
@@ -5208,6 +5683,12 @@ function queueNextPhysicalUndoStep() {
     return { success: false, error: 'No undo is pending.' };
   }
 
+  const nextEntry = pendingUndo.entries[0];
+  const promotionPrepared = pendingUndo.promotionPreparedEntryIds || [];
+  if (nextEntry?.promotion && !promotionPrepared.includes(nextEntry.id)) {
+    return beginUndoPromotionPawnRestore(nextEntry, physicalSession.occupancy);
+  }
+
   const entry = pendingUndo.entries.shift();
   if (!entry) {
     return finishPhysicalUndo();
@@ -5317,6 +5798,7 @@ function startPhysicalUndoTurn() {
     mode: 'turn',
     entries: [...entries],
     redoEntries: entries.slice().reverse().map(clonePhysicalMoveLogEntry),
+    promotionPreparedEntryIds: [],
     waitingForHumanRestore: null,
     startedAt: Date.now()
   };
@@ -5677,6 +6159,7 @@ function resetPhysicalOpeningForRepeat(occupancy) {
   physicalSession.selectedSource = null;
   physicalSession.pendingCaptureTarget = null;
   physicalSession.pendingCastleMove = null;
+  physicalSession.pendingPromotion = null;
   physicalSession.legalTargets = [];
   physicalSession.pendingRobotJob = null;
   physicalSession.moveLog = [];
@@ -5934,6 +6417,15 @@ async function processLiftedSnapshot(occupancy) {
     }
 
     if (moveLooksComplete(move, occupancy)) {
+      if (move.promotion) {
+        const promotionMoves = legalMoves.filter((candidate) => (
+          candidate.from === move.from
+          && candidate.to === move.to
+          && candidate.promotion
+        ));
+        beginHumanPromotion(promotionMoves, occupancy);
+        return;
+      }
       await finalizeHumanPhysicalMove(move, occupancy);
       return;
     }
@@ -6041,10 +6533,14 @@ async function processPhysicalSnapshot(occupancy, metadata = {}) {
         }
       }
 
-      physicalSession.phase = 'ready';
-      physicalSession.statusText = physicalSession.setupMode === 'partial'
+      physicalSession.phase = physicalSession.game.isGameOver() ? 'game_over' : 'ready';
+      physicalSession.statusText = physicalSession.game.isGameOver()
+        ? gameResultMessage(physicalSession.game) || 'Game over.'
+        : physicalSession.setupMode === 'partial'
         ? `Partial setup accepted with ${report.present.length} detected starting pieces. ${waitingForTurnStatus()}`
-        : waitingForTurnStatus('Calibration passed.');
+        : physicalSession.setupMode === 'custom'
+          ? waitingForTurnStatus('Custom position calibration passed.')
+          : waitingForTurnStatus('Calibration passed.');
       physicalSession.lastError = null;
       logPhysicalEvent('setup_ready', physicalSession.statusText, {
         actualOccupancy: occupancy,
@@ -6056,7 +6552,7 @@ async function processPhysicalSnapshot(occupancy, metadata = {}) {
       });
       clearPhysicalLeds();
 
-      if (isRobotTurn() && physicalSession.autoRobotReply !== false && !physicalSession.mentorOpeningDrill) {
+      if (physicalSession.phase === 'ready' && isRobotTurn() && physicalSession.autoRobotReply !== false && !physicalSession.mentorOpeningDrill) {
         physicalSession.phase = 'robot_thinking';
         physicalSession.statusText = 'Calibration passed. Engine will make the opening move for White.';
         logPhysicalEvent('robot_opening_scheduled', physicalSession.statusText, {
@@ -6083,6 +6579,11 @@ async function processPhysicalSnapshot(occupancy, metadata = {}) {
   if (['mentor_drill_restore', 'mentor_drill_complete', 'mentor_drill_paused',
     'mentor_drill_blocked', 'mentor_drill_finished'].includes(physicalSession.phase)) {
     processOpeningGateSnapshot(occupancy);
+    return;
+  }
+
+  if (physicalSession.pendingPromotion) {
+    await processPendingPromotionSnapshot(occupancy, metadata);
     return;
   }
 
@@ -6129,18 +6630,32 @@ async function processPhysicalSnapshot(occupancy, metadata = {}) {
   emitPhysicalState('physical-board', { snapshotMeta: metadata });
 }
 
-function startPhysicalSession({ humanColor = 'white', level = 1, profile = 'balanced', graveyardSlots = [], setupMode = 'full' } = {}) {
+function startPhysicalSession({
+  humanColor = 'white',
+  level = 1,
+  profile = 'balanced',
+  graveyardSlots = [],
+  setupMode = 'full',
+  initialFen = null
+} = {}) {
+  const normalizedSetupMode = ['partial', 'custom'].includes(setupMode) ? setupMode : 'full';
+  const normalizedInitialFen = normalizedSetupMode === 'custom'
+    ? validatePhysicalCustomFen(initialFen)
+    : PHYSICAL_START_FEN;
+
   physicalSession.sessionGeneration += 1;
   physicalSession.stateRevision = 0;
   physicalSession.mentorStateSignature = '';
   physicalSession.active = true;
   physicalSession.phase = 'setup';
-  physicalSession.setupMode = setupMode === 'partial' ? 'partial' : 'full';
-  physicalSession.game = new Chess(PHYSICAL_START_FEN);
+  physicalSession.setupMode = normalizedSetupMode;
+  physicalSession.initialFen = normalizedInitialFen;
+  physicalSession.game = new Chess(normalizedInitialFen);
   physicalSession.occupancy = Array(64).fill(false);
   physicalSession.selectedSource = null;
   physicalSession.pendingCaptureTarget = null;
   physicalSession.pendingCastleMove = null;
+  physicalSession.pendingPromotion = null;
   physicalSession.legalTargets = [];
   physicalSession.humanColor = normalizeHumanColor(humanColor);
   physicalSession.robotColor = oppositeHumanColor(physicalSession.humanColor);
@@ -6168,11 +6683,14 @@ function startPhysicalSession({ humanColor = 'white', level = 1, profile = 'bala
   physicalSession.mentorOpeningRestoreCandidateAt = null;
   physicalSession.statusText = physicalSession.setupMode === 'partial'
     ? 'Partial physical setup started. Detected starting pieces will become the game position.'
-    : 'Physical board setup calibration started.';
+    : physicalSession.setupMode === 'custom'
+      ? 'Custom physical setup started. Arrange every piece shown by the supplied FEN.'
+      : 'Physical board setup calibration started.';
 
   logPhysicalEvent('setup_started', physicalSession.statusText, {
     details: {
       setupMode: physicalSession.setupMode,
+      initialFen: physicalSession.initialFen,
       humanColor: physicalSession.humanColor,
       robotColor: physicalSession.robotColor,
       level: physicalSession.level,
@@ -6229,13 +6747,16 @@ app.patch('/api/physical/settings', (req, res) => {
 app.post('/api/physical/start', (req, res) => {
   const defaults = mentorFeature.gameSettingsService.get().defaults;
   const body = req.body || {};
-  const result = startPhysicalSession({
-    ...body,
-    humanColor: body.humanColor ?? defaults.humanColor,
-    level: body.level ?? defaults.difficultyLevel
-  });
-
-  return res.json(result);
+  try {
+    const result = startPhysicalSession({
+      ...body,
+      humanColor: body.humanColor ?? defaults.humanColor,
+      level: body.level ?? defaults.difficultyLevel
+    });
+    return res.json(result);
+  } catch (error) {
+    return res.status(400).json({ success: false, error: error.message });
+  }
 });
 
 app.get('/api/physical/status', (req, res) => {
@@ -6448,6 +6969,11 @@ app.post('/api/physical/retry-robot', (req, res) => {
   return res.json({ success: true, state: serializePhysicalState() });
 });
 
+app.post('/api/physical/promotion/select', (req, res) => {
+  const result = selectPhysicalPromotionIdentity(req.body || {});
+  return res.status(result.status || 200).json(result);
+});
+
 app.post('/api/physical/undo-turn', (req, res) => {
   try {
     const result = startPhysicalUndoTurn();
@@ -6496,7 +7022,8 @@ app.post('/api/physical/snapshot', async (req, res) => {
     await processPhysicalSnapshot(occupancy, {
       seq: req.body?.seq,
       stable: req.body?.stable,
-      source: req.body?.source || 'esp32'
+      source: req.body?.source || 'esp32',
+      promotionDisplay: req.body?.promotionDisplay || null
     });
     const immediateCommands = physicalSession.commands
       .filter((command) => command.type === 'led' && !commandIdsBefore.has(command.id));
@@ -6637,6 +7164,33 @@ app.post('/api/physical/job-result', (req, res) => {
         state: serializePhysicalState()
       });
     }
+  }
+
+  if (pending.kind !== 'undo' && pending.uci?.length === 5 && occupancy) {
+    const move = promotionMoveFromGame(physicalSession.game, pending.uci);
+    const promotion = beginFixedPromotion({
+      actor: pending.kind === 'redo' ? 'redo' : 'robot',
+      operation: pending.kind === 'redo' ? 'redo' : 'move',
+      move,
+      occupancy,
+      pendingJob: pending,
+      entry: pending.redo?.entry || null
+    });
+    if (!promotion.success) {
+      const diff = promotion.diff || diffOccupancy(occupancyFromGame(physicalSession.game), occupancy);
+      setPhysicalSyncWarning(promotion.error, {
+        ...diff,
+        commandId: pending.id,
+        reason: { type: 'promotion_motion_mismatch', transactionId: pending.id }
+      });
+      return res.json({
+        success: false,
+        recoverable: true,
+        error: promotion.error,
+        state: serializePhysicalState()
+      });
+    }
+    return res.json({ success: true, promotionPending: true, state: serializePhysicalState() });
   }
 
   if (pending.kind === 'undo') {
@@ -6817,6 +7371,12 @@ module.exports = {
     physicalSession,
     processPhysicalSnapshot,
     startPhysicalSession,
+    validatePhysicalCustomFen,
+    summarizePendingPromotion,
+    processPendingPromotionSnapshot,
+    selectPhysicalPromotionIdentity,
+    beginHumanPromotion,
+    beginFixedPromotion,
     queueRobotReply,
     pausePendingRobotJobAfterFailure,
     startPhysicalUndoTurn,

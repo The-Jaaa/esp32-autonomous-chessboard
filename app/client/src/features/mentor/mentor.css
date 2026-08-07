@@ -1159,6 +1159,13 @@
 .mentor-dialog-actions button { min-height: 36px; padding: 0 14px; border: 1px solid var(--mentor-border); border-radius: 5px; color: white; background: var(--surface-panel-strong); cursor: pointer; }
 .mentor-dialog-actions button[type="submit"] { border-color: var(--mentor-accent); color: white; background: var(--mentor-accent); font-weight: 700; }
 
+.mentor-promotion-panel { display: grid; gap: 7px; padding: 10px; border: 1px solid var(--mentor-accent); border-radius: 5px; background: rgba(59, 130, 246, .1); }
+.mentor-promotion-panel > span, .mentor-promotion-panel > small { color: var(--mentor-muted); font-size: 10px; line-height: 1.4; }
+.mentor-promotion-panel > div { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.mentor-promotion-panel button { min-width: 0; height: 32px; border: 1px solid var(--mentor-border); border-radius: 4px; color: var(--mentor-text); background: var(--surface-input); font-weight: 800; cursor: pointer; }
+.mentor-promotion-panel button.is-active { border-color: var(--mentor-accent); color: white; background: var(--mentor-accent); }
+.mentor-promotion-panel button:disabled { cursor: default; opacity: .6; }
+
 @media (min-width: 1780px) {
   .mentor-shell { grid-template-columns: 280px minmax(650px, 1fr) 480px; }
 }

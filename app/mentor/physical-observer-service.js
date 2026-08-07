@@ -78,7 +78,7 @@ function normalizeSnapshot(snapshot, binding) {
     source: 'physical',
     sourceKey: sourceKey(snapshot),
     conversationId: binding.conversationId,
-    initialFen: null,
+    initialFen: snapshot.initialFen || null,
     fen: game.fen(),
     pgn: snapshot.pgn || '',
     orientation: binding.orientation,
@@ -120,6 +120,7 @@ function normalizeSnapshot(snapshot, binding) {
       pendingRobotJob: snapshot.pendingRobotJob || null,
       pendingUndo: snapshot.pendingUndo || null,
       pendingRedo: snapshot.pendingRedo || null,
+      pendingPromotion: snapshot.pendingPromotion || null,
       robotGraveyardOccupied: snapshot.robotGraveyardOccupied || [],
       selectedSource: snapshot.selectedSource || null,
       legalTargets: snapshot.legalTargets || [],
@@ -189,7 +190,12 @@ function guidanceFor(snapshot) {
   let eventText = '';
   let reply = '';
 
-  if (snapshot.phase === 'sync_warning') {
+  if (snapshot.pendingPromotion) {
+    type = 'promotion_replacement';
+    const promotion = snapshot.pendingPromotion;
+    eventText = `Physical promotion replacement required on ${promotion.to}.`;
+    reply = snapshot.statusText || `Replace the pawn on ${promotion.to} with the requested ${promotion.selectedPiece || promotion.displayedPiece || 'piece'}.`;
+  } else if (snapshot.phase === 'sync_warning') {
     type = 'sync_warning';
     urgent = true;
     eventText = `Physical board synchronization warning${diff ? `: ${diff}` : ''}.`;
@@ -236,7 +242,9 @@ function guidanceFor(snapshot) {
   }
 
   if (!type) return null;
-  const keyParts = ['check', 'checkmate', 'draw'].includes(type)
+  const keyParts = type === 'promotion_replacement'
+    ? [snapshot.serverInstanceId, snapshot.sessionGeneration, type, snapshot.pendingPromotion?.id || '']
+    : ['check', 'checkmate', 'draw'].includes(type)
     ? [snapshot.serverInstanceId, snapshot.sessionGeneration, type, snapshot.fen]
     : [
         snapshot.serverInstanceId,
