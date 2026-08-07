@@ -229,7 +229,7 @@ function ActivityBar({
       <div className="mentor-activity-bar is-idle">
         <div><GraduationCap size={17} /><span><strong>{openingLock ? 'Opening lesson finished' : 'Guided practice'}</strong><small>{openingLock
           ? 'The physical position is locked until you resume normal play'
-          : physical ? 'Ask the voice mentor to play, teach an opening, or start a puzzle' : 'Start a game, drill, puzzle, or lesson'}</small></span></div>
+          : physical ? 'Ask the voice mentor to play or teach a reviewed opening' : 'Start a game, drill, puzzle, or lesson'}</small></span></div>
         <div className="mentor-activity-actions">
           {!VOICE_FIRST_PHYSICAL && <button onClick={onProfile} title="Learner profile" aria-label="Learner profile"><Settings2 size={15} /></button>}
           {openingLock
@@ -1427,7 +1427,7 @@ export default function MentorWorkspace() {
               <div className="mentor-empty-state">
                 <div className="mentor-empty-mark"><Mic size={28} /></div>
                 <h2>Voice mentor ready</h2>
-                <p>Start voice to play a guided physical game, learn an opening, or solve a puzzle.</p>
+                <p>Start voice to play a guided physical game or learn a reviewed opening.</p>
                 {!VOICE_FIRST_PHYSICAL && <div className="mentor-suggestions">
                   {SUGGESTIONS.map((suggestion) => (
                     <button key={suggestion.title} disabled={!socketReady || mentorRequestBusy} onClick={() => sendMessage(suggestion.prompt)}>

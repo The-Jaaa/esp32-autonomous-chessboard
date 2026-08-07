@@ -235,6 +235,22 @@ function mapPhysicalHandoff(row) {
   };
 }
 
+function mapPhysicalActivityIntent(row) {
+  if (!row) return null;
+  return {
+    conversationId: row.conversation_id,
+    activityType: row.activity_type,
+    sourceId: row.source_id || null,
+    learnerColor: row.learner_color || null,
+    opponentMode: row.opponent_mode || null,
+    originatingRequestId: row.originating_request_id || null,
+    originatingText: row.originating_text || '',
+    status: row.status,
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at)
+  };
+}
+
 function titleFromMessage(text) {
   const normalized = String(text || '').replace(/\s+/g, ' ').trim();
   if (!normalized) return DEFAULT_TITLE;
@@ -562,6 +578,22 @@ class MentorStore {
         CREATE UNIQUE INDEX mentor_physical_handoffs_one_pending_board
           ON mentor_physical_handoffs(board_id)
           WHERE status = 'pending';
+      `
+    }, {
+      version: 12,
+      sql: `
+        CREATE TABLE mentor_physical_activity_intents (
+          conversation_id TEXT PRIMARY KEY REFERENCES mentor_conversations(id) ON DELETE CASCADE,
+          activity_type TEXT NOT NULL CHECK(activity_type IN ('practice_game', 'opening_drill')),
+          source_id TEXT,
+          learner_color TEXT CHECK(learner_color IS NULL OR learner_color IN ('white', 'black')),
+          opponent_mode TEXT CHECK(opponent_mode IS NULL OR opponent_mode IN ('mentor', 'stockfish')),
+          originating_request_id TEXT,
+          originating_text TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL CHECK(status IN ('pending', 'started', 'cancelled')),
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
       `
     }];
 
@@ -1273,6 +1305,57 @@ class MentorStore {
       id
     );
     return this.getPhysicalHandoff(id);
+  }
+
+  getPhysicalActivityIntent(conversationId, { includeResolved = false } = {}) {
+    const row = this.db.prepare(`
+      SELECT * FROM mentor_physical_activity_intents
+      WHERE conversation_id = ?${includeResolved ? '' : " AND status = 'pending'"}
+    `).get(conversationId);
+    return mapPhysicalActivityIntent(row);
+  }
+
+  savePhysicalActivityIntent(conversationId, intent = {}) {
+    const existing = this.getPhysicalActivityIntent(conversationId, { includeResolved: true });
+    const timestamp = this.now();
+    const createdAt = existing?.createdAt || timestamp;
+    this.db.prepare(`
+      INSERT INTO mentor_physical_activity_intents(
+        conversation_id, activity_type, source_id, learner_color, opponent_mode,
+        originating_request_id, originating_text, status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(conversation_id) DO UPDATE SET
+        activity_type = excluded.activity_type,
+        source_id = excluded.source_id,
+        learner_color = excluded.learner_color,
+        opponent_mode = excluded.opponent_mode,
+        originating_request_id = excluded.originating_request_id,
+        originating_text = excluded.originating_text,
+        status = excluded.status,
+        updated_at = excluded.updated_at
+    `).run(
+      conversationId,
+      intent.activityType,
+      intent.sourceId || null,
+      intent.learnerColor || null,
+      intent.opponentMode || null,
+      intent.originatingRequestId || null,
+      String(intent.originatingText || '').slice(0, 8000),
+      intent.status || 'pending',
+      createdAt,
+      timestamp
+    );
+    return this.getPhysicalActivityIntent(conversationId, { includeResolved: true });
+  }
+
+  resolvePhysicalActivityIntent(conversationId, status = 'started') {
+    if (!['started', 'cancelled'].includes(status)) throw new Error('Invalid physical activity intent status.');
+    this.db.prepare(`
+      UPDATE mentor_physical_activity_intents
+      SET status = ?, updated_at = ?
+      WHERE conversation_id = ? AND status = 'pending'
+    `).run(status, this.now(), conversationId);
+    return this.getPhysicalActivityIntent(conversationId, { includeResolved: true });
   }
 
   createActivity({

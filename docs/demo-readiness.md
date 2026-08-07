@@ -425,3 +425,44 @@ physical curriculum suite, complete Mentor and physical suites, Playwright at
 backend syntax, and diff checks. Firmware and `offline_core` remain unchanged.
 The eight-step real-board handoff/opening/puzzle gate remains required before
 Milestone 3 and 3.5 are marked demonstration-ready.
+
+## Milestone 3.5 Acceptance Corrections: Grounded Coaching And Reliable Voice
+
+Physical Stockfish coaching is now generated from one immutable evidence
+record containing the exact learner move, robot reply, before/after/current
+FENs, piece map, material, verified move history, and matching Stockfish
+classification and principal variation. Generated explanations are validated
+against that evidence. One rejected response may be regenerated with its
+specific claim errors; a second failure uses a deterministic engine-grounded
+explanation. Gemini Live voices the approved script rather than independently
+reinterpreting the physical board.
+
+Unexpected Live provider errors, closures, and physical-turn timeouts now
+clear unfinished audio and reconnect once with the same session settings and
+latest physical context. Current queued narration resumes only after the new
+provider session is ready. A second failure returns to a clean manual-start
+state. Intentional Stop, navigation, and conversation changes never reconnect.
+
+Gemini handoff calls now contain only `continue_existing` or `end_and_start`;
+the backend binds the current persisted handoff ID. Button/REST decisions
+remain ID-checked. Opening introductions queued during a transfer wait for the
+requesting Live session to reconnect before they are spoken.
+
+A migration-backed pending physical intent retains a reviewed opening and
+later learner-color answer across separate spoken turns. For example,
+`Teach me the Italian Game` followed by `I'll play Black` resolves to
+`italian-game` and starts with the prescribed robot move `e2e4`. Completed
+intents cannot be reopened by a late cumulative transcript.
+
+Physical Mentor puzzles have been removed from declarations, prompts, and the
+product surface. Requests recommend a guided game or reviewed opening and do
+not claim the board or start custom setup. Catalog data, virtual compatibility,
+history, and legacy records remain; an old active physical puzzle is paused
+and can only be ended.
+
+The two implementation commits pass focused grounded-coaching, Live recovery,
+handoff, retained-intent, puzzle-rejection, physical observer, physical
+curriculum, and desktop browser regressions. The complete Mentor and physical
+suites, shared settings, client lint/build, backend syntax, and diff checks
+also pass. Milestone 3 remains pending until the corrected real-board gate
+completes.

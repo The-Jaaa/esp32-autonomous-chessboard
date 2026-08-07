@@ -515,7 +515,9 @@ async function verifyVoiceFirstPhysicalOrchestration() {
   };
   const activityService = {
     current: null,
+    mergePhysicalActivityIntent: (_conversationId, options) => options,
     normalizePhysicalActivityRequest: (options) => options,
+    completePhysicalActivityIntent: () => null,
     assertExplicitStartConsent: () => true,
     validateTool: () => true,
     startActivity: async (_conversationId, options) => {

@@ -212,7 +212,6 @@ async function run() {
       'resolve_physical_board_handoff',
       'pause_activity',
       'resume_activity',
-      'confirm_physical_setup',
       'request_hint',
       'end_activity',
       'resolve_opening_drill'

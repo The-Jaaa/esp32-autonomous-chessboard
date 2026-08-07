@@ -22,7 +22,6 @@ const PHYSICAL_READ_TOOLS = new Set([
   'play_physical_move',
   'pause_activity',
   'resume_activity',
-  'confirm_physical_setup',
   'request_hint',
   'end_activity',
   'resolve_opening_drill',
@@ -1111,6 +1110,19 @@ class MentorPhysicalObserverService {
 
     const binding = this.store.getActivePhysicalBinding(this.boardId);
     const ownerActivity = this.store.getActiveActivity(handoff.owningConversationId);
+    if (action === 'end_and_start' && handoff.requestedActivity?.type === 'puzzle') {
+      const cancelled = this.store.resolvePhysicalHandoff(handoff.id, {
+        status: 'cancelled',
+        resolution: action,
+        errorCode: 'physical_puzzles_disabled'
+      });
+      this.emit(conversationId, 'mentor-physical-handoff-updated', { conversationId, handoff: cancelled });
+      throw new MentorPhysicalError(
+        'Physical puzzles are not available. Choose a guided physical game or a reviewed opening.',
+        'physical_puzzles_disabled',
+        409
+      );
+    }
     const identityMatches = binding?.conversationId === handoff.owningConversationId
       && binding.serverInstanceId === handoff.serverInstanceId
       && binding.sessionGeneration === handoff.sessionGeneration
@@ -1148,26 +1160,15 @@ class MentorPhysicalObserverService {
       const requested = handoff.requestedActivity || {};
       const learnerColor = requested.learnerColor || 'white';
       let detail;
-      if (requested.type === 'puzzle') {
-        detail = this.attach(conversationId, {
-          serverInstanceId: this.snapshot.serverInstanceId,
-          sessionGeneration: this.snapshot.sessionGeneration,
-          allowLiveSwitch: true,
-          coachingMode: 'off',
-          coachingOrigin: 'physical_handoff',
-          orientation: learnerColor
-        });
-      } else {
-        this.adapter?.startDefaultGame?.({ allowPristineRestart: true });
-        detail = this.attach(conversationId, {
-          serverInstanceId: this.snapshot.serverInstanceId,
-          sessionGeneration: this.snapshot.sessionGeneration,
-          allowLiveSwitch: true,
-          coachingMode: 'selective',
-          coachingOrigin: 'physical_handoff',
-          orientation: learnerColor
-        });
-      }
+      this.adapter?.startDefaultGame?.({ allowPristineRestart: true });
+      detail = this.attach(conversationId, {
+        serverInstanceId: this.snapshot.serverInstanceId,
+        sessionGeneration: this.snapshot.sessionGeneration,
+        allowLiveSwitch: true,
+        coachingMode: 'selective',
+        coachingOrigin: 'physical_handoff',
+        orientation: learnerColor
+      });
 
       const activity = await this.activityService.startActivity(conversationId, {
         type: requested.type,
@@ -1178,6 +1179,7 @@ class MentorPhysicalObserverService {
         expectedRevision: detail.state.revision,
         requestId: requestId || requested.requestId || null
       });
+      this.activityService?.completePhysicalActivityIntent?.(conversationId);
       const resolved = this.store.resolvePhysicalHandoff(handoff.id, {
         status: 'transferred',
         resolution: action,
@@ -1332,10 +1334,6 @@ class MentorPhysicalObserverService {
       .filter((item) => item.type === 'opening_drill' && item.supportsPhysical)
       .map((item) => `${item.title} [${item.id}]`)
       .join(', ');
-    const reviewedPuzzles = listCatalog('puzzle')
-      .filter((item) => item.supportsPhysical)
-      .map((item) => `${item.title} [${item.id}, ${item.difficultyBand}]`)
-      .join(', ');
     const openingContext = activity?.config?.boardSource === 'physical'
       ? [
           `Active physical activity: ${activity.title} (${activity.type})`,
@@ -1348,9 +1346,7 @@ class MentorPhysicalObserverService {
             : `Required next move: ${activity.config.line?.[activity.stepIndex] || '(line complete)'}`,
           activity.type === 'practice_game'
             ? 'In mentor mode, use Stockfish evidence and play_physical_move on the assigned turn. In Stockfish mode, the backend chooses the robot move.'
-            : activity.state?.pauseReason === 'puzzle_setup'
-              ? `Setup checklist: ${activity.config.setupChecklist?.map((item) => `${item.color} ${item.piece} ${item.square}`).join(', ')}`
-              : 'The activity coordinator enforces and executes the reviewed line.'
+            : 'The activity coordinator enforces and executes the reviewed line.'
         ]
       : [];
     return [
@@ -1369,11 +1365,11 @@ class MentorPhysicalObserverService {
       `Robot busy: ${physical.robotBusy ? 'yes' : 'no'}`,
       ...openingContext,
       `Reviewed physical opening drills: ${reviewedOpenings}`,
-      `Reviewed physical puzzles: ${reviewedPuzzles}`,
       activity?.type === 'practice_game' && activity.config?.opponentMode === 'mentor'
         ? 'During your assigned mentor turn, you may use play_physical_move after Stockfish verification. You cannot access motors, routes, magnets, or command queues.'
         : 'You may analyze or annotate this position. Physical moves are available only through an active guarded activity.',
-      'You may start a reviewed opening from the exact standard position or a reviewed puzzle through its guided custom setup.',
+      'You may start a guided physical game or a reviewed opening from the exact standard position.',
+      'Physical puzzles are unavailable. Recommend a guided game or reviewed opening without changing the board.',
       'Never claim a physical move succeeded until its tool result confirms exact hardware verification.'
     ].join('\n');
   }

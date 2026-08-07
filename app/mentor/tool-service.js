@@ -20,7 +20,8 @@ const VOICE_FIRST_UNATTACHED_TOOL_NAMES = new Set([
 ]);
 const VOICE_FIRST_BLOCKED_TOOL_NAMES = new Set([
   'start_physical_game',
-  'attach_physical_game'
+  'attach_physical_game',
+  'confirm_physical_setup'
 ]);
 const CUSTOM_ACTIVITY_PROPERTIES = {
   type: { type: 'string', enum: ['opening_drill', 'puzzle', 'guided_lesson'] },
@@ -221,10 +222,9 @@ const TOOL_DECLARATIONS = [{
   parametersJsonSchema: {
     type: 'object',
     properties: {
-      handoffId: { type: 'string' },
       action: { type: 'string', enum: ['continue_existing', 'end_and_start'] }
     },
-    required: ['handoffId', 'action'],
+    required: ['action'],
     additionalProperties: false
   }
 }, {
@@ -339,17 +339,31 @@ class MentorToolService {
   declarations(conversationId = null, { voiceFirstPhysical = false } = {}) {
     if (voiceFirstPhysical) {
       const physicalDeclarations = TOOL_DECLARATIONS.map((tool) => {
+        if (tool.name === 'resolve_physical_board_handoff') {
+          return {
+            ...tool,
+            description: 'Resolve the current pending physical-board ownership conflict after the learner chooses an action. The backend binds the handoff identity.',
+            parametersJsonSchema: {
+              type: 'object',
+              properties: {
+                action: { type: 'string', enum: ['continue_existing', 'end_and_start'] }
+              },
+              required: ['action'],
+              additionalProperties: false
+            }
+          };
+        }
         if (tool.name !== 'start_activity') return tool;
         const sourceIds = listCatalog()
-          .filter((item) => item.supportsPhysical && ['opening_drill', 'puzzle'].includes(item.type))
+          .filter((item) => item.supportsPhysical && item.type === 'opening_drill')
           .map((item) => item.id);
         return {
           ...tool,
-          description: 'Start a confirmed physical practice game, reviewed opening, or reviewed puzzle. Use a reviewed sourceId for named openings and puzzles; omit it to select a puzzle from the current difficulty band.',
+          description: 'Start a confirmed guided physical game or reviewed opening. Opening identity and learner color may be retained from earlier spoken turns.',
           parametersJsonSchema: {
             type: 'object',
             properties: {
-              type: { type: 'string', enum: ['practice_game', 'opening_drill', 'puzzle'] },
+              type: { type: 'string', enum: ['practice_game', 'opening_drill'] },
               opponentMode: { type: 'string', enum: ['mentor', 'stockfish'] },
               learnerColor: { type: 'string', enum: ['white', 'black'] },
               sourceId: { type: 'string', enum: sourceIds }
@@ -578,7 +592,9 @@ class MentorToolService {
       if (!this.activityService) throw new Error('Mentor activities are unavailable.');
       const voiceFirstPhysical = channel === 'live-physical';
       const activityArgs = voiceFirstPhysical
-        ? this.activityService.normalizePhysicalActivityRequest(args)
+        ? this.activityService.normalizePhysicalActivityRequest(
+          this.activityService.mergePhysicalActivityIntent(conversationId, args)
+        )
         : args;
       const activeActivity = this.activityService.get?.(conversationId) || null;
       const requestedType = activityArgs.type || 'practice_game';
@@ -591,6 +607,7 @@ class MentorToolService {
         && (requestedType !== 'practice_game' || activeActivity.config?.opponentMode === requestedOpponent)
         && (!activityArgs.sourceId || activeActivity.sourceId === activityArgs.sourceId);
       if (sameActiveActivity) {
+        if (voiceFirstPhysical) this.activityService.completePhysicalActivityIntent(conversationId);
         onProgress(1, 1);
         return {
           activity: activeActivity,
@@ -632,6 +649,7 @@ class MentorToolService {
         requestId,
         signal
       });
+      if (voiceFirstPhysical) this.activityService.completePhysicalActivityIntent(conversationId);
       onProgress(1, 1);
       return { activity, board: compactBoardState(this.workspaceState(conversationId)) };
     }
@@ -640,8 +658,14 @@ class MentorToolService {
       if (!this.physicalObserver?.resolvePhysicalBoardHandoff) {
         throw new Error('Physical-board handoff is unavailable.');
       }
+      const handoff = this.store.getPendingPhysicalHandoff(conversationId);
+      if (!handoff) {
+        const error = new Error('No current physical-board handoff is waiting for this conversation.');
+        error.code = 'physical_handoff_not_found';
+        throw error;
+      }
       const result = await this.physicalObserver.resolvePhysicalBoardHandoff(conversationId, {
-        handoffId: args.handoffId,
+        handoffId: handoff.id,
         action: args.action,
         requestId
       });

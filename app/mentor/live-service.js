@@ -42,13 +42,14 @@ const LIVE_SYSTEM_INSTRUCTION = [
   'Start a structured activity only after the learner explicitly agrees.',
   'The primary mentor product always uses the physical board. Never ask whether the learner wants Physical or Virtual play.',
   'If the learner says Let us play without naming an opponent, ask only whether they want Mentor-led or Stockfish-led play, and ask their color only when it is not already known.',
-  'An explicit physical game, reviewed opening, or puzzle request is consent to use the matching high-level activity tools.',
+  'An explicit physical game or reviewed opening request is consent to use the matching high-level activity tools.',
   'The primary Live workspace is physical-only. Never use virtual play_move, play_line, load_position, or reset_board for a learner activity.',
   'Calling start_activity is the only valid way to begin product gameplay. It establishes or attaches the physical board and creates the requested activity in one transaction. Include learnerColor and opponentMode when the learner specifies them.',
   'If start_activity reports handoffRequired, ask whether to continue the existing game or end it and start the requested activity here. Call resolve_physical_board_handoff only after the learner chooses.',
   'Never ask the learner to connect the board to a chat. Idle, ended, and stale ownership is handled automatically.',
   'Flipping orientation only changes the app view; it never changes the learner side and never replaces start_activity.',
-  'For openings, use the exact reviewed sourceId from the supplied catalog and never submit a custom proposal. For puzzles, use a reviewed sourceId or omit it for difficulty-based selection, then guide setup and wait for explicit physical setup confirmation.',
+  'For openings, retain the named opening across later color answers and use the exact reviewed sourceId when known. Ask only for a missing learner color; reviewed opening moves are prescribed.',
+  'Physical puzzles are not part of this product. If asked for one, briefly recommend a guided physical game or reviewed opening and do not call a board-changing tool.',
   'During an assigned activity turn, analyze first and then make exactly one mentor move, unless you explicitly request a prediction.',
   'For a guided physical game, analyze the learner\'s latest move with analyze_move and state its classification plainly after your physical reply verifies.',
   'Do not soften an inaccuracy, mistake, or blunder. Name it directly, explain the consequence, and give the stronger alternative.',
@@ -631,6 +632,11 @@ class MentorLiveService {
     }
     record.discardUnsolicitedAfterPhysical = false;
     record.suppressAudioUntilTurnComplete = false;
+    this.activityService?.capturePhysicalActivityIntent?.(
+      record.conversationId,
+      payload.text,
+      payload.requestId
+    );
     this.activityService?.prepareConversationTurn(record.conversationId, payload.requestId);
     const existing = this.store.getRequestMessages(record.conversationId, payload.requestId);
     if (existing.length) {
@@ -866,6 +872,11 @@ class MentorLiveService {
     const turn = this.currentTurn(record);
     this.activityService?.prepareConversationTurn(record.conversationId, turn.requestId);
     turn.userText = mergeTranscript(turn.userText, text);
+    this.activityService?.capturePhysicalActivityIntent?.(
+      record.conversationId,
+      turn.userText,
+      turn.requestId
+    );
     const message = this.updateTurnUserMessage(record, turn);
     this.emit(record.conversationId, 'mentor-live-user-transcript', {
       ...this.statusPayload(record, turn.toolBusy ? 'tool_running' : 'listening'),
@@ -1407,7 +1418,7 @@ class MentorLiveService {
 
   requestPhysicalTurn(conversationId, request) {
     const record = this.byConversation.get(conversationId);
-    if (!record || record.closing || !record.ready) return null;
+    if (!record || record.closing) return null;
     if (this.store.getRequestMessages(conversationId, request.requestId).length) {
       return { duplicate: true, sessionId: record.sessionId };
     }
@@ -1417,6 +1428,13 @@ class MentorLiveService {
     if (request.queueKey) {
       record.pendingSystemTurns = record.pendingSystemTurns
         .filter((item) => item.queueKey !== request.queueKey);
+    }
+    if (!record.ready) {
+      if (record.reconnecting || record.pendingContextReconnect) {
+        record.pendingSystemTurns.push(request);
+        return { queued: true, reconnecting: true, sessionId: record.sessionId };
+      }
+      return null;
     }
     if (request.urgent) {
       this.speakerService?.clearOutput(

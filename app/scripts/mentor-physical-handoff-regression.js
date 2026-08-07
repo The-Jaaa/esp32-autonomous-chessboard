@@ -142,10 +142,17 @@ async function verifyOwnershipHandoff(dbPath) {
   assert.strictEqual(persisted.id, conflict.handoff.id, 'pending handoff survives restart');
   reopened.close();
 
-  const continued = await observer.resolvePhysicalBoardHandoff(requester.id, {
-    handoffId: conflict.handoff.id,
-    action: 'continue_existing',
-    requestId: 'continue-choice'
+  const toolService = new MentorToolService({
+    store,
+    chessService: { getState: () => ({ fen: STANDARD_FEN, revision: 0, legalMoves: [] }) },
+    activityService,
+    physicalObserver: observer
+  });
+  const continued = await toolService.runTool('resolve_physical_board_handoff', { action: 'continue_existing' }, {
+    conversationId: requester.id,
+    requestId: 'continue-choice',
+    channel: 'live-physical',
+    onProgress: () => {}
   });
   assert.strictEqual(continued.navigateToConversationId, owner.id);
   assert.strictEqual(store.getActivePhysicalBinding().conversationId, owner.id);
@@ -247,7 +254,7 @@ async function verifyDifficultyAndPhysicalDeclarations(dbPath) {
   });
   const toolService = new MentorToolService({
     store,
-    chessService: {},
+    chessService: { getState: () => ({ fen: STANDARD_FEN, revision: 0, legalMoves: [] }) },
     activityService,
     physicalObserver: observer,
     gameSettingsService: settings
@@ -255,10 +262,14 @@ async function verifyDifficultyAndPhysicalDeclarations(dbPath) {
   const declaration = toolService.declarations(conversation.id, { voiceFirstPhysical: true })
     .find((tool) => tool.name === 'start_activity');
   assert.deepStrictEqual(declaration.parametersJsonSchema.properties.type.enum, [
-    'practice_game', 'opening_drill', 'puzzle'
+    'practice_game', 'opening_drill'
   ]);
   assert.strictEqual(declaration.parametersJsonSchema.properties.proposal, undefined);
   assert(declaration.parametersJsonSchema.properties.sourceId.enum.includes('italian-game'));
+  const handoffDeclaration = toolService.declarations(conversation.id, { voiceFirstPhysical: true })
+    .find((tool) => tool.name === 'resolve_physical_board_handoff');
+  assert.deepStrictEqual(Object.keys(handoffDeclaration.parametersJsonSchema.properties), ['action']);
+  assert.strictEqual(handoffDeclaration.parametersJsonSchema.required.includes('handoffId'), false);
 
   const pair = store.createMessagePair(conversation.id, {
     requestId: 'difficulty-live', text: 'Change difficulty to level 8.'
@@ -274,6 +285,118 @@ async function verifyDifficultyAndPhysicalDeclarations(dbPath) {
   assert.strictEqual(result.response.output.applicability.difficultyLevel, 'next_robot_turn');
   assert.strictEqual(result.response.output.difficultyAppliedToActiveGame, true);
   assert.strictEqual(activeDifficulty, 8);
+  store.close();
+}
+
+async function verifyRetainedOpeningIntent(dbPath) {
+  const harness = createHarness(dbPath);
+  const { store, observer, activityService } = harness;
+  const conversation = store.createConversation();
+  activityService.capturePhysicalActivityIntent(
+    conversation.id,
+    'Teach me the Italian Game.',
+    'opening-name'
+  );
+  let intent = store.getPhysicalActivityIntent(conversation.id);
+  assert.strictEqual(intent.sourceId, 'italian-game');
+  assert.strictEqual(intent.learnerColor, null);
+  const reopened = new MentorStore({ dbPath });
+  assert.strictEqual(reopened.getPhysicalActivityIntent(conversation.id).sourceId, 'italian-game');
+  reopened.close();
+
+  activityService.capturePhysicalActivityIntent(
+    conversation.id,
+    "I'll play Black.",
+    'opening-color'
+  );
+  intent = store.getPhysicalActivityIntent(conversation.id);
+  assert.strictEqual(intent.sourceId, 'italian-game');
+  assert.strictEqual(intent.learnerColor, 'black');
+
+  harness.setDefaultHumanColor('black');
+  const settings = new GameSettingsService({ store });
+  const toolService = new MentorToolService({
+    store,
+    chessService: { getState: () => ({ fen: STANDARD_FEN, revision: 0, legalMoves: [] }) },
+    activityService,
+    physicalObserver: observer,
+    gameSettingsService: settings
+  });
+  const pair = store.createMessagePair(conversation.id, {
+    requestId: 'opening-color', text: "I'll play Black."
+  });
+  const result = await toolService.runTool('start_activity', { type: 'opening_drill' }, {
+    conversationId: conversation.id,
+    requestId: 'opening-color',
+    channel: 'live-physical',
+    onProgress: () => {}
+  });
+  assert.strictEqual(result.activity.sourceId, 'italian-game');
+  assert.strictEqual(result.activity.learnerColor, 'black');
+  assert.strictEqual(harness.scripted[0].uci, 'e2e4');
+  assert.strictEqual(store.getPhysicalActivityIntent(conversation.id), null);
+  assert.strictEqual(store.getPhysicalActivityIntent(conversation.id, { includeResolved: true }).status, 'started');
+  activityService.capturePhysicalActivityIntent(conversation.id, "I'll play Black.", 'opening-color');
+  assert.strictEqual(store.getPhysicalActivityIntent(conversation.id), null, 'final transcript cannot reopen a started intent');
+  store.close();
+}
+
+async function verifyPhysicalPuzzleDisabled(dbPath) {
+  const harness = createHarness(dbPath);
+  const { store, observer, activityService } = harness;
+  const conversation = store.createConversation();
+  const toolService = new MentorToolService({
+    store,
+    chessService: { getState: () => ({ fen: STANDARD_FEN, revision: 0, legalMoves: [] }) },
+    activityService,
+    physicalObserver: observer
+  });
+  await assert.rejects(
+    toolService.runTool('start_activity', { type: 'puzzle' }, {
+      conversationId: conversation.id,
+      requestId: 'physical-puzzle',
+      channel: 'live-physical',
+      onProgress: () => {}
+    }),
+    (error) => error.code === 'physical_puzzles_disabled'
+  );
+  assert.strictEqual(store.getActiveActivity(conversation.id), null);
+  assert.strictEqual(store.getActivePhysicalBinding(), null);
+  assert.strictEqual(harness.snapshot().sessionGeneration, 4, 'puzzle rejection does not start a physical session');
+  store.close();
+}
+
+function verifyLegacyPhysicalPuzzlePaused(dbPath) {
+  const harness = createHarness(dbPath);
+  const { store, observer, activityService } = harness;
+  const conversation = store.createConversation();
+  observer.attach(conversation.id, {
+    serverInstanceId: 'handoff-server',
+    sessionGeneration: 4,
+    coachingMode: 'off'
+  });
+  store.createActivity({
+    conversationId: conversation.id,
+    type: 'puzzle',
+    title: 'Legacy physical puzzle',
+    learnerColor: 'white',
+    mentorColor: 'black',
+    startFen: STANDARD_FEN,
+    startRevision: 0,
+    boardRevision: 0,
+    phase: 'learner_turn',
+    config: { boardSource: 'physical' },
+    state: {}
+  });
+  const reconciled = activityService.reconcile(conversation.id);
+  assert.strictEqual(reconciled.status, 'paused');
+  assert.strictEqual(reconciled.state.pauseReason, 'physical_puzzles_disabled');
+  assert.throws(
+    () => activityService.resume(conversation.id),
+    (error) => error.code === 'physical_puzzles_disabled'
+  );
+  const ended = activityService.end(conversation.id);
+  assert.strictEqual(ended.status, 'cancelled');
   store.close();
 }
 
@@ -305,6 +428,9 @@ function verifyHandoffExpiry(dbPath) {
     await verifyOwnershipHandoff(path.join(tempDir, 'ownership.sqlite'));
     await verifyBusyAndStaleHandoffs(path.join(tempDir, 'safety.sqlite'));
     await verifyDifficultyAndPhysicalDeclarations(path.join(tempDir, 'difficulty.sqlite'));
+    await verifyRetainedOpeningIntent(path.join(tempDir, 'opening-intent.sqlite'));
+    await verifyPhysicalPuzzleDisabled(path.join(tempDir, 'puzzle-disabled.sqlite'));
+    verifyLegacyPhysicalPuzzlePaused(path.join(tempDir, 'legacy-puzzle.sqlite'));
     verifyHandoffExpiry(path.join(tempDir, 'expiry.sqlite'));
     console.log('Mentor physical handoff regressions passed.');
   } catch (error) {

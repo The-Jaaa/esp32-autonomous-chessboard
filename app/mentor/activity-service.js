@@ -75,6 +75,62 @@ function reviewedPhysicalItem(type, { sourceId = null, proposal = null } = {}) {
   return null;
 }
 
+function normalizedSpeech(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[\u2018\u2019']/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function openingAliases(item) {
+  const title = normalizedSpeech(item.title);
+  const id = normalizedSpeech(item.id);
+  const shortened = title.replace(/\b(game|opening|defense|declined|accepted|classical|advance)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return [...new Set([title, id, shortened].filter((alias) => alias.length >= 4))];
+}
+
+function reviewedOpeningFromSpeech(text) {
+  const normalized = ` ${normalizedSpeech(text)} `;
+  if (!normalized.trim()) return null;
+  const matches = listCatalog('opening_drill')
+    .filter((item) => item.supportsPhysical)
+    .map((item) => getCatalogItem(item.id))
+    .map((item) => {
+      const title = normalizedSpeech(item.title);
+      const id = normalizedSpeech(item.id);
+      const shortened = openingAliases(item).find((alias) => alias !== title && alias !== id);
+      const score = normalized.includes(` ${id} `)
+        ? 4
+        : normalized.includes(` ${title} `)
+          ? 3
+          : shortened && normalized.includes(` ${shortened} `)
+            ? 1
+            : 0;
+      return { item, score };
+    })
+    .filter(({ score }) => score > 0);
+  const bestScore = Math.max(0, ...matches.map(({ score }) => score));
+  const best = matches.filter(({ score }) => score === bestScore);
+  return best.length === 1 ? best[0].item : null;
+}
+
+function spokenLearnerColor(text) {
+  const normalized = normalizedSpeech(text);
+  const matches = ['white', 'black'].filter((color) => new RegExp(`\\b${color}\\b`).test(normalized));
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function spokenOpponentMode(text) {
+  const normalized = normalizedSpeech(text);
+  if (/\bstockfish(?: led)?\b/.test(normalized)) return 'stockfish';
+  if (/\b(?:mentor|gemini)(?: led)?\b/.test(normalized)) return 'mentor';
+  return null;
+}
+
 class MentorActivityError extends Error {
   constructor(message, code = 'activity_error', statusCode = 400, details = {}) {
     super(message);
@@ -201,6 +257,88 @@ class MentorActivityService {
     return listCatalog(type);
   }
 
+  capturePhysicalActivityIntent(conversationId, text, requestId = null) {
+    const normalized = normalizedSpeech(text);
+    if (!normalized) return this.store.getPhysicalActivityIntent(conversationId);
+    const resolved = this.store.getPhysicalActivityIntent(conversationId, { includeResolved: true });
+    const active = this.store.getActiveActivity(conversationId);
+    if (resolved?.status === 'started' && active?.config?.boardSource === 'physical'
+      && active.type === resolved.activityType
+      && (!resolved.sourceId || active.sourceId === resolved.sourceId)) {
+      return resolved;
+    }
+    if (/\b(?:cancel|never mind|nevermind|forget that)\b/.test(normalized)) {
+      return this.store.resolvePhysicalActivityIntent(conversationId, 'cancelled');
+    }
+    if (/\b(?:physical )?puzzle\b/.test(normalized)) {
+      this.store.resolvePhysicalActivityIntent(conversationId, 'cancelled');
+      return null;
+    }
+
+    const existing = this.store.getPhysicalActivityIntent(conversationId);
+    const opening = reviewedOpeningFromSpeech(text);
+    const learnerColor = spokenLearnerColor(text);
+    const opponentMode = spokenOpponentMode(text);
+    const practiceRequested = /\b(?:play|start|begin)\b.*\b(?:game|match)\b/.test(normalized)
+      && !opening;
+    if (!opening && !practiceRequested && !(existing && (learnerColor || opponentMode))) return existing;
+
+    const replacing = Boolean(opening && existing?.sourceId !== opening.id)
+      || Boolean(practiceRequested && existing?.activityType !== 'practice_game');
+    const next = {
+      activityType: opening ? 'opening_drill' : practiceRequested ? 'practice_game' : existing.activityType,
+      sourceId: opening ? opening.id : practiceRequested ? null : existing.sourceId,
+      learnerColor: learnerColor || (replacing ? null : existing?.learnerColor) || null,
+      opponentMode: opening ? null : opponentMode || (replacing ? null : existing?.opponentMode) || null,
+      originatingRequestId: replacing || !existing
+        ? requestId
+        : existing.originatingRequestId,
+      originatingText: replacing || !existing
+        ? String(text || '')
+        : existing.originatingText,
+      status: 'pending'
+    };
+    return this.store.savePhysicalActivityIntent(conversationId, next);
+  }
+
+  mergePhysicalActivityIntent(conversationId, options = {}) {
+    if (options.type === 'puzzle') {
+      throw new MentorActivityError(
+        'Physical puzzles are not available. Choose a guided physical game or a reviewed opening.',
+        'physical_puzzles_disabled',
+        409
+      );
+    }
+    const intent = this.store.getPhysicalActivityIntent(conversationId);
+    const type = options.type || intent?.activityType;
+    const merged = {
+      ...options,
+      type,
+      sourceId: options.sourceId || (type === 'opening_drill' ? intent?.sourceId : null) || null,
+      learnerColor: options.learnerColor || intent?.learnerColor || null,
+      opponentMode: options.opponentMode || intent?.opponentMode || null
+    };
+    if (type === 'opening_drill' && !merged.sourceId) {
+      throw new MentorActivityError(
+        'Name the reviewed opening you want to learn.',
+        'physical_opening_required',
+        409
+      );
+    }
+    if (type === 'opening_drill' && !merged.learnerColor) {
+      throw new MentorActivityError(
+        'Ask whether the learner wants to play White or Black before starting the opening.',
+        'physical_activity_color_required',
+        409
+      );
+    }
+    return merged;
+  }
+
+  completePhysicalActivityIntent(conversationId, status = 'started') {
+    return this.store.resolvePhysicalActivityIntent(conversationId, status);
+  }
+
   normalizePhysicalActivityRequest(options = {}) {
     if (options.type === 'practice_game') {
       return {
@@ -209,22 +347,24 @@ class MentorActivityService {
         learnerColor: options.learnerColor
       };
     }
-    if (!['opening_drill', 'puzzle'].includes(options.type)) {
+    if (options.type === 'puzzle') {
       throw new MentorActivityError(
-        'The physical mentor supports practice games, reviewed openings, and reviewed puzzles only.',
+        'Physical puzzles are not available. Choose a guided physical game or a reviewed opening.',
+        'physical_puzzles_disabled',
+        409
+      );
+    }
+    if (options.type !== 'opening_drill') {
+      throw new MentorActivityError(
+        'The physical mentor supports guided games and reviewed openings only.',
         'physical_activity_unsupported',
         409
       );
     }
-    if (options.type === 'puzzle' && !options.sourceId && !options.proposal) {
-      return { type: 'puzzle', learnerColor: options.learnerColor };
-    }
     const item = reviewedPhysicalItem(options.type, options);
     if (!item) {
       throw new MentorActivityError(
-        options.type === 'opening_drill'
-          ? 'Reviewed physical opening drill not found.'
-          : 'Reviewed physical puzzle not found.',
+        'Reviewed physical opening drill not found.',
         'activity_source_not_found',
         404
       );
@@ -258,6 +398,18 @@ class MentorActivityService {
     const activity = this.store.getActiveActivity(conversationId);
     if (!activity || activity.status === 'paused') return this.get(conversationId);
     if (this.isPhysicalActivity(activity)) {
+      if (activity.type === 'puzzle') {
+        const paused = this.store.updateActivity(activity.id, {
+          status: 'paused',
+          phase: 'paused',
+          pendingRequestId: null,
+          generation: activity.generation + 1,
+          state: { ...activity.state, pausedFromPhase: activity.phase, pauseReason: 'physical_puzzles_disabled' }
+        });
+        this.record(paused, 'physical_puzzle_disabled', {});
+        this.physicalCoordinator?.syncPhysicalActivity?.(paused);
+        return this.get(conversationId);
+      }
       this.physicalCoordinator?.syncPhysicalActivity?.(activity);
       return this.get(conversationId);
     }
@@ -445,7 +597,13 @@ class MentorActivityService {
   async startActivity(conversationId, options = {}) {
     if (this.physicalCoordinator?.isAttached?.(conversationId)) {
       if (options.type === 'practice_game') return this.startPhysicalPractice(conversationId, options);
-      if (options.type === 'puzzle') return this.startPhysicalPuzzle(conversationId, options);
+      if (options.type === 'puzzle') {
+        throw new MentorActivityError(
+          'Physical puzzles are not available. Choose a guided physical game or a reviewed opening.',
+          'physical_puzzles_disabled',
+          409
+        );
+      }
       return this.startPhysicalOpening(conversationId, options);
     }
     if (options.type === 'practice_game') return this.startPractice(conversationId, options);
@@ -1087,6 +1245,13 @@ class MentorActivityService {
     if (!activity) throw new MentorActivityError('No paused activity was found.', 'activity_not_found', 404);
     if (activity.status !== 'paused') return this.get(conversationId);
     if (this.isPhysicalActivity(activity)) {
+      if (activity.type === 'puzzle' || activity.state.pauseReason === 'physical_puzzles_disabled') {
+        throw new MentorActivityError(
+          'This legacy physical puzzle can only be ended.',
+          'physical_puzzles_disabled',
+          409
+        );
+      }
       if (['line_complete', 'repeat_restore', 'route_blocked', 'puzzle_setup'].includes(activity.state.pauseReason)) {
         throw new MentorActivityError('Use the opening drill action controls for this paused state.', 'physical_opening_action_required', 409);
       }

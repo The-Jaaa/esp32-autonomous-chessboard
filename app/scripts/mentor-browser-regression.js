@@ -95,7 +95,7 @@ async function runViewport(browser, viewport) {
   assert.strictEqual(await page.getByRole('button', { name: 'Load FEN' }).count(), 0);
   assert.strictEqual(await page.getByRole('button', { name: 'Reset board' }).count(), 0);
   await expectText(page.locator('.mentor-voice-command-bar'), 'Use voice to start or attach the physical board');
-  await expectText(page.locator('.mentor-activity-bar'), 'Ask the voice mentor to play, teach an opening, or start a puzzle');
+  await expectText(page.locator('.mentor-activity-bar'), 'Ask the voice mentor to play or teach a reviewed opening');
 
   const sidebar = await page.locator('.mentor-sidebar').boundingBox();
   const boardPanel = await page.locator('.mentor-board-panel').boundingBox();
@@ -158,6 +158,7 @@ async function runViewport(browser, viewport) {
   await expectText(page.locator('.mentor-physical-handoff'), 'Physical board in use');
   await page.getByRole('button', { name: 'End & use this chat' }).click();
   await expectText(page.locator('.mentor-physical-status'), 'Waiting for your move');
+  await page.locator('.mentor-physical-handoff').waitFor({ state: 'detached' });
   assert.strictEqual(await page.locator('.mentor-physical-handoff').count(), 0);
 
   await page.evaluate(() => fetch('/api/test/mentor-physical-state', {

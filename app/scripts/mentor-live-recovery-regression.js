@@ -66,6 +66,8 @@ async function main() {
     activityService,
     speakerService: {
       bindSession: () => ({ outputMode: 'board', resolvedOutput: 'board', deviceId: 'main-board', boardVolume: 37 }),
+      routeAudio: () => ({ destination: 'board' }),
+      endSpeech: () => {},
       clearOutput: (...args) => speakerEvents.push(['clear', ...args]),
       releaseSession: (...args) => speakerEvents.push(['release', ...args])
     },
@@ -92,7 +94,24 @@ async function main() {
   assert(resumes >= 2, 'physical activity should resume after recovery');
   assert(speakerEvents.some((event) => event[0] === 'clear' && event.at(-1) === 'provider_error'));
 
-  connector.sessions[1].fail('Second provider failure');
+  const beforeContextReconnect = connector.sessions.length;
+  service.requestContextReconnect(conversation.id, 'physical_handoff');
+  const queuedIntroduction = service.requestPhysicalTurn(conversation.id, {
+    requestId: 'opening-after-handoff',
+    displayText: 'Italian Game lesson started.',
+    prompt: 'Introduce the Italian Game now.',
+    fallbackAssistantText: 'The Italian Game is ready.'
+  });
+  assert.strictEqual(queuedIntroduction.queued, true);
+  assert.strictEqual(queuedIntroduction.reconnecting, true);
+  await waitFor(() => connector.sessions.length === beforeContextReconnect + 1, 'Context reconnect did not complete.');
+  await waitFor(
+    () => store.getRequestMessages(conversation.id, 'opening-after-handoff')
+      .some((message) => message.role === 'model' && message.status === 'complete'),
+    'Opening introduction was not delivered after reconnect.'
+  );
+
+  connector.sessions.at(-1).fail('Second provider failure');
   await waitFor(() => !service.isConversationActive(conversation.id), 'Second failure should require manual restart.');
   assert(socket.events.some((event) => event.event === 'mentor-live-error'
     && event.payload.code === 'mentor_live_provider_error'));
