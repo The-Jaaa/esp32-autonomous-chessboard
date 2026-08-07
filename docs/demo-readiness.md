@@ -466,3 +466,29 @@ curriculum, and desktop browser regressions. The complete Mentor and physical
 suites, shared settings, client lint/build, backend syntax, and diff checks
 also pass. Milestone 3 remains pending until the corrected real-board gate
 completes.
+
+### Real-board acceptance correction
+
+The first corrected hardware run exposed two transaction defects. Physical
+move records store `beforeFen` and `afterFen`, but the coaching analyzer was
+given those raw records even though it consumes normalized `before` and
+`after` fields. Every turn therefore fell back to the repeated
+`unclassified` checkpoint instead of producing grounded move guidance.
+Physical moves are now normalized before analysis, so the exact learner move,
+classification, robot reply, and verified continuation reach the coaching
+pipeline.
+
+Ending a Mentor activity previously cancelled only its database activity and
+resumed ordinary physical play. It did not release the physical game. A
+confirmed cross-chat handoff then cancelled the old activity but failed when
+the new session encountered that still-active game, leaving the handoff in a
+terminal failed state. The End action now requires a stable board boundary,
+ends the underlying physical session, detaches its conversation, and returns
+the UI to an available board. A confirmed `end_and_start` handoff is separately
+authorized to replace the validated active session in one transaction.
+
+Regressions cover raw physical move normalization, complete physical-session
+release from End, active-session replacement during handoff, and duplicate
+handoff safety. The complete Mentor and physical suites, client lint/build,
+backend syntax, and diff checks pass. A final real-board retest is still
+required before Milestone 3 acceptance.

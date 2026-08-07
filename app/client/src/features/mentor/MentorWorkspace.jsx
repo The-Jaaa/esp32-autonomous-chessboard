@@ -974,6 +974,9 @@ export default function MentorWorkspace() {
     try {
       const result = await operation(activity.id);
       setActivity(result?.activity && ['active', 'paused'].includes(result.activity.status) ? result.activity : null);
+      if (Object.prototype.hasOwnProperty.call(result || {}, 'physicalBoard')) {
+        setPhysicalBoard(result.physicalBoard);
+      }
       if (result?.hint) setNotice(`Hint ${result.level}: ${result.hint}`);
     } catch (activityError) {
       setError(activityError.message);

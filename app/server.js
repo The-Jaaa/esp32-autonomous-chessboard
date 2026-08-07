@@ -1776,7 +1776,7 @@ mentorFeature.physicalObserver.setAdapter({
       ? Math.max(0, Date.now() - Math.max(physicalSession.lastSnapshotAt || 0, physicalSession.lastPollAt || 0))
       : null
   }),
-  startDefaultGame: ({ allowPristineRestart = false } = {}) => {
+  startDefaultGame: ({ allowPristineRestart = false, allowActiveReplacement = false } = {}) => {
     const lastBoardContactAt = Math.max(physicalSession.lastSnapshotAt || 0, physicalSession.lastPollAt || 0);
     const sensorAgeMs = lastBoardContactAt
       ? Math.max(0, Date.now() - lastBoardContactAt)
@@ -1796,7 +1796,7 @@ mentorFeature.physicalObserver.setAdapter({
         && !physicalSession.pendingUndo
         && !physicalSession.pendingRedo
         && !physicalSession.pendingPromotion;
-      if (!allowPristineRestart || !pristine) {
+      if (!allowActiveReplacement && (!allowPristineRestart || !pristine)) {
         const error = new Error('A physical game is already active. Attach to it instead of starting another game.');
         error.code = 'physical_game_active';
         error.statusCode = 409;
@@ -1811,6 +1811,30 @@ mentorFeature.physicalObserver.setAdapter({
       graveyardSlots: DEFAULT_GRAVEYARD_SLOTS,
       setupMode: 'full'
     });
+  },
+  endGame: () => {
+    physicalSession.active = false;
+    physicalSession.phase = 'idle';
+    physicalSession.autoRobotReply = false;
+    physicalSession.commands = [];
+    physicalSession.selectedSource = null;
+    physicalSession.pendingCaptureTarget = null;
+    physicalSession.pendingCastleMove = null;
+    physicalSession.pendingPromotion = null;
+    physicalSession.legalTargets = [];
+    physicalSession.pendingRobotJob = null;
+    physicalSession.pendingUndo = null;
+    physicalSession.pendingRedo = null;
+    physicalSession.mentorOpeningDrill = null;
+    physicalSession.mentorOpeningLock = false;
+    physicalSession.activeSearchLevel = null;
+    physicalSession.statusText = 'Physical game ended. Start another activity when ready.';
+    physicalSession.stateRevision += 1;
+    logPhysicalEvent('physical_game_ended', physicalSession.statusText, {
+      details: { reason: 'mentor_activity_ended' }
+    });
+    emitPhysicalState();
+    return { success: true, state: serializePhysicalState() };
   },
   setOpeningDrill: setOpeningDrillPolicy,
   playActivityMove: ({ activityId, generation, requestId, uci, expectedRevision, fallback = false, signal = null }) => {

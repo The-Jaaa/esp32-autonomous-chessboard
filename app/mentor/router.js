@@ -293,7 +293,13 @@ function createMentorRouter({
     try {
       const activity = activityService.get(req.params.id);
       if (!activity || activity.id !== req.params.activityId) return res.status(404).json({ error: 'Activity not found.' });
-      return res.json({ activity: activityService.end(req.params.id) });
+      const endedActivity = activityService.end(req.params.id);
+      return res.json({
+        activity: endedActivity,
+        physicalBoard: physicalObserver.isAttached(req.params.id)
+          ? physicalObserver.detail(req.params.id)
+          : null
+      });
     } catch (error) {
       return next(error);
     }

@@ -1313,6 +1313,8 @@ class MentorActivityService {
   end(conversationId, reason = 'learner_ended') {
     const activity = this.store.getActiveActivity(conversationId);
     if (!activity) return null;
+    const endPhysicalSession = this.isPhysicalActivity(activity) && reason === 'learner_ended';
+    if (endPhysicalSession) this.physicalCoordinator?.assertPhysicalActivityCanEnd?.(conversationId);
     const updated = this.store.updateActivity(activity.id, {
       status: reason === 'game_over' ? 'complete' : 'cancelled',
       phase: reason === 'game_over' ? 'game_over' : 'complete',
@@ -1321,7 +1323,11 @@ class MentorActivityService {
       completedAt: Date.now()
     });
     this.record(updated, reason === 'game_over' ? 'game_over' : 'ended', { reason });
-    if (this.isPhysicalActivity(updated)) this.physicalCoordinator?.resolvePhysicalOpening?.(conversationId, 'continue', updated);
+    if (endPhysicalSession) {
+      this.physicalCoordinator?.endPhysicalActivity?.(conversationId, updated);
+    } else if (this.isPhysicalActivity(updated) && reason !== 'physical_handoff') {
+      this.physicalCoordinator?.resolvePhysicalOpening?.(conversationId, 'continue', updated);
+    }
     return activitySummary(updated, this.store.listActivityEvents(updated.id));
   }
 

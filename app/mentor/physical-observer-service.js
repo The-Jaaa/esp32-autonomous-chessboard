@@ -608,9 +608,11 @@ class MentorPhysicalObserverService {
       let evidence = null;
       try {
         const state = this.getState(conversationId);
+        const serializedHumanMove = serializePhysicalMove(humanMove, 0);
+        const serializedRobotMove = robotMove ? serializePhysicalMove(robotMove, 1) : null;
         analysis = await this.analysisService.analyzeMoveState({
           ...state,
-          history: [humanMove]
+          history: [serializedHumanMove]
         }, {
           mode: 'quick',
           assertCurrent: () => this.assertAnalysisCurrent(conversationId, state)
@@ -621,8 +623,8 @@ class MentorPhysicalObserverService {
         });
         evidence = buildPhysicalCoachingEvidence({
           state,
-          humanMove: serializePhysicalMove(humanMove, 0),
-          robotMove: robotMove ? serializePhysicalMove(robotMove, 1) : null,
+          humanMove: serializedHumanMove,
+          robotMove: serializedRobotMove,
           moveAnalysis: analysis,
           positionAnalysis
         });
@@ -1160,7 +1162,7 @@ class MentorPhysicalObserverService {
       const requested = handoff.requestedActivity || {};
       const learnerColor = requested.learnerColor || 'white';
       let detail;
-      this.adapter?.startDefaultGame?.({ allowPristineRestart: true });
+      this.adapter?.startDefaultGame?.({ allowPristineRestart: true, allowActiveReplacement: true });
       detail = this.attach(conversationId, {
         serverInstanceId: this.snapshot.serverInstanceId,
         sessionGeneration: this.snapshot.sessionGeneration,
@@ -1201,6 +1203,30 @@ class MentorPhysicalObserverService {
       });
       throw error;
     }
+  }
+
+  assertPhysicalActivityCanEnd(conversationId) {
+    this.requireCurrentBinding(conversationId);
+    if (!isSafeHandoffBoundary(this.snapshot)) {
+      throw new MentorPhysicalError(
+        'Wait for the current physical move or recovery to finish before ending the game.',
+        'physical_activity_end_busy',
+        409
+      );
+    }
+    return true;
+  }
+
+  endPhysicalActivity(conversationId) {
+    this.assertPhysicalActivityCanEnd(conversationId);
+    this.clearPendingGuidance(conversationId);
+    this.clearPendingOpeningGuidance(conversationId);
+    this.clearPendingCoaching(conversationId);
+    this.adapter?.endGame?.();
+    const detached = this.store.detachPhysicalBinding(conversationId, 'detached');
+    const physicalBoard = { binding: detached, state: null, handoff: null };
+    this.emit(conversationId, 'mentor-physical-binding-updated', { conversationId, physicalBoard });
+    return physicalBoard;
   }
 
   attachPhysicalGame(conversationId, { requestId, requireIntent = true } = {}) {
@@ -1848,5 +1874,6 @@ module.exports = {
   PHYSICAL_READ_TOOLS,
   guidanceFor,
   normalizeSnapshot,
+  serializePhysicalMove,
   sourceKey
 };

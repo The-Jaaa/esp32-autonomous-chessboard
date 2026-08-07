@@ -6,6 +6,7 @@ const {
   deterministicCoaching,
   validateCoachingDraft
 } = require('../mentor/physical-coaching-service');
+const { serializePhysicalMove } = require('../mentor/physical-observer-service');
 
 function moveEntry(game, san, id, side) {
   const before = game.fen();
@@ -60,6 +61,24 @@ function fixtureEvidence() {
 }
 
 async function main() {
+  const rawGame = new Chess();
+  const rawBefore = rawGame.fen();
+  const rawMove = rawGame.move('e4');
+  const serialized = serializePhysicalMove({
+    id: 'physical-human-1',
+    side: 'human',
+    beforeFen: rawBefore,
+    afterFen: rawGame.fen(),
+    uci: 'e2e4',
+    san: rawMove.san,
+    color: rawMove.color,
+    from: rawMove.from,
+    to: rawMove.to,
+    verified: true
+  }, 0);
+  assert.strictEqual(serialized.before, rawBefore, 'physical beforeFen must be normalized for move analysis');
+  assert.strictEqual(serialized.after, rawGame.fen(), 'physical afterFen must be normalized for move analysis');
+
   const evidence = fixtureEvidence();
   assert.strictEqual(evidence.pieces.f3, 'white knight');
   assert.strictEqual(evidence.pieces.f6, 'black knight');

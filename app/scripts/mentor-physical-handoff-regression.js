@@ -46,18 +46,27 @@ function createHarness(dbPath) {
   const emitted = [];
   const stopped = [];
   const scripted = [];
+  const gameStarts = [];
+  let gameEnds = 0;
   let defaultHumanColor = 'white';
   let observer;
   const adapter = {
     getSnapshot: () => snapshot,
     getGameStatus: () => ({ sensorFresh: true, sensorAgeMs: 1 }),
-    startDefaultGame: () => {
+    startDefaultGame: (options = {}) => {
+      gameStarts.push(options);
       snapshot = makeSnapshot({
         sessionGeneration: snapshot.sessionGeneration + 1,
         stateRevision: snapshot.stateRevision + 1,
         humanColor: defaultHumanColor,
         robotColor: defaultHumanColor === 'white' ? 'black' : 'white'
       });
+      observer.handleSnapshot(snapshot, 'physical-status');
+      return { success: true };
+    },
+    endGame: () => {
+      gameEnds += 1;
+      snapshot = makeSnapshot({ active: false, phase: 'idle', stateRevision: snapshot.stateRevision + 1 });
       observer.handleSnapshot(snapshot, 'physical-status');
       return { success: true };
     },
@@ -98,6 +107,8 @@ function createHarness(dbPath) {
     emitted,
     stopped,
     scripted,
+    gameStarts,
+    gameEnds: () => gameEnds,
     snapshot: () => snapshot,
     setSnapshot: (next) => {
       snapshot = next;
@@ -191,6 +202,8 @@ async function verifyOwnershipHandoff(dbPath) {
   assert.strictEqual(harness.scripted.length, 1);
   assert.strictEqual(harness.scripted[0].uci, 'e2e4', 'Human Black opening begins with reviewed White move');
   assert(harness.stopped.some((entry) => entry.conversationId === owner.id));
+  assert.strictEqual(harness.gameStarts.at(-1)?.allowActiveReplacement, true,
+    'confirmed handoff must replace the prior active physical session');
 
   const duplicate = await observer.resolvePhysicalBoardHandoff(requester.id, {
     handoffId: secondConflict.handoff.id,
@@ -199,6 +212,29 @@ async function verifyOwnershipHandoff(dbPath) {
   });
   assert.strictEqual(duplicate.duplicate, true);
   assert.strictEqual(harness.scripted.length, 1, 'duplicate transfer cannot queue the opener twice');
+  store.close();
+}
+
+function verifyManualActivityEndReleasesBoard(dbPath) {
+  const harness = createHarness(dbPath);
+  const { store, observer, activityService } = harness;
+  const conversation = store.createConversation({ title: 'End this game' });
+  observer.attach(conversation.id, {
+    serverInstanceId: 'handoff-server',
+    sessionGeneration: 4,
+    coachingMode: 'off'
+  });
+  activityService.startPhysicalPractice(conversation.id, {
+    learnerColor: 'white',
+    opponentMode: 'stockfish',
+    expectedRevision: 10
+  });
+
+  const ended = activityService.end(conversation.id);
+  assert.strictEqual(ended.status, 'cancelled');
+  assert.strictEqual(harness.gameEnds(), 1, 'End game must terminate the underlying physical session');
+  assert.strictEqual(harness.snapshot().active, false);
+  assert.strictEqual(store.getActivePhysicalBinding(), null, 'ended board must be available to another conversation');
   store.close();
 }
 
@@ -430,6 +466,7 @@ function verifyHandoffExpiry(dbPath) {
     await verifyDifficultyAndPhysicalDeclarations(path.join(tempDir, 'difficulty.sqlite'));
     await verifyRetainedOpeningIntent(path.join(tempDir, 'opening-intent.sqlite'));
     await verifyPhysicalPuzzleDisabled(path.join(tempDir, 'puzzle-disabled.sqlite'));
+    verifyManualActivityEndReleasesBoard(path.join(tempDir, 'manual-end.sqlite'));
     verifyLegacyPhysicalPuzzlePaused(path.join(tempDir, 'legacy-puzzle.sqlite'));
     verifyHandoffExpiry(path.join(tempDir, 'expiry.sqlite'));
     console.log('Mentor physical handoff regressions passed.');
