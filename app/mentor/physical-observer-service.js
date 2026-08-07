@@ -3,6 +3,7 @@ const { Chess } = require('chess.js');
 const { gameStatus, moveToUci, normalizeAnnotations } = require('./chess-service');
 const { STANDARD_FEN } = require('./store');
 const { listCatalog } = require('./curriculum');
+const { buildPhysicalCoachingEvidence, deterministicCoaching } = require('./physical-coaching-service');
 
 const PHYSICAL_BOARD_ID = 'main-board';
 const PHYSICAL_READ_TOOLS = new Set([
@@ -303,6 +304,7 @@ class MentorPhysicalObserverService {
     store,
     chessService,
     analysisService,
+    coachingService = null,
     emit = () => {},
     boardId = PHYSICAL_BOARD_ID,
     recoverableGuidanceDelayMs = 2000,
@@ -312,6 +314,7 @@ class MentorPhysicalObserverService {
     this.store = store;
     this.chessService = chessService;
     this.analysisService = analysisService;
+    this.coachingService = coachingService;
     this.emit = emit;
     this.boardId = boardId;
     this.adapter = null;
@@ -590,6 +593,9 @@ class MentorPhysicalObserverService {
       .reverse()
       .find((move) => move.side === 'human');
     if (!humanMove) return;
+    const robotMove = [...(snapshot.moveLog || snapshot.physicalMoveLog || [])]
+      .reverse()
+      .find((move) => move.side === 'robot');
     const expectedFen = snapshot.fen;
     const expectedRevision = Number(snapshot.stateRevision || 0);
     const requestId = `physical-practice-turn:${activity.id}:${humanMove.id}:${snapshot.lastMove?.at || expectedRevision}`;
@@ -599,6 +605,8 @@ class MentorPhysicalObserverService {
         || Number(current.stateRevision || 0) !== expectedRevision
         || current.phase !== 'ready') return;
       let analysis = null;
+      let positionAnalysis = null;
+      let evidence = null;
       try {
         const state = this.getState(conversationId);
         analysis = await this.analysisService.analyzeMoveState({
@@ -608,24 +616,51 @@ class MentorPhysicalObserverService {
           mode: 'quick',
           assertCurrent: () => this.assertAnalysisCurrent(conversationId, state)
         });
+        positionAnalysis = await this.analysisService.analyzePositionState(state, {
+          mode: 'quick',
+          assertCurrent: () => this.assertAnalysisCurrent(conversationId, state)
+        });
+        evidence = buildPhysicalCoachingEvidence({
+          state,
+          humanMove: serializePhysicalMove(humanMove, 0),
+          robotMove: robotMove ? serializePhysicalMove(robotMove, 1) : null,
+          moveAnalysis: analysis,
+          positionAnalysis
+        });
       } catch {
         // The fallback still gives a concise turn summary when engine analysis is unavailable.
       }
       const classification = analysis?.classification || 'unclassified';
       const best = analysis?.bestAlternative?.san || analysis?.before?.bestMove?.san || analysis?.before?.bestMove?.uci || null;
-      const fallback = ['inaccuracy', 'mistake', 'blunder'].includes(classification)
+      let fallback = ['inaccuracy', 'mistake', 'blunder'].includes(classification)
         ? `${humanMove.san || humanMove.uci} was a ${classification}.${best ? ` ${best} was stronger.` : ''} The consequence is visible in the opponent's reply; address that before starting another plan.`
         : `Turn complete. ${humanMove.san || humanMove.uci} was ${classification}.${best ? ` The main alternative was ${best}.` : ''} Now compare piece activity, king safety, and the next forcing move.`;
+      let coaching = null;
+      if (evidence) {
+        fallback = deterministicCoaching(evidence);
+        coaching = this.coachingService
+          ? await this.coachingService.create(evidence)
+          : { text: fallback, mode: 'fallback', validation: { valid: true, errors: [] } };
+        const current = this.snapshot;
+        if (!current || current.serverInstanceId !== evidence.serverInstanceId
+          || Number(current.sessionGeneration) !== evidence.sessionGeneration
+          || Number(current.stateRevision || 0) !== evidence.revision
+          || current.fen !== evidence.finalFen) return;
+        this.activityService?.record?.(activity, 'physical_coaching_grounded', {
+          requestId,
+          sourceKey: evidence.sourceKey,
+          revision: evidence.revision,
+          humanMoveId: evidence.humanMove.id,
+          robotMoveId: evidence.robotMove.id,
+          mode: coaching.mode,
+          validation: coaching.validation
+        });
+      }
+      const approvedText = coaching?.text || fallback;
       const prompt = [
-        '[PHYSICAL_PRACTICE_TURN]',
-        `Learner move: ${humanMove.uci} (${humanMove.san || humanMove.uci})`,
-        `Classification: ${classification}`,
-        `Centipawn loss: ${analysis?.centipawnLoss ?? 'unavailable'}`,
-        `Best alternative: ${best || 'unavailable'}`,
-        `Opponent reply: ${snapshot.san || snapshot.move}`,
-        `Activity goal: ${activity.goal}`,
-        'Explain the learner move, the opponent reply, and the current plan in two or three concise spoken sentences.',
-        'Be blunt but respectful. State mistakes plainly, explain the concrete consequence, and give the correction without praise padding. Do not call tools.'
+        '[PHYSICAL_APPROVED_COACHING_SCRIPT]',
+        'Read the following approved chess coaching text exactly. Do not add, remove, reinterpret, or paraphrase any chess claim. Do not call tools.',
+        approvedText
       ].join('\n');
       try {
         const live = this.liveService?.requestPhysicalTurn(conversationId, {
@@ -633,7 +668,8 @@ class MentorPhysicalObserverService {
           displayText: `Turn complete after ${humanMove.san || humanMove.uci}.`,
           prompt,
           urgent: false,
-          fallbackAssistantText: fallback,
+          fallbackAssistantText: approvedText,
+          expectedAssistantText: approvedText,
           timeoutMs: 30000,
           queueKey: 'physical-practice'
         });

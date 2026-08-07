@@ -8,6 +8,7 @@ const { MentorAnalysisService } = require('./analysis-service');
 const { MentorActivityService } = require('./activity-service');
 const { MentorSpeakerService } = require('./speaker-service');
 const { MentorPhysicalObserverService } = require('./physical-observer-service');
+const { PhysicalCoachingService } = require('./physical-coaching-service');
 const { GameSettingsService } = require('../game-settings-service');
 const {
   DEFAULT_LIVE_MODEL,
@@ -54,6 +55,7 @@ function createMentorFeature({
     chessService,
     engineService: mentorEngine
   });
+  const physicalCoachingService = new PhysicalCoachingService({ ai, model });
   const emit = (conversationId, event, payload) => {
     io.to(roomName(conversationId)).emit(event, payload);
   };
@@ -62,6 +64,7 @@ function createMentorFeature({
     store,
     chessService,
     analysisService: mentorAnalysis,
+    coachingService: physicalCoachingService,
     emit
   });
 

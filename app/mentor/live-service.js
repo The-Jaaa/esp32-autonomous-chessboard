@@ -375,7 +375,8 @@ class MentorLiveService {
     voiceName = DEFAULT_LIVE_VOICE,
     voiceFirstPhysical = false,
     createId = randomUUID,
-    logger = console
+    logger = console,
+    recoveryDelayMs = 500
   }) {
     this.store = store;
     this.chessService = chessService;
@@ -391,6 +392,7 @@ class MentorLiveService {
     this.voiceFirstPhysical = voiceFirstPhysical;
     this.createId = createId;
     this.logger = logger;
+    this.recoveryDelayMs = recoveryDelayMs;
     this.bySocket = new Map();
     this.byConversation = new Map();
   }
@@ -543,6 +545,8 @@ class MentorLiveService {
       pendingSystemTurns: [],
       pendingContextReconnect: null,
       reconnecting: false,
+      recoveryScheduled: false,
+      recoveryAttempts: 0,
       providerGeneration: 0,
       physicalGuidanceLock: false,
       discardUnsolicitedAfterPhysical: false,
@@ -738,7 +742,9 @@ class MentorLiveService {
         timeoutMs
       }));
       this.finalizeTurn(record, turn.assistantText ? 'complete' : 'failed');
-      this.emitStatus(record, 'listening', { reason: 'physical_guidance_timeout' });
+      if (!this.scheduleUnexpectedRecovery(record, 'physical_guidance_timeout')) {
+        this.emitStatus(record, 'listening', { reason: 'physical_guidance_timeout' });
+      }
     }, timeoutMs);
     turn.timeoutId.unref?.();
   }
@@ -1362,7 +1368,18 @@ class MentorLiveService {
       await this.connectProvider(record);
       record.ready = true;
       record.reconnecting = false;
-      this.emitStatus(record, 'listening', { reason: pending.reason, reconnected: true });
+      if (pending.recovery) {
+        this.emitStatus(record, 'recovered', { reason: pending.reason, reconnected: true });
+        setTimeout(() => {
+          if (this.byConversation.get(record.conversationId) === record && record.ready && !record.closing) {
+            this.emitStatus(record, 'listening', { reason: pending.reason, reconnected: true });
+          }
+        }, 750).unref?.();
+      } else {
+        this.emitStatus(record, 'listening', { reason: pending.reason, reconnected: true });
+      }
+      this.activityService?.resumeStrandedPhysicalMentorTurn?.(record.conversationId);
+      this.flushPendingSystemTurns(record);
       return true;
     } catch (error) {
       record.reconnecting = false;
@@ -1373,10 +1390,16 @@ class MentorLiveService {
         error: providerErrorMessage(error)
       }));
       record.socket.emit('mentor-live-error', {
-        ...this.statusPayload(record, 'failed'),
+        ...this.statusPayload(record, pending.recovery ? 'manual_restart_required' : 'failed'),
         code: 'mentor_live_reconnect_failed',
         error: providerErrorMessage(error)
       });
+      if (pending.recovery) {
+        this.emitStatus(record, 'manual_restart_required', {
+          reason: pending.reason,
+          error: providerErrorMessage(error)
+        });
+      }
       await this.closeRecord(record, 'context_reconnect_failed');
       return false;
     }
@@ -1525,6 +1548,7 @@ class MentorLiveService {
   handleProviderError(record, error) {
     if (this.bySocket.get(record.socket.id) !== record) return;
     const message = providerErrorMessage(error);
+    if (this.scheduleUnexpectedRecovery(record, 'provider_error', message)) return;
     record.ready = false;
     record.physicalGuidanceLock = false;
     record.discardUnsolicitedAfterPhysical = false;
@@ -1559,6 +1583,7 @@ class MentorLiveService {
       reason: event?.reason || null,
       wasClean: event?.wasClean ?? null
     }));
+    if (unexpected && this.scheduleUnexpectedRecovery(record, 'provider_closed', closeMessage)) return;
     record.ready = false;
     record.physicalGuidanceLock = false;
     record.discardUnsolicitedAfterPhysical = false;
@@ -1584,6 +1609,39 @@ class MentorLiveService {
         failed: unexpected
       });
     }
+  }
+
+  scheduleUnexpectedRecovery(record, reason, error = null) {
+    if (!record || record.closing || record.recoveryScheduled) return false;
+    const activity = this.activityService?.get?.(record.conversationId);
+    const recoverable = activity?.status === 'active' && activity.config?.boardSource === 'physical';
+    if (!recoverable || record.recoveryAttempts >= 1) return false;
+    record.recoveryAttempts += 1;
+    record.recoveryScheduled = true;
+    record.ready = false;
+    record.physicalGuidanceLock = false;
+    record.discardUnsolicitedAfterPhysical = false;
+    this.speakerService?.clearOutput(record.conversationId, record.sessionId, reason);
+    this.abortToolCalls(record);
+    if (record.turn) this.finalizeTurn(record, 'failed');
+    const previous = record.providerSession;
+    record.providerGeneration += 1;
+    record.providerSession = null;
+    this.emitStatus(record, 'recovering', { reason, error, attempt: record.recoveryAttempts });
+    this.logger.warn?.('[MENTOR_LIVE_RECOVERING]', JSON.stringify({
+      conversationId: record.conversationId,
+      sessionId: record.sessionId,
+      reason,
+      attempt: record.recoveryAttempts
+    }));
+    setTimeout(async () => {
+      if (record.closing || this.byConversation.get(record.conversationId) !== record) return;
+      await Promise.resolve(previous?.close?.()).catch(() => {});
+      record.recoveryScheduled = false;
+      record.pendingContextReconnect = { reason, requestedAt: Date.now(), recovery: true };
+      await this.reconnectProvider(record);
+    }, this.recoveryDelayMs).unref?.();
+    return true;
   }
 
   async stop(socket, payload = {}, reason = 'client_stop') {

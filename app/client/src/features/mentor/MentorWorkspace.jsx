@@ -427,7 +427,10 @@ function liveStatusText(live) {
     speaking: 'Live voice speaking',
     interrupted: 'Live voice interrupted',
     switching_source: 'Switching to physical board',
-    reconnecting: 'Reconnecting Live voice'
+    reconnecting: 'Reconnecting Live voice',
+    recovering: 'Recovering Live voice',
+    recovered: 'Live voice recovered',
+    manual_restart_required: 'Restart voice mentor'
   };
   return labels[live.status] || 'Live voice';
 }
