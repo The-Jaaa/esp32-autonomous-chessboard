@@ -177,7 +177,7 @@ class GeminiPhysicalCoachingGenerator {
     this.model = model;
   }
 
-  async generate(evidence, corrections = []) {
+  async generate(evidence, corrections = [], signal = undefined) {
     if (!this.ai || !process.env.GEMINI_API_KEY) return null;
     const response = await this.ai.models.generateContent({
       model: this.model,
@@ -189,23 +189,32 @@ class GeminiPhysicalCoachingGenerator {
         corrections.length ? `Correct these previous validation failures: ${corrections.join(' ')}` : '',
         JSON.stringify(evidence)
       ].filter(Boolean).join('\n'),
-      config: { responseModalities: ['TEXT'] }
+      config: { responseModalities: ['TEXT'], abortSignal: signal }
     });
     return parseJson(responseText(response));
   }
 }
 
 class PhysicalCoachingService {
-  constructor({ ai, model, generator = null, logger = console } = {}) {
+  constructor({ ai, model, generator = null, logger = console, generationTimeoutMs = 6000 } = {}) {
     this.generator = generator || new GeminiPhysicalCoachingGenerator({ ai, model });
     this.logger = logger;
+    this.generationTimeoutMs = generationTimeoutMs;
   }
 
   async create(evidence) {
     let corrections = [];
+    const deadline = Date.now() + this.generationTimeoutMs;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        corrections = [...corrections, 'Coaching generation exceeded its time limit.'];
+        break;
+      }
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), remainingMs);
       try {
-        const draft = await this.generator.generate(evidence, corrections);
+        const draft = await this.generator.generate(evidence, corrections, controller.signal);
         if (!draft) break;
         const validation = validateCoachingDraft(draft, evidence);
         if (validation.valid) {
@@ -213,8 +222,13 @@ class PhysicalCoachingService {
         }
         corrections = validation.errors;
       } catch (error) {
-        corrections = [error.message];
-        this.logger.warn?.('[MENTOR_PHYSICAL_COACHING_GENERATION_FAILED]', error.message);
+        const message = controller.signal.aborted
+          ? 'Coaching generation exceeded its time limit.'
+          : error.message;
+        corrections = [message];
+        this.logger.warn?.('[MENTOR_PHYSICAL_COACHING_GENERATION_FAILED]', message);
+      } finally {
+        clearTimeout(timeout);
       }
     }
     return {

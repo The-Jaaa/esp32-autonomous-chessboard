@@ -170,6 +170,37 @@ async function run() {
   assert.strictEqual(store.getPhysicalBinding(first.id).analyzedFen, START_FEN);
   assert.strictEqual(observer.availability().binding.conversationId, first.id);
 
+  const committedGame = new Chess(START_FEN);
+  const committedMoves = [];
+  for (const [san, side] of [['e4', 'human'], ['e6', 'robot'], ['g3', 'human'], ['Ne7', 'robot']]) {
+    const beforeFen = committedGame.fen();
+    const move = committedGame.move(san);
+    committedMoves.push({
+      id: `committed-${move.from}${move.to}`,
+      side,
+      beforeFen,
+      afterFen: committedGame.fen(),
+      uci: `${move.from}${move.to}${move.promotion || ''}`,
+      san: move.san,
+      from: move.from,
+      to: move.to,
+      color: move.color,
+      piece: move.piece,
+      verified: true
+    });
+  }
+  currentSnapshot = snapshot({
+    stateRevision: 3,
+    fen: committedGame.fen(),
+    pgn: committedGame.pgn(),
+    physicalMoveLog: committedMoves,
+    lastMove: committedMoves.at(-1)
+  });
+  observer.handleSnapshot(currentSnapshot, 'physical-move');
+  const committedAnalysis = await observer.analyzeMove(first.id, { uci: 'g2g3', mode: 'quick' });
+  assert.strictEqual(committedAnalysis.source, 'latest_move');
+  assert.strictEqual(committedAnalysis.move.uci, 'g2g3');
+
   const movedGame = new Chess(START_FEN);
   movedGame.move('e4');
   currentSnapshot = snapshot({

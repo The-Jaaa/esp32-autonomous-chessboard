@@ -377,7 +377,8 @@ class MentorLiveService {
     voiceFirstPhysical = false,
     createId = randomUUID,
     logger = console,
-    recoveryDelayMs = 500
+    recoveryDelayMs = 500,
+    recoveryResetMs = 10000
   }) {
     this.store = store;
     this.chessService = chessService;
@@ -394,6 +395,7 @@ class MentorLiveService {
     this.createId = createId;
     this.logger = logger;
     this.recoveryDelayMs = recoveryDelayMs;
+    this.recoveryResetMs = recoveryResetMs;
     this.bySocket = new Map();
     this.byConversation = new Map();
   }
@@ -548,6 +550,7 @@ class MentorLiveService {
       reconnecting: false,
       recoveryScheduled: false,
       recoveryAttempts: 0,
+      recoveryResetTimer: null,
       providerGeneration: 0,
       physicalGuidanceLock: false,
       discardUnsolicitedAfterPhysical: false,
@@ -1381,6 +1384,22 @@ class MentorLiveService {
       record.reconnecting = false;
       if (pending.recovery) {
         this.emitStatus(record, 'recovered', { reason: pending.reason, reconnected: true });
+        clearTimeout(record.recoveryResetTimer);
+        const recoveredGeneration = record.providerGeneration;
+        record.recoveryResetTimer = setTimeout(() => {
+          if (this.byConversation.get(record.conversationId) === record
+            && record.ready && !record.closing
+            && record.providerGeneration === recoveredGeneration) {
+            record.recoveryAttempts = 0;
+            record.recoveryResetTimer = null;
+            this.logger.log?.('[MENTOR_LIVE_RECOVERY_RESET]', JSON.stringify({
+              conversationId: record.conversationId,
+              sessionId: record.sessionId,
+              providerGeneration: recoveredGeneration
+            }));
+          }
+        }, this.recoveryResetMs);
+        record.recoveryResetTimer.unref?.();
         setTimeout(() => {
           if (this.byConversation.get(record.conversationId) === record && record.ready && !record.closing) {
             this.emitStatus(record, 'listening', { reason: pending.reason, reconnected: true });
@@ -1671,6 +1690,8 @@ class MentorLiveService {
   async closeRecord(record, reason) {
     if (record.closing) return;
     record.closing = true;
+    clearTimeout(record.recoveryResetTimer);
+    record.recoveryResetTimer = null;
     record.physicalGuidanceLock = false;
     record.discardUnsolicitedAfterPhysical = false;
     this.logger.log?.('[MENTOR_LIVE_CLOSING]', JSON.stringify({

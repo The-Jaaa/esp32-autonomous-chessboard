@@ -306,6 +306,7 @@ class MentorPhysicalObserverService {
     coachingService = null,
     emit = () => {},
     boardId = PHYSICAL_BOARD_ID,
+    logger = console,
     recoverableGuidanceDelayMs = 2000,
     openingGuidanceDelayMs = 1500,
     coachingDelayMs = 1500
@@ -316,6 +317,7 @@ class MentorPhysicalObserverService {
     this.coachingService = coachingService;
     this.emit = emit;
     this.boardId = boardId;
+    this.logger = logger;
     this.adapter = null;
     this.snapshot = null;
     this.textService = null;
@@ -606,21 +608,27 @@ class MentorPhysicalObserverService {
       let analysis = null;
       let positionAnalysis = null;
       let evidence = null;
-      try {
-        const state = this.getState(conversationId);
-        const serializedHumanMove = serializePhysicalMove(humanMove, 0);
-        const serializedRobotMove = robotMove ? serializePhysicalMove(robotMove, 1) : null;
-        analysis = await this.analysisService.analyzeMoveState({
+      const state = this.getState(conversationId);
+      const serializedHumanMove = serializePhysicalMove(humanMove, 0);
+      const serializedRobotMove = robotMove ? serializePhysicalMove(robotMove, 1) : null;
+      const [moveResult, positionResult] = await Promise.allSettled([
+        this.analysisService.analyzeMoveState({
           ...state,
           history: [serializedHumanMove]
         }, {
           mode: 'quick',
           assertCurrent: () => this.assertAnalysisCurrent(conversationId, state)
-        });
-        positionAnalysis = await this.analysisService.analyzePositionState(state, {
+        }),
+        this.analysisService.analyzePositionState(state, {
           mode: 'quick',
           assertCurrent: () => this.assertAnalysisCurrent(conversationId, state)
-        });
+        })
+      ]);
+      if (moveResult.status === 'fulfilled') analysis = moveResult.value;
+      else this.logger.warn?.('[MENTOR_PHYSICAL_MOVE_ANALYSIS_FAILED]', moveResult.reason?.message || String(moveResult.reason));
+      if (positionResult.status === 'fulfilled') positionAnalysis = positionResult.value;
+      else this.logger.warn?.('[MENTOR_PHYSICAL_POSITION_ANALYSIS_FAILED]', positionResult.reason?.message || String(positionResult.reason));
+      try {
         evidence = buildPhysicalCoachingEvidence({
           state,
           humanMove: serializedHumanMove,
@@ -628,8 +636,8 @@ class MentorPhysicalObserverService {
           moveAnalysis: analysis,
           positionAnalysis
         });
-      } catch {
-        // The fallback still gives a concise turn summary when engine analysis is unavailable.
+      } catch (error) {
+        this.logger.warn?.('[MENTOR_PHYSICAL_COACHING_EVIDENCE_FAILED]', error.message);
       }
       const classification = analysis?.classification || 'unclassified';
       const best = analysis?.bestAlternative?.san || analysis?.before?.bestMove?.san || analysis?.before?.bestMove?.uci || null;
@@ -1416,8 +1424,21 @@ class MentorPhysicalObserverService {
 
   async analyzeMove(conversationId, options = {}) {
     const state = this.getState(conversationId);
-    const result = await this.analysisService.analyzeMoveState(state, {
-      ...options,
+    let analysisState = state;
+    let analysisOptions = { ...options };
+    if (typeof options.uci === 'string') {
+      const requestedUci = options.uci.toLowerCase();
+      const currentGame = new Chess(state.fen);
+      const isCurrentCandidate = currentGame.moves({ verbose: true })
+        .some((move) => moveToUci(move) === requestedUci);
+      const latestHumanMove = [...state.history].reverse().find((move) => move.side === 'human');
+      if (!isCurrentCandidate && latestHumanMove?.uci === requestedUci) {
+        analysisState = { ...state, history: [latestHumanMove] };
+        analysisOptions = { ...options, uci: undefined };
+      }
+    }
+    const result = await this.analysisService.analyzeMoveState(analysisState, {
+      ...analysisOptions,
       assertCurrent: () => this.assertAnalysisCurrent(conversationId, state)
     });
     this.store.updatePhysicalBinding(conversationId, { analyzedFen: result.analyzedFen });

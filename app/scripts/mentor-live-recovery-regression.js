@@ -74,6 +74,7 @@ async function main() {
     stateProvider: () => state(conversation.id),
     connector,
     recoveryDelayMs: 5,
+    recoveryResetMs: 10,
     logger: { log() {}, warn() {}, error() {} }
   });
 
@@ -93,6 +94,10 @@ async function main() {
   assert.strictEqual(service.byConversation.get(conversation.id).speaker.boardVolume, 37);
   assert(resumes >= 2, 'physical activity should resume after recovery');
   assert(speakerEvents.some((event) => event[0] === 'clear' && event.at(-1) === 'provider_error'));
+  await waitFor(
+    () => service.byConversation.get(conversation.id)?.recoveryAttempts === 0,
+    'A stable recovered session did not reset its recovery allowance.'
+  );
 
   const beforeContextReconnect = connector.sessions.length;
   service.requestContextReconnect(conversation.id, 'physical_handoff');
@@ -112,7 +117,13 @@ async function main() {
   );
 
   connector.sessions.at(-1).fail('Second provider failure');
-  await waitFor(() => !service.isConversationActive(conversation.id), 'Second failure should require manual restart.');
+  await waitFor(
+    () => connector.sessions.length === beforeContextReconnect + 2 && service.isConversationActive(conversation.id),
+    'A later independent provider failure did not recover.'
+  );
+
+  connector.sessions.at(-1).fail('Immediate repeated provider failure');
+  await waitFor(() => !service.isConversationActive(conversation.id), 'An immediate repeated failure should require manual restart.');
   assert(socket.events.some((event) => event.event === 'mentor-live-error'
     && event.payload.code === 'mentor_live_provider_error'));
 

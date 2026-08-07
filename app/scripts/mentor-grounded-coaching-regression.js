@@ -144,6 +144,22 @@ async function main() {
   assert.match(fallback.text, /d4, g6, Nc3/);
   assert.doesNotMatch(fallback.text, /h5|captur|trapped/i);
 
+  const timeoutStartedAt = Date.now();
+  const boundedService = new PhysicalCoachingService({
+    generationTimeoutMs: 20,
+    generator: {
+      generate(_evidence, _corrections, signal) {
+        return new Promise((resolve, reject) => {
+          signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+        });
+      }
+    },
+    logger: { warn() {} }
+  });
+  const bounded = await boundedService.create(evidence);
+  assert.strictEqual(bounded.mode, 'fallback');
+  assert(Date.now() - timeoutStartedAt < 200, 'slow Gemini coaching must fall back promptly');
+
   console.log('Mentor grounded physical coaching regressions passed.');
 }
 
