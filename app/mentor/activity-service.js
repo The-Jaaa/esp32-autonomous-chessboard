@@ -1009,7 +1009,8 @@ class MentorActivityService {
       if (['line_complete', 'repeat_restore', 'route_blocked', 'puzzle_setup'].includes(activity.state.pauseReason)) {
         throw new MentorActivityError('Use the opening drill action controls for this paused state.', 'physical_opening_action_required', 409);
       }
-      const phase = activity.state.pausedFromPhase || 'learner_turn';
+      let phase = activity.state.pausedFromPhase || 'learner_turn';
+      if (phase === 'mentor_thinking') phase = 'mentor_turn';
       const physical = this.physicalCoordinator.requireCurrentPhysicalState(conversationId);
       const updated = this.store.updateActivity(activity.id, {
         status: 'active',
@@ -1038,6 +1039,28 @@ class MentorActivityService {
     });
     this.record(updated, 'resumed', { phase });
     if (phase === 'mentor_turn') this.scheduleMentorTurn(conversationId, 'activity_resumed');
+    return this.get(conversationId);
+  }
+
+  resumeStrandedPhysicalMentorTurn(conversationId) {
+    let activity = this.store.getActiveActivity(conversationId);
+    if (!this.isPhysicalActivity(activity) || activity.type !== 'practice_game'
+      || activity.config.opponentMode !== 'mentor' || activity.status !== 'active'
+      || !['mentor_turn', 'mentor_thinking'].includes(activity.phase)
+      || this.physicalInFlight.has(conversationId)) return this.get(conversationId);
+    const board = this.physicalCoordinator.requireCurrentPhysicalState(conversationId);
+    if (board.turn !== colorCode(activity.mentorColor) || board.gameStatus.isGameOver) {
+      return this.get(conversationId);
+    }
+    activity = this.store.updateActivity(activity.id, {
+      phase: 'mentor_turn',
+      boardRevision: board.revision,
+      pendingRequestId: null,
+      generation: activity.generation + 1
+    });
+    this.record(activity, 'physical_mentor_turn_recovered', { revision: board.revision });
+    this.physicalCoordinator?.syncPhysicalActivity?.(activity);
+    this.schedulePhysicalMentorTurn(conversationId, 'live_reconnected');
     return this.get(conversationId);
   }
 
@@ -1215,15 +1238,16 @@ class MentorActivityService {
       throw new MentorActivityError(`The mentor controls ${activity.mentorColor} and must choose a legal move.`, 'activity_wrong_color', 409);
     }
     if (board.legalMoves.length > 1) {
-      this.assertPhysicalTeachingCandidate(conversationId, requestId, activity, uci);
+      this.assertPhysicalTeachingCandidate(conversationId, requestId, activity, board, uci);
     }
     return activity;
   }
 
-  assertPhysicalTeachingCandidate(conversationId, requestId, activity, uci) {
+  assertPhysicalTeachingCandidate(conversationId, requestId, activity, board, uci) {
     const analysisCall = this.store.listToolCallsForRequest(conversationId, requestId)
       .filter((call) => call.name === 'analyze_position' && call.status === 'complete'
-        && call.result?.analyzedRevision === activity.boardRevision)
+        && call.result?.sourceKey === board.sourceKey
+        && call.result?.analyzedFen === board.fen)
       .at(-1);
     if (!analysisCall) {
       throw new MentorActivityError('Analyze the current physical position before choosing the mentor move.', 'practice_analysis_required', 409);
@@ -1248,7 +1272,11 @@ class MentorActivityService {
 
   async playPhysicalMove(conversationId, requestId, uci, { signal, strategicPlan } = {}) {
     let activity = this.store.getActiveActivity(conversationId);
-    this.validatePhysicalMentorMove(conversationId, requestId, activity, uci);
+    activity = this.validatePhysicalMentorMove(conversationId, requestId, activity, uci);
+    const board = this.physicalCoordinator.requireCurrentPhysicalState(conversationId);
+    if (activity.boardRevision !== board.revision) {
+      activity = this.store.updateActivity(activity.id, { boardRevision: board.revision });
+    }
     const normalizedPlan = typeof strategicPlan === 'string' ? strategicPlan.trim() : '';
     if (normalizedPlan.length > 240) {
       throw new MentorActivityError('The strategic plan must be 240 characters or fewer.', 'invalid_strategic_plan', 400);
@@ -1264,7 +1292,7 @@ class MentorActivityService {
       generation: activity.generation,
       requestId,
       uci,
-      expectedRevision: activity.boardRevision,
+      expectedRevision: board.revision,
       signal
     });
     return { result, activity: this.get(conversationId) };

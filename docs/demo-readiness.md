@@ -310,3 +310,28 @@ as the learner, and never expose virtual `play_move` or `set_orientation` as
 startup alternatives. The complete Mentor and physical suites, client lint,
 client build, backend syntax, and diff checks pass. The corrected real-board
 startup paths still require a short retest.
+
+### Mentor-Led Reply Transaction Correction
+
+The first real Mentor-led game exposed a status-revision race. Stockfish
+successfully analyzed the post-`Nf3` physical position and selected `g8f6`, but
+activity-policy status updates advanced the physical state revision without
+changing the FEN. Candidate validation incorrectly required the old revision,
+rejected `play_physical_move` twice, and Gemini then described the unexecuted
+move as if it had succeeded. A queued game-start announcement also occupied the
+Live turn when the corrective attempt began.
+
+Physical candidate evidence is now bound to the physical session source key and
+exact analyzed FEN. The current physical revision is refreshed immediately
+before the guarded move is queued, so status-only revision changes cannot
+invalidate a matching analysis while hardware execution still receives the
+latest safety revision. Activity turns wait behind an active Live response,
+obsolete game-start announcements are discarded after the learner moves, and a
+stranded `mentor_thinking` turn resumes when Live reconnects. Pause/Resume also
+normalizes `mentor_thinking` back to an executable mentor turn.
+
+Regression coverage reproduces matching-FEN revision churn, queued Live
+activity execution, stale start-announcement suppression, and reconnect
+recovery. The complete `npm run test:mentor` and `npm run test:physical` suites,
+backend syntax checks, and diff checks pass. A real-board Mentor-led reply
+retest remains required.

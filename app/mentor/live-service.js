@@ -564,6 +564,7 @@ class MentorLiveService {
       await this.connectProvider(record);
       record.ready = true;
       this.emitStatus(record, 'listening');
+      this.activityService?.resumeStrandedPhysicalMentorTurn?.(conversationId);
       return { duplicate: false, sessionId: record.sessionId, ...record.speaker };
     } catch (error) {
       this.speakerService?.releaseSession(conversationId, record.sessionId, 'start_failed');
@@ -1317,6 +1318,11 @@ class MentorLiveService {
     while (record.pendingSystemTurns.length) {
       const request = record.pendingSystemTurns.shift();
       if (request.validateBeforeStart && !request.validateBeforeStart()) continue;
+      if (request.activityTurn) {
+        const started = this.startActivityTurn(record, request);
+        started.completion.then(request.resolveQueuedCompletion);
+        return true;
+      }
       this.startPhysicalTurn(record, request);
       return true;
     }
@@ -1418,11 +1424,26 @@ class MentorLiveService {
   requestActivityTurn(conversationId, { requestId, displayText, prompt }) {
     const record = this.byConversation.get(conversationId);
     if (!record || record.closing || !record.ready) return null;
+    const pending = record.pendingSystemTurns.find((item) => item.activityTurn && item.requestId === requestId);
+    if (pending) return { queued: true, completion: pending.queuedCompletion, sessionId: record.sessionId };
     if (record.turn || this.hasActiveTools(record)) {
-      const error = new Error('The Live mentor is already handling another turn.');
-      error.code = 'mentor_live_busy';
-      throw error;
+      let resolveQueuedCompletion;
+      const queuedCompletion = new Promise((resolve) => { resolveQueuedCompletion = resolve; });
+      record.pendingSystemTurns.unshift({
+        activityTurn: true,
+        requestId,
+        displayText,
+        prompt,
+        queuedCompletion,
+        resolveQueuedCompletion
+      });
+      return { queued: true, completion: queuedCompletion, sessionId: record.sessionId };
     }
+    return this.startActivityTurn(record, { requestId, displayText, prompt });
+  }
+
+  startActivityTurn(record, { requestId, displayText, prompt }) {
+    const conversationId = record.conversationId;
     const pair = this.store.createMessagePair(conversationId, {
       requestId,
       text: displayText,
@@ -1456,6 +1477,14 @@ class MentorLiveService {
     record.providerSession.sendRealtimeInput({ text: prompt });
     this.emitStatus(record, 'thinking');
     return { ...pair, completion: turn.completion, sessionId: record.sessionId };
+  }
+
+  clearPendingSystemTurns(record, status = 'cancelled') {
+    const pending = record.pendingSystemTurns;
+    record.pendingSystemTurns = [];
+    for (const request of pending) {
+      request.resolveQueuedCompletion?.({ status });
+    }
   }
 
   notifyBoardUpdated(conversationId, state, { actionId = null } = {}) {
@@ -1492,7 +1521,7 @@ class MentorLiveService {
     record.physicalGuidanceLock = false;
     record.discardUnsolicitedAfterPhysical = false;
     record.pendingBoardState = null;
-    record.pendingSystemTurns = [];
+    this.clearPendingSystemTurns(record, 'failed');
     this.abortToolCalls(record);
     if (record.turn) this.finalizeTurn(record, 'failed');
     record.socket.emit('mentor-live-error', {
@@ -1527,7 +1556,7 @@ class MentorLiveService {
     record.discardUnsolicitedAfterPhysical = false;
     this.speakerService?.releaseSession(record.conversationId, record.sessionId, 'provider_closed');
     record.pendingBoardState = null;
-    record.pendingSystemTurns = [];
+    this.clearPendingSystemTurns(record, unexpected ? 'failed' : 'cancelled');
     this.abortToolCalls(record);
     if (record.turn) this.finalizeTurn(record, unexpected ? 'failed' : 'cancelled');
     this.release(record);
@@ -1566,7 +1595,7 @@ class MentorLiveService {
       reason
     }));
     this.abortToolCalls(record);
-    record.pendingSystemTurns = [];
+    this.clearPendingSystemTurns(record, 'cancelled');
     if (record.turn) this.finalizeTurn(record, 'cancelled');
     await record.toolQueue.catch(() => {});
     try {

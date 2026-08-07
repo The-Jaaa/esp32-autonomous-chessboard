@@ -556,7 +556,11 @@ class MentorPhysicalObserverService {
       urgent: false,
       fallbackAssistantText: reply,
       timeoutMs: 30000,
-      queueKey: 'physical-practice'
+      queueKey: 'physical-practice',
+      validateBeforeStart: () => {
+        const current = this.activityService?.get?.(activity.conversationId);
+        return current?.id === activity.id && !current.state?.lastPhysicalMoveId;
+      }
     });
     if (live) return live;
     return this.persistCoachingMessage(activity.conversationId, requestId, `${mode} physical game started.`, reply);

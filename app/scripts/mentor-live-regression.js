@@ -213,6 +213,28 @@ async function socketRegressions() {
   assert.strictEqual(audioMessages[0].content, 'Can you explain this position?');
   assert.strictEqual(audioMessages[1].content, 'Yes. Let us examine the position together.');
 
+  const busyTurnFinal = waitForEvent(client, 'mentor-live-assistant-transcript', (payload) =>
+    payload.isFinal && payload.message?.requestId === 'live-before-activity-turn');
+  await emitWithAck(client, 'mentor-live-text-input', {
+    conversationId: first.id,
+    sessionId: started.sessionId,
+    requestId: 'live-before-activity-turn',
+    text: 'Finish this response before the activity turn.'
+  });
+  const queuedActivityFinal = waitForEvent(client, 'mentor-live-assistant-transcript', (payload) =>
+    payload.isFinal && payload.message?.requestId === 'physical-activity-queued');
+  const queuedActivity = feature.liveService.requestActivityTurn(first.id, {
+    requestId: 'physical-activity-queued',
+    displayText: 'Mentor is choosing a physical reply.',
+    prompt: '[MENTOR_PHYSICAL_ACTIVITY_TURN]\nAnalyze and make the reply.'
+  });
+  assert.strictEqual(queuedActivity.queued, true);
+  await busyTurnFinal;
+  const queuedActivityCompletion = await queuedActivity.completion;
+  await queuedActivityFinal;
+  assert.strictEqual(queuedActivityCompletion.status, 'complete');
+  assert.strictEqual(feature.store.getRequestMessages(first.id, 'physical-activity-queued')[1].status, 'complete');
+
   const queuedTypedFinal = waitForEvent(client, 'mentor-live-assistant-transcript', (payload) =>
     payload.isFinal && payload.message?.requestId === 'live-before-check');
   await emitWithAck(client, 'mentor-live-text-input', {

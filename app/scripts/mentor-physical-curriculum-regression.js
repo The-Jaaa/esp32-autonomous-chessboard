@@ -10,6 +10,7 @@ const { getCatalogItem, listCatalog } = require('../mentor/curriculum');
 
 function physicalState(game, revision, humanColor = 'white') {
   return {
+    sourceKey: 'physical:server-test:9',
     fen: game.fen(),
     revision,
     turn: game.turn(),
@@ -34,6 +35,128 @@ function physicalState(game, revision, humanColor = 'white') {
       pendingPromotion: null
     }
   };
+}
+
+async function verifyPhysicalAnalysisSurvivesStatusRevisionChurn() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mentor-physical-analysis-revision-'));
+  const store = new MentorStore({ dbPath: path.join(tempDir, 'mentor.sqlite') });
+  const game = new Chess(STANDARD_FEN);
+  let revision = 1;
+  const queued = [];
+  let service;
+  const coordinator = {
+    isAttached: () => true,
+    requirePracticeStartState: () => physicalState(game, revision),
+    requireCurrentPhysicalState: () => physicalState(game, revision),
+    syncPhysicalActivity: () => {},
+    announcePhysicalPractice: () => null,
+    playPhysicalMove: async (_conversationId, options) => {
+      queued.push(options);
+      return { success: true, verified: true };
+    }
+  };
+  service = new MentorActivityService({ store, chessService: {}, analysisService: {}, emit: () => {} });
+  service.setPhysicalCoordinator(coordinator);
+  const conversation = store.createConversation();
+
+  try {
+    let activity = service.startPhysicalPractice(conversation.id, {
+      learnerColor: 'white', opponentMode: 'mentor', expectedRevision: revision
+    });
+    game.move('e4');
+    revision = 2;
+    const requestId = `physical-activity:${activity.id}:2:2:0`;
+    activity = store.updateActivity(activity.id, {
+      phase: 'mentor_thinking',
+      boardRevision: revision,
+      pendingRequestId: requestId,
+      generation: activity.generation + 1
+    });
+    const pair = store.createMessagePair(conversation.id, {
+      requestId,
+      text: 'Mentor is choosing a physical reply.',
+      kind: 'activity'
+    });
+    const analysis = store.createToolCall({
+      conversationId: conversation.id,
+      requestId,
+      assistantMessageId: pair.assistantMessage.id,
+      providerCallId: 'analysis-before-status-churn',
+      ordinal: 1,
+      name: 'analyze_position'
+    }).toolCall;
+    store.updateToolCall(analysis.id, {
+      status: 'complete',
+      result: {
+        sourceKey: 'physical:server-test:9',
+        analyzedFen: game.fen(),
+        analyzedRevision: revision,
+        lines: [
+          { move: 'g8f6', score: { type: 'cp', value: 25, perspective: 'white' } },
+          { move: 'e7e6', score: { type: 'cp', value: 26, perspective: 'white' } }
+        ]
+      }
+    });
+
+    revision = 5;
+    await service.playPhysicalMove(conversation.id, requestId, 'g8f6', {
+      strategicPlan: 'Develop and contest the center.'
+    });
+    assert.strictEqual(queued.length, 1);
+    assert.strictEqual(queued[0].expectedRevision, 5, 'execution uses the latest physical status revision');
+    assert.strictEqual(store.getActiveActivity(conversation.id).boardRevision, 5);
+  } finally {
+    store.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+async function verifyStrandedMentorTurnRecoversWhenLiveReturns() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mentor-physical-turn-recovery-'));
+  const store = new MentorStore({ dbPath: path.join(tempDir, 'mentor.sqlite') });
+  const game = new Chess(STANDARD_FEN);
+  game.move('e4');
+  let service;
+  let runnerCalls = 0;
+  const coordinator = {
+    isAttached: () => true,
+    requirePracticeStartState: () => physicalState(new Chess(STANDARD_FEN), 1),
+    requireCurrentPhysicalState: () => physicalState(game, 4),
+    syncPhysicalActivity: () => {},
+    announcePhysicalPractice: () => null
+  };
+  service = new MentorActivityService({ store, chessService: {}, analysisService: {}, emit: () => {} });
+  service.setPhysicalCoordinator(coordinator);
+  service.setRunners({
+    isLiveActive: () => true,
+    live: () => {
+      runnerCalls += 1;
+      return { completion: Promise.resolve({ status: 'cancelled' }) };
+    }
+  });
+  const conversation = store.createConversation();
+
+  try {
+    let activity = service.startPhysicalPractice(conversation.id, {
+      learnerColor: 'white', opponentMode: 'mentor', expectedRevision: 1
+    });
+    activity = store.updateActivity(activity.id, {
+      phase: 'mentor_thinking',
+      boardRevision: 2,
+      pendingRequestId: 'orphaned-provider-turn'
+    });
+    service.resumeStrandedPhysicalMentorTurn(conversation.id);
+    await service.physicalInFlight.get(conversation.id);
+    const recovered = service.get(conversation.id);
+    assert.strictEqual(runnerCalls, 1);
+    assert.strictEqual(recovered.status, 'paused');
+    assert(recovered.events.some((event) => event.type === 'physical_mentor_turn_recovered'));
+    assert(recovered.events.some((event) => event.type === 'paused'
+      && event.payload.reason === 'response_stopped'));
+  } finally {
+    store.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 }
 
 async function verifyGuidedPhysicalFallback() {
@@ -360,6 +483,8 @@ async function verifyVoiceFirstPhysicalOrchestration() {
 
 (async () => {
   await verifyGuidedPhysicalFallback();
+  await verifyPhysicalAnalysisSurvivesStatusRevisionChurn();
+  await verifyStrandedMentorTurnRecoversWhenLiveReturns();
   await verifyStockfishPolicyAndColorChecks();
   verifyBothColorOpeningsAndPhysicalPuzzle();
   await verifyVoiceFirstPhysicalOrchestration();
