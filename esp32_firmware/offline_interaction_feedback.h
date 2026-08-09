@@ -26,6 +26,7 @@ void submitOfflineInteractionFrame(
     bool deliberateAnimationStep = false);
 void serviceOfflineInteractionFrame();
 std::uint32_t offlineInteractionMaximumShowUs();
+std::uint32_t offlineInteractionDisplayedFrameCount();
 void resetOfflineInteractionSensorTiming();
 void setOfflineInteractionSensorStage(OfflineInteractionSensorStage stage);
 void recordOfflineInteractionSensorGap(std::uint32_t gapMs);

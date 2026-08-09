@@ -20,6 +20,7 @@ offline::LedFrame displayedFrame{};
 bool framePending = false;
 bool frameDisplayed = false;
 std::uint32_t frameRevision = 0;
+std::uint32_t displayedFrameCount = 0;
 std::uint32_t maximumShowUs = 0;
 volatile OfflineInteractionSensorStage sensorStage =
     OfflineInteractionSensorStage::Idle;
@@ -100,12 +101,21 @@ void serviceOfflineInteractionFrame() {
   portENTER_CRITICAL(&frameMux);
   displayedFrame = frame;
   frameDisplayed = true;
+  displayedFrameCount++;
   portEXIT_CRITICAL(&frameMux);
 
 }
 
 std::uint32_t offlineInteractionMaximumShowUs() {
   return maximumShowUs;
+}
+
+std::uint32_t offlineInteractionDisplayedFrameCount() {
+  std::uint32_t count = 0;
+  portENTER_CRITICAL(&frameMux);
+  count = displayedFrameCount;
+  portEXIT_CRITICAL(&frameMux);
+  return count;
 }
 
 void resetOfflineInteractionSensorTiming() {

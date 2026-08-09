@@ -2201,27 +2201,27 @@ void runLedGallery(std::size_t& submittedFrames) {
   offline::OfflineFeedbackInput wait;
   wait.state = offline::OfflineFeedbackState::Wait;
   emitLedTransferFrame("wait", wait, submittedFrames);
-  waitLedTransferStep(700);
+  waitLedTransferStep(1500);
 
   const auto setup = setupFeedback("a7", "a3");
   emitLedTransferFrame("setup-difference", setup, submittedFrames);
-  waitLedTransferStep(900);
+  waitLedTransferStep(1500);
 
   offline::OfflineFeedbackInput side;
   side.state = offline::OfflineFeedbackState::SideSelection;
   emitLedTransferFrame("side", side, submittedFrames);
-  waitLedTransferStep(700);
+  waitLedTransferStep(1500);
 
   offline::OfflineFeedbackInput selected;
   selected.state = offline::OfflineFeedbackState::SideSelected;
   selected.selectedColor = offline::HumanColor::White;
   emitLedTransferFrame("selected-white", selected, submittedFrames);
-  waitLedTransferStep(500);
+  waitLedTransferStep(1500);
 
   offline::OfflineFeedbackInput ready;
   ready.state = offline::OfflineFeedbackState::HumanReady;
   emitLedTransferFrame("go", ready, submittedFrames);
-  waitLedTransferStep(500);
+  waitLedTransferStep(1500);
 
   offline::OfflineFeedbackInput interaction;
   interaction.state = offline::OfflineFeedbackState::HumanInteraction;
@@ -2231,50 +2231,50 @@ void runLedGallery(std::size_t& submittedFrames) {
       {"h3", offline::squareToRawIndex("h3"), offline::HighlightRole::CaptureTarget},
       {"e1", offline::squareToRawIndex("e1"), offline::HighlightRole::SpecialTarget}};
   emitLedTransferFrame("move-roles", interaction, submittedFrames);
-  waitLedTransferStep(900);
+  waitLedTransferStep(1500);
 
   offline::OfflineFeedbackInput thinking;
   thinking.state = offline::OfflineFeedbackState::EngineThinking;
   emitLedTransferFrame("ai", thinking, submittedFrames);
-  waitLedTransferStep(700);
+  waitLedTransferStep(1500);
 
   offline::OfflineFeedbackInput robot;
   robot.state = offline::OfflineFeedbackState::RobotExecuting;
   robot.robotPathSquares = {"g1", "f3"};
   robot.highlights = interaction.highlights;
   emitLedTransferFrame("robot-path", robot, submittedFrames);
-  waitLedTransferStep(900);
+  waitLedTransferStep(1500);
 
   offline::OfflineFeedbackInput check;
   check.state = offline::OfflineFeedbackState::Check;
   check.checkedKingSquare = "e8";
   emitLedTransferFrame("check", check, submittedFrames);
-  waitLedTransferStep(700);
+  waitLedTransferStep(1500);
 
   offline::OfflineFeedbackInput checkmate;
   checkmate.state = offline::OfflineFeedbackState::Checkmate;
   checkmate.losingKingSquare = "e8";
   checkmate.winningKingSquare = "g1";
   emitLedTransferFrame("checkmate", checkmate, submittedFrames);
-  waitLedTransferStep(700);
+  waitLedTransferStep(1500);
 
   offline::OfflineFeedbackInput draw;
   draw.state = offline::OfflineFeedbackState::Draw;
   emitLedTransferFrame("draw", draw, submittedFrames);
-  waitLedTransferStep(700);
+  waitLedTransferStep(1500);
 
   offline::OfflineFeedbackInput prompt;
   prompt.state = offline::OfflineFeedbackState::PromotionPrompt;
   prompt.promotionSquare = "a8";
   emitLedTransferFrame("promotion-prompt", prompt, submittedFrames);
-  waitLedTransferStep(700);
+  waitLedTransferStep(1500);
 
   offline::OfflineFeedbackInput choice;
   choice.state = offline::OfflineFeedbackState::PromotionChoice;
   choice.promotionSquare = "a8";
   choice.promotionChoice = 'q';
   emitLedTransferFrame("promotion-queen", choice, submittedFrames);
-  waitLedTransferStep(700);
+  waitLedTransferStep(2000);
 
   emitLedTransferFrame("clear", offline::OfflineFeedbackInput{}, submittedFrames);
 }
@@ -2357,8 +2357,11 @@ void emitLedTransferSummary(
   const bool motorsUnchanged = motorA.currentPosition() == initialMotorA &&
                                motorB.currentPosition() == initialMotorB;
   const bool magnetLow = offlineRuntimeMagnetIsLow();
+  const std::uint32_t displayedFrames =
+      offlineInteractionDisplayedFrameCount();
 
   emitCheck("frame-submissions", submittedFrames > 0);
+  emitCheck("frame-display", displayedFrames >= submittedFrames);
   emitCheck("clearance-plan", clearancePlanPassed);
   emitCheck("motors-locked", motorsUnchanged);
   emitCheck("magnet-low", magnetLow);
@@ -2378,6 +2381,7 @@ void emitLedTransferSummary(
   summary["motorsLocked"] = motorsUnchanged;
   summary["magnetLow"] = magnetLow;
   summary["frameSubmissions"] = submittedFrames;
+  summary["displayedFrames"] = displayedFrames;
   summary["clearancePlanPassed"] = clearancePlanPassed;
   summary["sensorScans"] = offlineRuntimeSensorScanCount;
   summary["sensorMaxGapMs"] = offlineRuntimeSensorMaxGapMs;

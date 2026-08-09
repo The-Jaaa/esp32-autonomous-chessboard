@@ -133,7 +133,8 @@ function Read-ParityReport {
     }
     if (-not $summary) { throw 'No LED transfer parity summary was received before timeout.' }
     if (-not $summary.pass -or -not $summary.motorsLocked -or -not $summary.magnetLow -or
-        [int]$summary.frameSubmissions -le 0) {
+        [int]$summary.frameSubmissions -le 0 -or
+        [int]$summary.displayedFrames -lt [int]$summary.frameSubmissions) {
         throw 'The parity summary reported a failed safety or frame-submission check.'
     }
     if ($Fixture -ne 'LedGallery' -and -not $summary.clearancePlanPassed) {

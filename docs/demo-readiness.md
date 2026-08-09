@@ -564,5 +564,12 @@ RAM, White clearance is `1,276,443` / `53,744`, and Black clearance is
 `1,276,507` / `53,744`. The live worktree has unrelated uncommitted speaker
 changes, so its production image is not used as the baseline evidence.
 
-Final parity acceptance still requires the guarded serial gallery check and
-the remaining full foundation gate before this milestone is marked complete.
+Milestone 5.5 physical acceptance is complete. The corrected COM11 gallery
+visibly rendered the fixed sideways text and online-aligned palette, and its
+telemetry confirmed 14 submitted and 14 displayed frames. White and Black
+planner fixtures selected the expected rook-pawn clearance sequences, rendered
+all three phases, and retained motors locked, magnet LOW, and a 10 ms maximum
+sensor gap. The verifier restored the exact production baseline after every
+run. Focused LED and temporary-clearance regressions pass; the foundation
+component groups passed previously, while the aggregate wrapper remains a slow
+repetition of those compile-heavy groups.

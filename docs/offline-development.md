@@ -1515,4 +1515,17 @@ an optional guarded serial session. The clean tracked production baseline is
 contains separate uncommitted speaker/audio files; those are intentionally not
 part of this milestone and can make a live-tree production build larger.
 
-This milestone remains pending its final parity acceptance and isolated commit.
+Physical parity acceptance completed on COM11. The first gallery run exposed a
+diagnostic-only dispatch defect: core 0 submitted frames, but core 1 continued
+the ownership animation because the parity flag was absent from the display
+service branch. The corrected diagnostic counts frames only after core 1 calls
+`strip.show()` and holds gallery states long enough for visual inspection.
+
+The repeated gallery displayed the fixed sideways text and accepted colors,
+with all 14 submitted frames displayed, motors locked, magnet LOW, and a 10 ms
+maximum sensor gap. White clearance selected `h2-h4`, `g1-f3`, `h4-h2`; Black
+clearance selected `h7-h5`, `g8-f6`, `h5-h7`. Each planner-only fixture
+displayed all three phase frames, preserved logical chess state, kept motors
+locked and the magnet LOW, and recorded a 10 ms maximum sensor gap. Production
+firmware was restored after every run at the exact `1,083,819 / 48,768`
+baseline. Milestone 5.5 is accepted.
