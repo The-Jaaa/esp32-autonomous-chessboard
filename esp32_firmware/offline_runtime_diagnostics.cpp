@@ -79,11 +79,19 @@ constexpr bool kInteractionDiagnostic =
     ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS != 0;
 constexpr bool kContinuousGameplayDiagnostic =
     ENABLE_OFFLINE_CONTINUOUS_GAMEPLAY_DIAGNOSTICS != 0;
+constexpr bool kLedTransferParityDiagnostic =
+    ENABLE_OFFLINE_LED_TRANSFER_PARITY_DIAGNOSTICS != 0;
 constexpr bool kLaneMotionDiagnostic =
     ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS != 0;
 constexpr bool kLaneBoardFixture = OFFLINE_LANE_MOTION_FIXTURE == 1;
 
+const char* ledTransferFixtureName();
+void runOfflineLedTransferParityDiagnostic();
+
 const char* diagnosticPrefix() {
+  if (kLedTransferParityDiagnostic) {
+    return "OFFLINE_LED_TRANSFER_DIAG";
+  }
   if (kContinuousGameplayDiagnostic) {
     return "OFFLINE_GAME_DIAG";
   }
@@ -2117,6 +2125,10 @@ void emitPromotionSummary(
 
 #endif
 
+#endif  // ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS
+
+#endif  // phase-execution and guarded motion diagnostics
+
 #if ENABLE_OFFLINE_UNIFIED_TURN_DIAGNOSTICS || \
     ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS || \
     ENABLE_OFFLINE_CONTINUOUS_GAMEPLAY_DIAGNOSTICS
@@ -2130,7 +2142,279 @@ void emitPromotionSummary(
 #endif
 #endif
 
-#endif
+const char* ledTransferFixtureName() {
+  switch (OFFLINE_LED_TRANSFER_FIXTURE) {
+    case 1: return "WhiteClearance";
+    case 2: return "BlackClearance";
+    default: return "LedGallery";
+  }
+}
+
+void emitLedTransferFrame(
+    const char* label,
+    const offline::OfflineFeedbackInput& input,
+    std::size_t& submittedFrames,
+    bool deliberateAnimationStep = false) {
+  submitOfflineInteractionFrame(
+      offline::OfflineLedRenderer::render(input),
+      input.state,
+      deliberateAnimationStep);
+  submittedFrames++;
+
+  StaticJsonDocument<384> document;
+  document["type"] = "frame";
+  document["fixture"] = ledTransferFixtureName();
+  document["label"] = label;
+  document["state"] = offline::offlineFeedbackStateName(input.state);
+  document["deliberateAnimationStep"] = deliberateAnimationStep;
+  String payload;
+  serializeJson(document, payload);
+  emitOfflineDiagnosticJson("OFFLINE_LED_TRANSFER_DIAG", payload);
+}
+
+void waitLedTransferStep(std::uint32_t durationMs) {
+  const std::uint32_t startedAt = millis();
+  while (millis() - startedAt < durationMs) {
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+}
+
+offline::OfflineFeedbackInput setupFeedback(
+    const char* missingSquare = nullptr,
+    const char* extraSquare = nullptr) {
+  offline::OfflineFeedbackInput input;
+  input.state = offline::OfflineFeedbackState::Setup;
+  const std::string standardFen =
+      "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+  const auto occupancy = offline::occupancyFromFen(standardFen);
+  for (std::size_t index = 0; index < occupancy.size(); ++index) {
+    if (!occupancy[index]) continue;
+    const std::string square = offline::rawIndexToSquare(index);
+    if (!square.empty()) input.detectedSquares.push_back(square);
+  }
+  if (missingSquare) input.difference.missing.push_back(missingSquare);
+  if (extraSquare) input.difference.extra.push_back(extraSquare);
+  return input;
+}
+
+void runLedGallery(std::size_t& submittedFrames) {
+  offline::OfflineFeedbackInput wait;
+  wait.state = offline::OfflineFeedbackState::Wait;
+  emitLedTransferFrame("wait", wait, submittedFrames);
+  waitLedTransferStep(700);
+
+  const auto setup = setupFeedback("a7", "a3");
+  emitLedTransferFrame("setup-difference", setup, submittedFrames);
+  waitLedTransferStep(900);
+
+  offline::OfflineFeedbackInput side;
+  side.state = offline::OfflineFeedbackState::SideSelection;
+  emitLedTransferFrame("side", side, submittedFrames);
+  waitLedTransferStep(700);
+
+  offline::OfflineFeedbackInput selected;
+  selected.state = offline::OfflineFeedbackState::SideSelected;
+  selected.selectedColor = offline::HumanColor::White;
+  emitLedTransferFrame("selected-white", selected, submittedFrames);
+  waitLedTransferStep(500);
+
+  offline::OfflineFeedbackInput ready;
+  ready.state = offline::OfflineFeedbackState::HumanReady;
+  emitLedTransferFrame("go", ready, submittedFrames);
+  waitLedTransferStep(500);
+
+  offline::OfflineFeedbackInput interaction;
+  interaction.state = offline::OfflineFeedbackState::HumanInteraction;
+  interaction.highlights = {
+      {"g1", offline::squareToRawIndex("g1"), offline::HighlightRole::Source},
+      {"f3", offline::squareToRawIndex("f3"), offline::HighlightRole::QuietTarget},
+      {"h3", offline::squareToRawIndex("h3"), offline::HighlightRole::CaptureTarget},
+      {"e1", offline::squareToRawIndex("e1"), offline::HighlightRole::SpecialTarget}};
+  emitLedTransferFrame("move-roles", interaction, submittedFrames);
+  waitLedTransferStep(900);
+
+  offline::OfflineFeedbackInput thinking;
+  thinking.state = offline::OfflineFeedbackState::EngineThinking;
+  emitLedTransferFrame("ai", thinking, submittedFrames);
+  waitLedTransferStep(700);
+
+  offline::OfflineFeedbackInput robot;
+  robot.state = offline::OfflineFeedbackState::RobotExecuting;
+  robot.robotPathSquares = {"g1", "f3"};
+  robot.highlights = interaction.highlights;
+  emitLedTransferFrame("robot-path", robot, submittedFrames);
+  waitLedTransferStep(900);
+
+  offline::OfflineFeedbackInput check;
+  check.state = offline::OfflineFeedbackState::Check;
+  check.checkedKingSquare = "e8";
+  emitLedTransferFrame("check", check, submittedFrames);
+  waitLedTransferStep(700);
+
+  offline::OfflineFeedbackInput checkmate;
+  checkmate.state = offline::OfflineFeedbackState::Checkmate;
+  checkmate.losingKingSquare = "e8";
+  checkmate.winningKingSquare = "g1";
+  emitLedTransferFrame("checkmate", checkmate, submittedFrames);
+  waitLedTransferStep(700);
+
+  offline::OfflineFeedbackInput draw;
+  draw.state = offline::OfflineFeedbackState::Draw;
+  emitLedTransferFrame("draw", draw, submittedFrames);
+  waitLedTransferStep(700);
+
+  offline::OfflineFeedbackInput prompt;
+  prompt.state = offline::OfflineFeedbackState::PromotionPrompt;
+  prompt.promotionSquare = "a8";
+  emitLedTransferFrame("promotion-prompt", prompt, submittedFrames);
+  waitLedTransferStep(700);
+
+  offline::OfflineFeedbackInput choice;
+  choice.state = offline::OfflineFeedbackState::PromotionChoice;
+  choice.promotionSquare = "a8";
+  choice.promotionChoice = 'q';
+  emitLedTransferFrame("promotion-queen", choice, submittedFrames);
+  waitLedTransferStep(700);
+
+  emitLedTransferFrame("clear", offline::OfflineFeedbackInput{}, submittedFrames);
+}
+
+bool emitClearancePlan(std::size_t& submittedFrames) {
+  constexpr const char* kStandardFen =
+      "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+  constexpr const char* kBlackAfterE4Fen =
+      "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1";
+  offline::OfflineGame game;
+  const char* move = "g1f3";
+  if (OFFLINE_LED_TRANSFER_FIXTURE == 2) {
+    move = "g8f6";
+    if (!game.loadFen(kBlackAfterE4Fen)) return false;
+  } else if (!game.loadFen(kStandardFen)) {
+    return false;
+  }
+
+  const std::string beforeFen = game.fen();
+  offline::OfflineMotionPlanner planner;
+  const offline::MotionPlan plan = planner.planMove(game, move);
+  const bool unchanged = game.fen() == beforeFen;
+  const bool hasClearance =
+      plan.success() && plan.temporaryClearances.size() == 1;
+
+  DynamicJsonDocument document(4096);
+  document["type"] = "clearance-plan";
+  document["fixture"] = ledTransferFixtureName();
+  document["move"] = move;
+  document["status"] = offline::motionPlanStatusName(plan.status);
+  document["strategy"] = offline::motionStrategyName(plan.strategy);
+  document["routeCost"] = plan.routeCost;
+  document["logicalStateUnchanged"] = unchanged;
+  document["temporaryClearanceCount"] = plan.temporaryClearances.size();
+  if (hasClearance) {
+    const auto& clearance = plan.temporaryClearances.front();
+    document["pawnFrom"] = clearance.pawnFrom.c_str();
+    document["pawnTemp"] = clearance.pawnTemp.c_str();
+    document["movingColor"] = String(clearance.movingColor);
+    document["originalPhase"] = clearance.originalPhase.c_str();
+    document["originalBlockedReason"] = clearance.originalBlockedReason.c_str();
+  }
+  JsonArray phases = document.createNestedArray("phases");
+  for (const auto& phase : plan.phases) {
+    JsonObject item = phases.createNestedObject();
+    item["kind"] = offline::motionPhaseKindName(phase.kind);
+    item["from"] = phase.from.c_str();
+    item["to"] = phase.to.c_str();
+    if (phase.physicalMove) item["physicalMove"] = phase.physicalMove->uci.c_str();
+  }
+  String payload;
+  serializeJson(document, payload);
+  emitOfflineDiagnosticJson("OFFLINE_LED_TRANSFER_DIAG", payload);
+
+  for (const auto& phase : plan.phases) {
+    offline::OfflineFeedbackInput feedback;
+    feedback.state = offline::OfflineFeedbackState::RobotExecuting;
+    feedback.robotPathSquares = {phase.from, phase.to};
+    feedback.highlights = {
+        {phase.from, offline::squareToRawIndex(phase.from), offline::HighlightRole::Source},
+        {phase.to, offline::squareToRawIndex(phase.to), offline::HighlightRole::QuietTarget}};
+    emitLedTransferFrame(
+        offline::motionPhaseKindName(phase.kind), feedback, submittedFrames);
+    waitLedTransferStep(900);
+  }
+  return plan.success() && unchanged && hasClearance;
+}
+
+void emitLedTransferSummary(
+    std::size_t submittedFrames,
+    bool clearancePlanPassed,
+    long initialMotorA,
+    long initialMotorB) {
+  const std::size_t internalFree =
+      heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  const std::size_t largestInternal =
+      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  const std::size_t psramFree = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+  const std::size_t stackHeadroom = uxTaskGetStackHighWaterMark(nullptr);
+  const bool motorsUnchanged = motorA.currentPosition() == initialMotorA &&
+                               motorB.currentPosition() == initialMotorB;
+  const bool magnetLow = offlineRuntimeMagnetIsLow();
+
+  emitCheck("frame-submissions", submittedFrames > 0);
+  emitCheck("clearance-plan", clearancePlanPassed);
+  emitCheck("motors-locked", motorsUnchanged);
+  emitCheck("magnet-low", magnetLow);
+  emitCheck("sensor-loop-progress", offlineRuntimeSensorScanCount > 0 &&
+                                      offlineRuntimeSensorMaxGapMs < kMaximumSensorGapMs);
+  emitCheck("heartbeat-progress", ownershipDiagnosticHeartbeatAttempts > 0);
+  emitCheck("internal-heap-threshold", internalFree >= kMinimumInternalHeapBytes);
+  emitCheck("largest-internal-block-threshold",
+            largestInternal >= kMinimumLargestInternalBlockBytes);
+  emitCheck("psram-threshold", psramFree >= kMinimumFreePsramBytes);
+  emitCheck("stack-threshold", stackHeadroom >= kMinimumStackHeadroomBytes);
+
+  DynamicJsonDocument summary(1536);
+  summary["type"] = "summary";
+  summary["pass"] = overallPass;
+  summary["fixture"] = ledTransferFixtureName();
+  summary["motorsLocked"] = motorsUnchanged;
+  summary["magnetLow"] = magnetLow;
+  summary["frameSubmissions"] = submittedFrames;
+  summary["clearancePlanPassed"] = clearancePlanPassed;
+  summary["sensorScans"] = offlineRuntimeSensorScanCount;
+  summary["sensorMaxGapMs"] = offlineRuntimeSensorMaxGapMs;
+  summary["heartbeatAttempts"] = ownershipDiagnosticHeartbeatAttempts;
+  summary["internalFree"] = internalFree;
+  summary["largestInternal"] = largestInternal;
+  summary["psramFree"] = psramFree;
+  summary["stackHeadroom"] = stackHeadroom;
+  summary["core"] = xPortGetCoreID();
+  summary["priority"] = uxTaskPriorityGet(nullptr);
+  emitDocument(summary);
+}
+
+void runOfflineLedTransferParityDiagnostic() {
+  const long initialMotorA = motorA.currentPosition();
+  const long initialMotorB = motorB.currentPosition();
+  std::size_t submittedFrames = 0;
+
+  StaticJsonDocument<384> start;
+  start["type"] = "parity-start";
+  start["fixture"] = ledTransferFixtureName();
+  start["motorsLocked"] = true;
+  start["magnetLow"] = offlineRuntimeMagnetIsLow();
+  start["orientation"] = "fixed-sideways";
+  start["core"] = xPortGetCoreID();
+  start["priority"] = uxTaskPriorityGet(nullptr);
+  emitDocument(start);
+
+  bool clearancePlanPassed = true;
+  if (OFFLINE_LED_TRANSFER_FIXTURE == 0) {
+    runLedGallery(submittedFrames);
+  } else {
+    clearancePlanPassed = emitClearancePlan(submittedFrames);
+  }
+  emitLedTransferSummary(
+      submittedFrames, clearancePlanPassed, initialMotorA, initialMotorB);
+}
 
 #if ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
 
@@ -2500,8 +2784,6 @@ void emitLaneSummary(
 
 #endif
 
-#endif
-
 void emitSummary(
     bool planFrozen,
     bool opponentMoveCommitted,
@@ -2598,7 +2880,10 @@ void runtimeTask(void*) {
   start["humanColor"] = "white";
   start["searchTimeMs"] = 3000;
   start["maxDepth"] = 12;
-  if (kContinuousGameplayDiagnostic) {
+  if (kLedTransferParityDiagnostic) {
+    start["fixture"] = ledTransferFixtureName();
+    start["orientation"] = "fixed-sideways";
+  } else if (kContinuousGameplayDiagnostic) {
     start["fixture"] = OFFLINE_CONTINUOUS_FIXTURE == 0
         ? "Standard" : "TerminalReset";
     start["targetTurns"] = OFFLINE_CONTINUOUS_FIXTURE == 0 ? 12 : 1;
@@ -2657,6 +2942,13 @@ void runtimeTask(void*) {
 
 #if ENABLE_OFFLINE_CONTINUOUS_GAMEPLAY_DIAGNOSTICS
   runOfflineContinuousGameplayDiagnostic();
+  summaryEmitted = true;
+  vTaskDelete(nullptr);
+  return;
+#endif
+
+#if ENABLE_OFFLINE_LED_TRANSFER_PARITY_DIAGNOSTICS
+  runOfflineLedTransferParityDiagnostic();
   summaryEmitted = true;
   vTaskDelete(nullptr);
   return;

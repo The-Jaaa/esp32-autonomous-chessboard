@@ -39,6 +39,8 @@
     "test:offline-route": "node scripts/offline-route-regression.js",
     "test:offline-external-route": "node scripts/offline-external-route-regression.js",
     "test:offline-motion": "node scripts/offline-motion-regression.js",
+    "test:offline-led-parity": "node scripts/offline-led-parity-regression.js",
+    "test:offline-temporary-clearance": "node scripts/offline-temporary-clearance-regression.js",
     "test:offline-motion-execution": "node scripts/offline-motion-execution-regression.js",
     "test:offline-ownership": "node scripts/offline-ownership-regression.js",
     "test:offline-runtime": "node scripts/offline-runtime-regression.js",
@@ -54,7 +56,7 @@
     "test:offline-unified-turn": "node scripts/offline-unified-turn-regression.js",
     "test:offline-interaction": "node scripts/offline-interaction-regression.js",
     "test:offline-continuous": "node scripts/offline-continuous-regression.js",
-    "test:foundation": "npm run test:physical && npm run test:offline-rules && npm run test:offline-physical && npm run test:offline-engine && npm run test:offline-coordinator && npm run test:offline-integration && npm run test:offline-route && npm run test:offline-external-route && npm run test:offline-motion && npm run test:offline-motion-execution && npm run test:offline-ownership && npm run test:offline-runtime && npm run test:offline-phase-execution && npm run test:offline-quiet-motion && npm run test:offline-staged-capture-motion && npm run test:offline-lane-motion && npm run test:offline-capture-lane-motion && npm run test:offline-en-passant-motion && npm run test:offline-castling-motion && npm run test:offline-promotion-motion && npm run test:offline-unified-turn && npm run test:offline-interaction && npm run test:offline-continuous"
+    "test:foundation": "npm run test:physical && npm run test:offline-rules && npm run test:offline-physical && npm run test:offline-engine && npm run test:offline-coordinator && npm run test:offline-integration && npm run test:offline-route && npm run test:offline-external-route && npm run test:offline-motion && npm run test:offline-led-parity && npm run test:offline-temporary-clearance && npm run test:offline-motion-execution && npm run test:offline-ownership && npm run test:offline-runtime && npm run test:offline-phase-execution && npm run test:offline-quiet-motion && npm run test:offline-staged-capture-motion && npm run test:offline-lane-motion && npm run test:offline-capture-lane-motion && npm run test:offline-en-passant-motion && npm run test:offline-castling-motion && npm run test:offline-promotion-motion && npm run test:offline-unified-turn && npm run test:offline-interaction && npm run test:offline-continuous"
   },
   "dependencies": {
     "@google/genai": "1.44.0",

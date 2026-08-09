@@ -117,6 +117,8 @@ LaneMotionCompileStatus validatePhaseMove(
     case MotionPhaseKind::CapturedRemoval:
     case MotionPhaseKind::CastleKing:
     case MotionPhaseKind::CastleRook:
+    case MotionPhaseKind::TemporaryClearanceStage:
+    case MotionPhaseKind::TemporaryClearanceRestore:
       reason = "Only quiet and supported attacker transfer phases support lane motion.";
       return LaneMotionCompileStatus::InvalidPhase;
   }

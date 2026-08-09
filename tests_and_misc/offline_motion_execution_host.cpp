@@ -115,8 +115,9 @@ void verifyCandidateSelectionAndPlanningGuard() {
                 staged.motionTransaction->selectedMove == "e2e4" &&
                 staged.motionTransaction->usedFallback,
             "An unroutable preferred knight move must fall back to the strongest routable root.");
-    require(staged.motionTransaction->fallbackReason.find("No safe route") != std::string::npos,
-            "Physical fallback must retain the preferred move's rejection reason.");
+    require(staged.motionTransaction->fallbackReason.find("lower physical route cost") !=
+                std::string::npos,
+            "Physical fallback must retain the route-cost selection reason.");
   }
 
   {

@@ -484,6 +484,8 @@ CaptureMotionProgram OfflineCaptureMotionCompiler::compile(
     case MotionPhaseKind::QuietTransfer:
     case MotionPhaseKind::CastleKing:
     case MotionPhaseKind::CastleRook:
+    case MotionPhaseKind::TemporaryClearanceStage:
+    case MotionPhaseKind::TemporaryClearanceRestore:
       return reject(
           request,
           CaptureMotionCompileStatus::InvalidPhase,

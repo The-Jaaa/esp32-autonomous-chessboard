@@ -60,6 +60,55 @@
 #define ENABLE_OFFLINE_CONTINUOUS_GAMEPLAY_DIAGNOSTICS 0
 #endif
 
+#ifndef ENABLE_OFFLINE_LED_TRANSFER_PARITY_DIAGNOSTICS
+#define ENABLE_OFFLINE_LED_TRANSFER_PARITY_DIAGNOSTICS 0
+#endif
+
+#if ENABLE_OFFLINE_LED_TRANSFER_PARITY_DIAGNOSTICS && \
+    ENABLE_OFFLINE_EMBEDDED_DIAGNOSTICS
+#error "LED transfer parity cannot run with embedded resource diagnostics."
+#endif
+#if ENABLE_OFFLINE_LED_TRANSFER_PARITY_DIAGNOSTICS && \
+    ENABLE_OFFLINE_OWNERSHIP_DIAGNOSTICS
+#error "LED transfer parity cannot run with ownership diagnostics."
+#endif
+#if ENABLE_OFFLINE_LED_TRANSFER_PARITY_DIAGNOSTICS && \
+    ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS
+#error "LED transfer parity cannot run with runtime diagnostics."
+#endif
+#if ENABLE_OFFLINE_LED_TRANSFER_PARITY_DIAGNOSTICS && \
+    ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS
+#error "LED transfer parity cannot run with phase diagnostics."
+#endif
+#if ENABLE_OFFLINE_LED_TRANSFER_PARITY_DIAGNOSTICS && \
+    ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS
+#error "LED transfer parity cannot run with quiet-motion diagnostics."
+#endif
+#if ENABLE_OFFLINE_LED_TRANSFER_PARITY_DIAGNOSTICS && \
+    ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS
+#error "LED transfer parity cannot run with capture diagnostics."
+#endif
+#if ENABLE_OFFLINE_LED_TRANSFER_PARITY_DIAGNOSTICS && \
+    ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
+#error "LED transfer parity cannot run with lane diagnostics."
+#endif
+
+#if ENABLE_OFFLINE_LED_TRANSFER_PARITY_DIAGNOSTICS
+#undef ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS
+#define ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS 1
+#endif
+
+#ifndef OFFLINE_LED_TRANSFER_FIXTURE
+#define OFFLINE_LED_TRANSFER_FIXTURE 0
+#endif
+
+#if ENABLE_OFFLINE_LED_TRANSFER_PARITY_DIAGNOSTICS && \
+    OFFLINE_LED_TRANSFER_FIXTURE != 0 && \
+    OFFLINE_LED_TRANSFER_FIXTURE != 1 && \
+    OFFLINE_LED_TRANSFER_FIXTURE != 2
+#error "OFFLINE_LED_TRANSFER_FIXTURE must be 0 (LedGallery), 1 (WhiteClearance), or 2 (BlackClearance)."
+#endif
+
 #ifndef OFFLINE_CONTINUOUS_FIXTURE
 #define OFFLINE_CONTINUOUS_FIXTURE 0
 #endif

@@ -38,7 +38,32 @@ enum class MotionPhaseKind {
   CapturedRemoval,
   AttackerFinal,
   CastleKing,
-  CastleRook
+  CastleRook,
+  TemporaryClearanceStage,
+  TemporaryClearanceRestore
+};
+
+struct TemporaryClearanceCandidateScore {
+  std::string pawnFrom;
+  std::string pawnTemp;
+  double totalCost = 0.0;
+  bool preferred = false;
+};
+
+struct TemporaryClearanceRejectedCandidate {
+  std::string pawnFrom;
+  std::string pawnTemp;
+  std::string reason;
+};
+
+struct TemporaryClearanceMetadata {
+  std::string pawnFrom;
+  std::string pawnTemp;
+  char movingColor = '\0';
+  std::string originalPhase;
+  std::string originalBlockedReason;
+  std::vector<TemporaryClearanceCandidateScore> candidateScores;
+  std::vector<TemporaryClearanceRejectedCandidate> rejectedCandidates;
 };
 
 struct MotionPlanningContext {
@@ -61,6 +86,8 @@ struct MotionPhase {
   Occupancy expectedAfter{};
   std::optional<ExternalTransferResult> transfer;
   std::optional<GraveyardRouteCandidate> graveyard;
+  // Clearance phases move a real pawn without changing the chess move.
+  std::optional<MoveInfo> physicalMove;
 };
 
 struct MotionPlan {
@@ -76,6 +103,7 @@ struct MotionPlan {
   std::vector<RejectedMotionStrategy> rejectedStrategies;
   std::string stagingSquare;
   std::string blockedReason;
+  std::vector<TemporaryClearanceMetadata> temporaryClearances;
   Occupancy initialOccupancy{};
   Occupancy finalExpectedOccupancy{};
 

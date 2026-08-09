@@ -548,3 +548,21 @@ red, and extra squares yellow. A separate backend-return run froze at an exact
 untouched boundary with `WAIT`, and the restored production firmware then
 completed verified online `e4 d5` play. Continuous offline production activation
 and persisted restart recovery remain Milestone 6.
+
+## Milestone 5.5 LED And Transfer-Planner Parity
+
+The parity milestone is in progress. Its first isolated commit establishes the
+fixed sideways LED text orientation and the online physical palette while
+preserving the measured 16x16 mapping. The second change centralizes temporary
+pawn clearance in the offline planner, after ordinary board and lane routes,
+and exposes deterministic stage/transfer/restore metadata.
+
+Focused host regressions pass. The clean tracked production image remains
+`1,083,819` flash / `48,768` static RAM. The three parity diagnostic variants
+compile with motors locked: the LED gallery is `1,134,535` flash / `53,744`
+RAM, White clearance is `1,276,443` / `53,744`, and Black clearance is
+`1,276,507` / `53,744`. The live worktree has unrelated uncommitted speaker
+changes, so its production image is not used as the baseline evidence.
+
+Final parity acceptance still requires the guarded serial gallery check and
+the remaining full foundation gate before this milestone is marked complete.

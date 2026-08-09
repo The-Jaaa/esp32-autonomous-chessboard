@@ -193,10 +193,34 @@ UnifiedMotionProgram unsupported(
   return result;
 }
 
+UnifiedMotionProgram compileTemporaryClearance(
+    const OfflinePhaseExecutionRequest& request) {
+  if (!request.phase.physicalMove) {
+    return unsupported(request, "Temporary clearance phase is missing its pawn move.");
+  }
+  OfflinePhaseExecutionRequest normalized = request;
+  normalized.move = *request.phase.physicalMove;
+  normalized.phase.kind = MotionPhaseKind::QuietTransfer;
+  normalized.graveyardSlotKey.clear();
+  normalized.graveyardState = GraveyardSlotState::Free;
+  const QuietMotionProgram quiet = OfflineQuietMotionCompiler{}.compile(normalized);
+  CaptureMotionProgram program = normalizeQuiet(normalized, quiet);
+  program.phaseKind = request.phase.kind;
+  program.moveUci = request.phase.physicalMove->uci;
+  return finish(
+      UnifiedMotionCompilerKind::Quiet,
+      quietMotionCompileStatusName(quiet.status),
+      std::move(program));
+}
+
 }  // namespace
 
 UnifiedMotionProgram OfflineUnifiedMotionCompiler::compile(
     const OfflinePhaseExecutionRequest& request) const {
+  if (request.phase.kind == MotionPhaseKind::TemporaryClearanceStage ||
+      request.phase.kind == MotionPhaseKind::TemporaryClearanceRestore) {
+    return compileTemporaryClearance(request);
+  }
   if (!request.move.promotion.empty()) {
     CaptureMotionProgram program = OfflinePromotionMotionCompiler{}.compile(request);
     return finish(
@@ -225,6 +249,9 @@ UnifiedMotionProgram OfflineUnifiedMotionCompiler::compile(
     }
     case MotionPhaseKind::QuietTransfer:
       break;
+    case MotionPhaseKind::TemporaryClearanceStage:
+    case MotionPhaseKind::TemporaryClearanceRestore:
+      return unsupported(request, "Temporary clearance dispatch was not normalized.");
   }
 
   if (request.move.capture || request.move.enPassant || request.move.castling) {

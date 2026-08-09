@@ -1459,3 +1459,60 @@ chess moves, motor activity, or magnet activation. The verifier then restored
 the exact `1,083,819` byte flash / `48,768` byte RAM production build. A final
 online regression committed human `e2e4` and robot `d7d5` with no pending job,
 motion transaction, synchronization warning, or error.
+
+## Milestone 5.5 LED And Transfer-Planner Parity
+
+`codex/offline-led-transfer-parity` aligns the host-only offline feedback layer
+with the established online physical-board behavior. Compact status text now
+uses one fixed sideways orientation: glyphs run along the file axis, their tops
+face rank 8, and text is rendered before square/action overlays so the two
+layers do not overwrite each other. The renderer keeps the measured C and H
+row orientations and maps all 256 matrix positions bijectively.
+
+The offline palette now uses the online physical roles: detected setup squares
+are green, missing squares are red, extra squares are amber, source squares are
+blue, quiet targets are green, captures are red, special moves are purple,
+checks are red, and terminal winner/draw states are green/purple. `WAIT`,
+`SET`, `SIDE`, and `CLR` remain amber; `AI` is blue; `ERR` is red; and `GO`/
+`OK` are green. Deliberate animation steps are explicit and unchanged frames
+are suppressed. Core 0 submits complete frames through the mailbox while core
+1 remains the only owner of `strip.show()`.
+
+Temporary pawn clearance is now part of the central `OfflineMotionPlanner`.
+Board, lane, and lane-board routes are attempted first. Only when those routes
+are blocked does the planner consider one same-color pawn: one legal forward
+step, or two from its starting rank, with both squares clear. The moving piece,
+reserved choreography squares, captured pieces, graveyard slots, and opposite
+color pawns are excluded. Candidates are deterministic and carry rejected
+reasons and total stage/transfer/restore cost. A selected candidate produces
+`TemporaryClearanceStage`, the original transfer phase, and
+`TemporaryClearanceRestore`; chess state remains unchanged until all phases
+verify. The unified compiler executes those phases through the existing guarded
+primitive vocabulary.
+
+Host checks:
+
+```powershell
+cd app
+npm run test:offline-led-parity
+npm run test:offline-temporary-clearance
+```
+
+The focused regressions prove the mapping, fixed orientation, online palette,
+deterministic frames, logical-state immutability, and the expected `h2-h4`,
+`h7-h5`, and `a2-a4` clearance choices. The existing motion corpus still
+covers captures, en passant, castling, promotions, lane routes, graveyards,
+failures, and deterministic repeat planning.
+
+The motor-locked firmware diagnostic is enabled with
+`ENABLE_OFFLINE_LED_TRANSFER_PARITY_DIAGNOSTICS=1` and uses fixtures
+`LedGallery`, `WhiteClearance`, and `BlackClearance`. The gallery submits all
+feedback roles and promotion glyphs. The clearance fixtures only inspect the
+planner and render its phases; they never move a motor or energize the magnet.
+Use `tools/verify-offline-led-transfer-parity.ps1` for compile-only checks or
+an optional guarded serial session. The clean tracked production baseline is
+`1,083,819` flash bytes and `48,768` static RAM. The current working tree also
+contains separate uncommitted speaker/audio files; those are intentionally not
+part of this milestone and can make a live-tree production build larger.
+
+This milestone remains pending its final parity acceptance and isolated commit.
