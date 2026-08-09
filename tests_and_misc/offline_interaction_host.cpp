@@ -146,8 +146,8 @@ void verifyFeedbackFrames() {
                   offline::squareToRawIndex("b7") * 4)] == offline::led_colors::kYellow,
           "Setup missing/extra colors changed.");
   require(setupFrame[static_cast<std::size_t>(
-              offline::squareToRawIndex("a2") * 4)] == offline::led_colors::kCyan,
-          "Detected setup squares were not shown in cyan.");
+              offline::squareToRawIndex("a2") * 4)] == offline::led_colors::kCorrect,
+          "Detected setup squares were not shown in green.");
 
   OfflineFeedbackInput sideSelection{};
   sideSelection.state = OfflineFeedbackState::SideSelection;

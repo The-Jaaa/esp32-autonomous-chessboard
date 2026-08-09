@@ -30,14 +30,16 @@ using LedFrame = std::array<LedColor, 256>;
 
 namespace led_colors {
 inline constexpr LedColor kOff{0, 0, 0};
-inline constexpr LedColor kBlue{0, 70, 255};
-inline constexpr LedColor kGreen{0, 220, 60};
-inline constexpr LedColor kRed{255, 20, 10};
-inline constexpr LedColor kPurple{180, 80, 255};
-inline constexpr LedColor kYellow{255, 180, 0};
+// These values mirror the online board's physical LED command palette.
+inline constexpr LedColor kBlue{0, 96, 255};
+inline constexpr LedColor kCorrect{0, 180, 60};
+inline constexpr LedColor kGreen{0, 220, 80};
+inline constexpr LedColor kRed{255, 32, 32};
+inline constexpr LedColor kCheck{255, 0, 0};
+inline constexpr LedColor kPurple{170, 70, 255};
+inline constexpr LedColor kYellow{255, 170, 0};
 inline constexpr LedColor kAmber{255, 100, 0};
 inline constexpr LedColor kWhite{200, 200, 200};
-inline constexpr LedColor kCyan{0, 190, 220};
 }  // namespace led_colors
 
 enum class OfflineFeedbackState {

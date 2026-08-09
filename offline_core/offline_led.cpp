@@ -46,6 +46,7 @@ constexpr Glyph7x9 kLargeBishop =
     {{0x7E, 0x41, 0x41, 0x41, 0x7E, 0x41, 0x41, 0x41, 0x7E}};
 constexpr Glyph7x9 kLargeKnight =
     {{0x41, 0x61, 0x61, 0x51, 0x49, 0x45, 0x43, 0x43, 0x41}};
+constexpr std::size_t kLargeGlyphWidth = 7;
 
 const Glyph7x9* promotionGlyph(char piece) {
   switch (static_cast<char>(std::tolower(static_cast<unsigned char>(piece)))) {
@@ -90,7 +91,7 @@ void drawDifference(LedFrame& frame, const OccupancyDiff& difference) {
 void drawDetectedSquares(
     LedFrame& frame, const std::vector<std::string>& detectedSquares) {
   for (const std::string& square : detectedSquares) {
-    OfflineLedRenderer::setSquareColor(frame, square, led_colors::kCyan);
+    OfflineLedRenderer::setSquareColor(frame, square, led_colors::kCorrect);
   }
 }
 
@@ -171,8 +172,8 @@ bool OfflineLedRenderer::drawCompactText(
     LedFrame& frame, std::string_view text, LedColor color) {
   if (text.empty() || text.size() > 4) return false;
   const std::size_t width = text.size() * 3 + text.size() - 1;
-  const std::size_t left = (kWidth - width) / 2;
-  const std::size_t top = (kHeight - 5) / 2;
+  const std::size_t left = (kHeight - width) / 2;
+  const std::size_t top = (kWidth - 5) / 2;
   for (std::size_t character = 0; character < text.size(); ++character) {
     const char normalized = static_cast<char>(
         std::toupper(static_cast<unsigned char>(text[character])));
@@ -182,7 +183,13 @@ bool OfflineLedRenderer::drawCompactText(
     for (std::size_t row = 0; row < glyph.size(); ++row) {
       for (std::size_t column = 0; column < 3; ++column) {
         if ((glyph[row] & (1U << (2U - column))) != 0) {
-          setMatrixPixel(frame, top + row, left + character * 4 + column, color);
+          // Characters run from file A toward H. Reversing the glyph rows
+          // keeps the tops toward rank 8, matching the physical sketch.
+          setMatrixPixel(
+              frame,
+              left + character * 4 + column,
+              top + glyph.size() - 1 - row,
+              color);
         }
       }
     }
@@ -194,12 +201,16 @@ bool OfflineLedRenderer::drawPromotionLetter(
     LedFrame& frame, char piece, LedColor color) {
   const Glyph7x9* glyph = promotionGlyph(piece);
   if (!glyph) return false;
-  constexpr std::size_t top = 3;
-  constexpr std::size_t left = 4;
+  constexpr std::size_t left = 3;
+  constexpr std::size_t top = 4;
   for (std::size_t row = 0; row < glyph->size(); ++row) {
     for (std::size_t column = 0; column < 7; ++column) {
       if (((*glyph)[row] & (1U << (6U - column))) != 0) {
-        setMatrixPixel(frame, top + row, left + column, color);
+        setMatrixPixel(
+            frame,
+            left + row,
+            top + kLargeGlyphWidth - 1 - column,
+            color);
       }
     }
   }
@@ -247,7 +258,7 @@ LedFrame OfflineLedRenderer::render(const OfflineFeedbackInput& input) {
       break;
     case OfflineFeedbackState::RobotExecuting:
       for (const std::string& square : input.robotPathSquares) {
-        setSquareColor(frame, square, led_colors::kCyan);
+        setSquareColor(frame, square, led_colors::kGreen);
       }
       drawHighlights(frame, input.highlights);
       break;
@@ -260,15 +271,15 @@ LedFrame OfflineLedRenderer::render(const OfflineFeedbackInput& input) {
       break;
     case OfflineFeedbackState::Check:
       if (input.checkedKingSquare && input.animationOn) {
-        setSquareColor(frame, *input.checkedKingSquare, led_colors::kRed);
+        setSquareColor(frame, *input.checkedKingSquare, led_colors::kCheck);
       }
       break;
     case OfflineFeedbackState::Checkmate:
       if (input.losingKingSquare) {
-        drawKingHalo(frame, *input.losingKingSquare, led_colors::kRed);
+        drawKingHalo(frame, *input.losingKingSquare, led_colors::kCheck);
         setSquareColor(
             frame, *input.losingKingSquare,
-            input.animationOn ? led_colors::kRed : led_colors::kOff);
+            input.animationOn ? led_colors::kCheck : led_colors::kOff);
       }
       if (input.winningKingSquare) {
         drawKingHalo(frame, *input.winningKingSquare, led_colors::kGreen);

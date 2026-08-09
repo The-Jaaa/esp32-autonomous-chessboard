@@ -154,7 +154,7 @@ void verifyClearFrameAndInvalidGameOver() {
   const LedFrame actual = OfflineLedRenderer::render(input);
   LedFrame expected{};
   OfflineLedRenderer::drawCompactText(expected, "CLR", offline::led_colors::kAmber);
-  OfflineLedRenderer::setSquareColor(expected, "a2", offline::led_colors::kCyan);
+  OfflineLedRenderer::setSquareColor(expected, "a2", offline::led_colors::kCorrect);
   OfflineLedRenderer::setSquareColor(expected, "a7", offline::led_colors::kRed);
   OfflineLedRenderer::setSquareColor(expected, "a3", offline::led_colors::kYellow);
   require(actual == expected, "CLR setup feedback did not show exact occupancy.");

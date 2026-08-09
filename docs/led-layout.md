@@ -69,3 +69,17 @@ column 1. For chess square `<letter><number>`:
 
 This mapping was physically measured one LED at a time and confirmed from the
 annotated board photograph on 2026-07-17.
+
+## Offline Text Orientation
+
+Offline status text uses the same physical matrix coordinates as this mapping.
+The letters run across the file axis from the A side toward the H side, while
+each glyph's top points toward rank 8. Text is therefore sideways relative to
+the usual chess rank labels, with the glyphs transposed into the 16x16 matrix
+instead of being rotated toward only one player.
+
+Compact status text uses 3x5 glyphs with one matrix column between characters.
+The text is centered on both axes. Promotion letters use a 7x9 glyph, transposed
+with the same orientation and centered in the matrix. The renderer draws text
+first and then explicit square feedback on top, so missing, extra, source,
+target, and result squares remain visible without accidental glyph overlap.
