@@ -8,6 +8,23 @@ const outputDir = path.join(root, 'tmp', 'offline-interaction');
 const executablePath = path.join(outputDir, 'offline_interaction_host.exe');
 fs.mkdirSync(outputDir, { recursive: true });
 
+const firmwareSource = fs.readFileSync(
+  path.join(root, 'esp32_firmware', 'esp32_firmware.ino'),
+  'utf8'
+);
+const interactionDiagnosticSource = fs.readFileSync(
+  path.join(root, 'esp32_firmware', 'offline_interaction_diagnostic.inc'),
+  'utf8'
+);
+assert.match(firmwareSource, /OFFLINE_HOME_MAX_SPEED\s*=\s*3000\.0f/,
+  'Guarded homing must use the accepted low-speed limit approach.');
+assert.match(firmwareSource,
+  /executeOfflineQuietHome[\s\S]*?setOfflineHomeMotionProfile\(\)/,
+  'Guarded homing must select its dedicated motion profile.');
+assert.match(interactionDiagnosticSource,
+  /physical\(\)\.phase\(\)\s*==\s*\n?\s*offline::PhysicalPhase::Ready/,
+  'Human-ready feedback must not overwrite active piece-lift targets.');
+
 const compiler = process.env.CXX || 'g++';
 const sources = [
   'offline_game.cpp',

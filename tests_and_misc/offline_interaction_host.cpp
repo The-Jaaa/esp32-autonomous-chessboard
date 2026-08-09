@@ -145,6 +145,15 @@ void verifyFeedbackFrames() {
                   offline::squareToRawIndex("b7") * 4)] == offline::led_colors::kYellow,
           "Setup missing/extra colors changed.");
 
+  OfflineFeedbackInput sideSelection{};
+  sideSelection.state = OfflineFeedbackState::SideSelection;
+  sideSelection.animationOn = true;
+  LedFrame expectedSideSelection{};
+  OfflineLedRenderer::drawCompactText(
+      expectedSideSelection, "SIDE", offline::led_colors::kAmber);
+  require(OfflineLedRenderer::render(sideSelection) == expectedSideSelection,
+          "Side selection overlays obscure the SIDE label.");
+
   const std::vector<OfflineFeedbackState> states = {
       OfflineFeedbackState::Wait,
       OfflineFeedbackState::Setup,

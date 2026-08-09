@@ -495,7 +495,13 @@ void runOfflineInteractionDiagnostic() {
           offline::compareOccupancy(runtime.expectedSetupOccupancy(), occupancy));
     } else if (runtime.phase() == offline::OfflineRuntimePhase::HumanTurn) {
       diagnostic.recoveryRequired = false;
-      showInteractionStatus(offline::OfflineFeedbackState::HumanReady);
+      // Piece-lift feedback must remain visible until the interpreter returns
+      // to its exact ready phase. The runtime remains in HumanTurn while a
+      // source is lifted, so checking only the runtime phase erases targets.
+      if (runtime.coordinator().physical().phase() ==
+          offline::PhysicalPhase::Ready) {
+        showInteractionStatus(offline::OfflineFeedbackState::HumanReady);
+      }
     } else if (runtime.phase() == offline::OfflineRuntimePhase::HumanPromotionPending &&
                humanPromotion) {
       if (!handleInteractionHumanPromotion(

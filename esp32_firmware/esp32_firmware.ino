@@ -1029,6 +1029,15 @@ constexpr long OFFLINE_HOME_RELEASE_INCREMENT_STEPS = 100;
 constexpr long OFFLINE_HOME_MAX_RELEASE_STEPS = 1200;
 constexpr long OFFLINE_HOME_FINAL_RELEASE_STEPS = 100;
 constexpr long OFFLINE_HOME_APPROACH_STEPS = 1000000;
+constexpr float OFFLINE_HOME_MAX_SPEED = 3000.0f;
+constexpr float OFFLINE_HOME_ACCEL = 2000.0f;
+
+void setOfflineHomeMotionProfile() {
+  motorA.setMaxSpeed(OFFLINE_HOME_MAX_SPEED);
+  motorA.setAcceleration(OFFLINE_HOME_ACCEL);
+  motorB.setMaxSpeed(OFFLINE_HOME_MAX_SPEED);
+  motorB.setAcceleration(OFFLINE_HOME_ACCEL);
+}
 
 void copyOfflineQuietOccupancy(offline::Occupancy& occupancy) {
   for (std::size_t index = 0; index < occupancy.size(); ++index) {
@@ -1199,7 +1208,7 @@ bool homeOfflineQuietAxis(
 bool executeOfflineQuietHome(OfflineQuietHardwareResult& result) {
   offlineQuietMagnetAuthorized = false;
   digitalWrite(MAGNET_PIN, LOW);
-  setMotionProfile(false);
+  setOfflineHomeMotionProfile();
   String error;
 
   // CoreXY negative X is A positive/B negative; positive X releases it.

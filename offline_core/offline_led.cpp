@@ -214,10 +214,6 @@ LedFrame OfflineLedRenderer::render(const OfflineFeedbackInput& input) {
       break;
     case OfflineFeedbackState::SideSelection:
       drawCompactText(frame, "SIDE", led_colors::kAmber);
-      if (input.animationOn) {
-        setSquareColor(frame, "e1", led_colors::kWhite);
-        setSquareColor(frame, "e8", led_colors::kBlue);
-      }
       break;
     case OfflineFeedbackState::SideSelected:
       if (input.selectedColor) {
