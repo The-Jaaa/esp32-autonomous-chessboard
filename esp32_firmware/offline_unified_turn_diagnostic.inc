@@ -116,8 +116,9 @@ bool ownershipStillAllowsUnified(String& error) {
   if (!copyOfflineOwnershipDiagnosticSnapshot(ownership) || !ownership.valid) {
     return true;
   }
-  if (ownership.handoffRequired ||
-      ownership.state == offline::OwnershipState::ReconnectPending) {
+  if ((ownership.handoffRequired ||
+       ownership.state == offline::OwnershipState::ReconnectPending) &&
+      !ENABLE_OFFLINE_CONTINUOUS_GAMEPLAY_DIAGNOSTICS) {
     error = "Server handoff became pending during the unified diagnostic.";
     return false;
   }
@@ -207,7 +208,8 @@ bool handleUnifiedPromotion(
   prompt["message"] = message;
   emitDocument(prompt);
 
-#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_CONTINUOUS_GAMEPLAY_DIAGNOSTICS
   offline::OfflineFeedbackInput promotionFeedback;
   promotionFeedback.state = offline::OfflineFeedbackState::PromotionChoice;
   promotionFeedback.promotionSquare = move.to;
@@ -219,7 +221,8 @@ bool handleUnifiedPromotion(
 #endif
 
   const std::uint32_t startedAt = millis();
-#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_CONTINUOUS_GAMEPLAY_DIAGNOSTICS
   std::uint32_t replacementReadySince = 0;
 #endif
   while (millis() - startedAt < kUnifiedPromotionTimeoutMs) {
@@ -230,7 +233,8 @@ bool handleUnifiedPromotion(
       vTaskDelay(pdMS_TO_TICKS(kLoopDelayMs));
       continue;
     }
-#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_CONTINUOUS_GAMEPLAY_DIAGNOSTICS
     if (revision == consumedRevision) {
       if (replacementReadySince != 0 &&
           millis() - replacementReadySince >= 500 &&
@@ -276,7 +280,8 @@ bool handleUnifiedPromotion(
     }
     if (replacement.state() == offline::PromotionReplacementState::ReadyToConfirm &&
         adapter.state() == offline::OfflinePhaseExecutionState::PromotionPending) {
-#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_CONTINUOUS_GAMEPLAY_DIAGNOSTICS
       replacementReadySince = millis();
 #else
       replacement.confirm(piece, occupancy);

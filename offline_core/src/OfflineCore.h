@@ -18,6 +18,7 @@
 #include "../offline_capture_motion.h"
 #include "../offline_castling_motion.h"
 #include "../offline_coordinator.h"
+#include "../offline_continuous.h"
 #include "../offline_engine.h"
 #include "../offline_external_route.h"
 #include "../offline_game.h"

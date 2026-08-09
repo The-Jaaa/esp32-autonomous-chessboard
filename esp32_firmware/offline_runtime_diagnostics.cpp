@@ -77,11 +77,16 @@ constexpr bool kUnifiedTurnDiagnostic =
     ENABLE_OFFLINE_UNIFIED_TURN_DIAGNOSTICS != 0;
 constexpr bool kInteractionDiagnostic =
     ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS != 0;
+constexpr bool kContinuousGameplayDiagnostic =
+    ENABLE_OFFLINE_CONTINUOUS_GAMEPLAY_DIAGNOSTICS != 0;
 constexpr bool kLaneMotionDiagnostic =
     ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS != 0;
 constexpr bool kLaneBoardFixture = OFFLINE_LANE_MOTION_FIXTURE == 1;
 
 const char* diagnosticPrefix() {
+  if (kContinuousGameplayDiagnostic) {
+    return "OFFLINE_GAME_DIAG";
+  }
   if (kInteractionDiagnostic) {
     return "OFFLINE_INTERACTION_DIAG";
   }
@@ -2113,10 +2118,15 @@ void emitPromotionSummary(
 #endif
 
 #if ENABLE_OFFLINE_UNIFIED_TURN_DIAGNOSTICS || \
-    ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+    ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_CONTINUOUS_GAMEPLAY_DIAGNOSTICS
 #include "offline_unified_turn_diagnostic.inc"
-#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_CONTINUOUS_GAMEPLAY_DIAGNOSTICS
 #include "offline_interaction_diagnostic.inc"
+#endif
+#if ENABLE_OFFLINE_CONTINUOUS_GAMEPLAY_DIAGNOSTICS
+#include "offline_continuous_gameplay_diagnostic.inc"
 #endif
 #endif
 
@@ -2588,7 +2598,11 @@ void runtimeTask(void*) {
   start["humanColor"] = "white";
   start["searchTimeMs"] = 3000;
   start["maxDepth"] = 12;
-  if (kInteractionDiagnostic) {
+  if (kContinuousGameplayDiagnostic) {
+    start["fixture"] = OFFLINE_CONTINUOUS_FIXTURE == 0
+        ? "Standard" : "TerminalReset";
+    start["targetTurns"] = OFFLINE_CONTINUOUS_FIXTURE == 0 ? 12 : 1;
+  } else if (kInteractionDiagnostic) {
     start["fixture"] = OFFLINE_INTERACTION_FIXTURE == 0
         ? "Standard"
         : (OFFLINE_INTERACTION_FIXTURE == 1
@@ -2636,6 +2650,13 @@ void runtimeTask(void*) {
 
 #if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
   runOfflineInteractionDiagnostic();
+  summaryEmitted = true;
+  vTaskDelete(nullptr);
+  return;
+#endif
+
+#if ENABLE_OFFLINE_CONTINUOUS_GAMEPLAY_DIAGNOSTICS
+  runOfflineContinuousGameplayDiagnostic();
   summaryEmitted = true;
   vTaskDelete(nullptr);
   return;

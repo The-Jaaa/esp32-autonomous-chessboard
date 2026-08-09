@@ -520,3 +520,31 @@ completed three human moves (`e4`, `exd5`, `c4`) and three distinct verified
 robot replies (`d5`, `c6`, `cxd5`) without a synchronization or motion error.
 Continuous offline play and automatic online/offline ownership remain later
 milestones.
+
+## Milestone 5 Guarded Continuous Gameplay
+
+The default-off continuous diagnostic now loops the accepted interaction,
+engine, route, promotion, and phase-execution layers without resetting state
+between turns. Robot graveyard slots remain occupied for the game, Human Black
+gets one White opener, and every next human turn requires an exact verified
+boundary. A session generation rejects work left over from an earlier game.
+
+The terminal reset is deliberately physical and difficult to trigger by
+accident: only both current king squares may be empty, both kings must remain
+lifted for two seconds, and the standard setup must later remain exact for 500
+ms. `CLR` tells the user to clear unsensed Z/I areas before choosing a new side.
+
+The portable reset/session regression and the Standard embedded build pass.
+The final Standard diagnostic compiles at `1,444,227` bytes flash and `54,352`
+bytes static RAM; TerminalReset compiles at `1,444,311 / 54,352`. Production
+remains exactly `1,083,819 / 48,768`.
+
+Milestone 5 is accepted. Standard play completed 12 full human/robot turns and
+retained six graveyard slots without duplicate commits or unresolved recovery.
+TerminalReset completed the controlled castling checkmate, two-king reset,
+standard-board restoration, Human Black opener, and one further complete turn.
+Setup and reset LEDs now show detected required squares cyan, missing squares
+red, and extra squares yellow. A separate backend-return run froze at an exact
+untouched boundary with `WAIT`, and the restored production firmware then
+completed verified online `e4 d5` play. Continuous offline production activation
+and persisted restart recovery remain Milestone 6.

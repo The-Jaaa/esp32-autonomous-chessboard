@@ -87,6 +87,13 @@ void drawDifference(LedFrame& frame, const OccupancyDiff& difference) {
   }
 }
 
+void drawDetectedSquares(
+    LedFrame& frame, const std::vector<std::string>& detectedSquares) {
+  for (const std::string& square : detectedSquares) {
+    OfflineLedRenderer::setSquareColor(frame, square, led_colors::kCyan);
+  }
+}
+
 void drawKingHalo(LedFrame& frame, std::string_view square, LedColor color) {
   if (square.size() != 2) return;
   const int file = square[0] - 'a';
@@ -210,6 +217,12 @@ LedFrame OfflineLedRenderer::render(const OfflineFeedbackInput& input) {
       break;
     case OfflineFeedbackState::Setup:
       drawCompactText(frame, "SET", led_colors::kAmber);
+      drawDetectedSquares(frame, input.detectedSquares);
+      drawDifference(frame, input.difference);
+      break;
+    case OfflineFeedbackState::ClearGraveyards:
+      drawCompactText(frame, "CLR", led_colors::kAmber);
+      drawDetectedSquares(frame, input.detectedSquares);
       drawDifference(frame, input.difference);
       break;
     case OfflineFeedbackState::SideSelection:
@@ -293,6 +306,7 @@ const char* offlineFeedbackStateName(OfflineFeedbackState state) {
     case OfflineFeedbackState::Clear: return "clear";
     case OfflineFeedbackState::Wait: return "wait";
     case OfflineFeedbackState::Setup: return "setup";
+    case OfflineFeedbackState::ClearGraveyards: return "clear_graveyards";
     case OfflineFeedbackState::SideSelection: return "side_selection";
     case OfflineFeedbackState::SideSelected: return "side_selected";
     case OfflineFeedbackState::HumanReady: return "human_ready";

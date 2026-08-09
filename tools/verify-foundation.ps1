@@ -86,6 +86,10 @@ if (-not $SkipFirmware) {
     Invoke-Checked 'ESP32 guarded production interaction diagnostic firmware builds' {
         & (Join-Path $PSScriptRoot 'verify-offline-interaction.ps1')
     }
+    Invoke-Checked 'ESP32 guarded continuous-gameplay diagnostic firmware builds' {
+        & (Join-Path $PSScriptRoot 'verify-offline-continuous-gameplay.ps1')
+        & (Join-Path $PSScriptRoot 'verify-offline-continuous-gameplay.ps1') -Fixture TerminalReset
+    }
 }
 
 Write-Host "`nFoundation verification passed." -ForegroundColor Green

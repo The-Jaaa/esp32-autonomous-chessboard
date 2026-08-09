@@ -44,6 +44,7 @@ enum class OfflineFeedbackState {
   Clear,
   Wait,
   Setup,
+  ClearGraveyards,
   SideSelection,
   SideSelected,
   HumanReady,
@@ -64,6 +65,7 @@ struct OfflineFeedbackInput {
   OfflineFeedbackState state = OfflineFeedbackState::Clear;
   std::vector<Highlight> highlights;
   OccupancyDiff difference;
+  std::vector<std::string> detectedSquares;
   std::vector<std::string> robotPathSquares;
   std::optional<HumanColor> selectedColor;
   std::optional<std::string> checkedKingSquare;

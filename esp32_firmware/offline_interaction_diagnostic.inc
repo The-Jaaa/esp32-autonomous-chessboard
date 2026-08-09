@@ -52,6 +52,22 @@ void showInteractionDifference(
   showInteractionFeedback(input);
 }
 
+void showInteractionSetupFeedback(
+    offline::OfflineFeedbackState state,
+    const offline::Occupancy& expected,
+    const offline::Occupancy& actual) {
+  offline::OfflineFeedbackInput input;
+  input.state = state;
+  input.difference = offline::compareOccupancy(expected, actual);
+  for (std::size_t index = 0; index < expected.size(); ++index) {
+    if (expected[index] && actual[index]) {
+      input.detectedSquares.push_back(
+          offline::rawIndexToSquare(static_cast<int>(index)));
+    }
+  }
+  showInteractionFeedback(input);
+}
+
 void emitInteractionEvent(
     const char* type,
     const char* event,
@@ -83,7 +99,8 @@ bool waitForInteractionSetup(
       if (difference.empty()) {
         if (exactSince == 0) {
           exactSince = millis();
-          showInteractionDifference(offline::OfflineFeedbackState::Setup, difference);
+          showInteractionSetupFeedback(
+              offline::OfflineFeedbackState::Setup, expected, occupancy);
         }
         if (millis() - exactSince >= kInteractionSetupStableMs) {
           diagnostic.setupObserved = true;
@@ -92,7 +109,8 @@ bool waitForInteractionSetup(
         }
       } else {
         exactSince = 0;
-        showInteractionDifference(offline::OfflineFeedbackState::Setup, difference);
+        showInteractionSetupFeedback(
+            offline::OfflineFeedbackState::Setup, expected, occupancy);
         if (revision != lastLoggedRevision) {
           lastLoggedRevision = revision;
           DynamicJsonDocument event(1024);

@@ -1,6 +1,7 @@
 #include "offline_interaction_feedback.h"
 
-#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_CONTINUOUS_GAMEPLAY_DIAGNOSTICS
 
 #include <Adafruit_NeoPixel.h>
 #include <ArduinoJson.h>
@@ -60,7 +61,13 @@ void submitOfflineInteractionFrame(
     document["animationStep"] = deliberateAnimationStep;
     String payload;
     serializeJson(document, payload);
-    emitOfflineDiagnosticJson("OFFLINE_INTERACTION_DIAG", payload);
+    emitOfflineDiagnosticJson(
+#if ENABLE_OFFLINE_CONTINUOUS_GAMEPLAY_DIAGNOSTICS
+        "OFFLINE_GAME_DIAG",
+#else
+        "OFFLINE_INTERACTION_DIAG",
+#endif
+        payload);
   }
 }
 

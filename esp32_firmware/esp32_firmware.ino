@@ -339,7 +339,8 @@ void loop() {
     ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
   publishOfflineRuntimeStableSnapshot(stableOccupancy, millis());
 #endif
-#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_CONTINUOUS_GAMEPLAY_DIAGNOSTICS
   serviceOfflineInteractionFrame();
 #elif ENABLE_OFFLINE_OWNERSHIP_DIAGNOSTICS || ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || \
     ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS || \
@@ -462,7 +463,8 @@ void scanSensors() {
     if (gap > offlineRuntimeSensorMaxGapMs) {
       offlineRuntimeSensorMaxGapMs = gap;
     }
-#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_CONTINUOUS_GAMEPLAY_DIAGNOSTICS
     recordOfflineInteractionSensorGap(gap);
 #endif
   }
@@ -1358,7 +1360,8 @@ bool executeOfflineCaptureProgram(
     }
     switch (primitive.kind) {
       case offline::CaptureMotionPrimitiveKind::TravelBoard:
-#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_CONTINUOUS_GAMEPLAY_DIAGNOSTICS
         setOfflineInteractionSensorStage(OfflineInteractionSensorStage::Travel);
 #endif
         if (primitive.targetRawIndex < 0 || primitive.targetRawIndex >= 64) {
@@ -1371,7 +1374,8 @@ bool executeOfflineCaptureProgram(
         goToSquare(primitive.targetRawIndex, false);
         break;
       case offline::CaptureMotionPrimitiveKind::Pickup:
-#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_CONTINUOUS_GAMEPLAY_DIAGNOSTICS
         setOfflineInteractionSensorStage(OfflineInteractionSensorStage::Pickup);
 #endif
         if (pickedUp) {
@@ -1385,7 +1389,8 @@ bool executeOfflineCaptureProgram(
         offlineQuietDelayWithSensorScans(160);
         break;
       case offline::CaptureMotionPrimitiveKind::DragBoard:
-#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_CONTINUOUS_GAMEPLAY_DIAGNOSTICS
         setOfflineInteractionSensorStage(OfflineInteractionSensorStage::Drag);
 #endif
         if (!pickedUp || primitive.targetRawIndex < 0 ||
@@ -1404,7 +1409,8 @@ bool executeOfflineCaptureProgram(
         }
         break;
       case offline::CaptureMotionPrimitiveKind::DragCoordinate:
-#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_CONTINUOUS_GAMEPLAY_DIAGNOSTICS
         setOfflineInteractionSensorStage(OfflineInteractionSensorStage::Drag);
 #endif
         if (!pickedUp || !isfinite(primitive.targetX) ||
@@ -1422,7 +1428,8 @@ bool executeOfflineCaptureProgram(
             true);
         break;
       case offline::CaptureMotionPrimitiveKind::Drop:
-#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_CONTINUOUS_GAMEPLAY_DIAGNOSTICS
         setOfflineInteractionSensorStage(OfflineInteractionSensorStage::Drop);
 #endif
         if (!pickedUp) {
@@ -1435,7 +1442,8 @@ bool executeOfflineCaptureProgram(
         offlineQuietDelayWithSensorScans(80);
         break;
       case offline::CaptureMotionPrimitiveKind::Verify:
-#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_CONTINUOUS_GAMEPLAY_DIAGNOSTICS
         setOfflineInteractionSensorStage(OfflineInteractionSensorStage::Verify);
 #endif
         if (pickedUp) {
@@ -1452,7 +1460,8 @@ bool executeOfflineCaptureProgram(
       program.phaseKind == offline::MotionPhaseKind::CapturedRemoval
           ? OFFLINE_GRAVEYARD_STABLE_MS
           : 0;
-#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS || \
+    ENABLE_OFFLINE_CONTINUOUS_GAMEPLAY_DIAGNOSTICS
   setOfflineInteractionSensorStage(OfflineInteractionSensorStage::Settle);
 #endif
   if (!waitForOfflineQuietOccupancy(

@@ -1392,3 +1392,70 @@ gate pass. The guarded real-board gate is also accepted:
 
 The gate remains default-off. Continuous offline play is intentionally deferred
 to Milestone 5.
+
+## Guarded Continuous Offline Gameplay
+
+`ENABLE_OFFLINE_CONTINUOUS_GAMEPLAY_DIAGNOSTICS` extends the accepted
+interaction gate into a complete game loop while remaining default-off. The
+runtime keeps one coordinator, phase adapter, and robot-graveyard reservation
+set alive for the entire game. Each verified robot reply reopens the next human
+turn only after the complete sensed occupancy has remained exact for 500 ms.
+Engine and phase work is tagged with the current offline session generation so
+results from a previous game cannot advance a new one.
+
+The Standard fixture supports Human White or Human Black from the normal setup
+and emits a non-terminal acceptance checkpoint after 12 complete human/robot
+turns. Human Black receives exactly one verified White opening move before
+input opens. Captures, en passant, castling, board and external-lane routes,
+graveyard reservations, and human or robot promotions continue through the
+same accepted planners and verification transactions.
+
+At checkmate or draw, result feedback remains displayed. Starting another game
+requires lifting only the two kings from their actual terminal squares for two
+seconds. An early replacement cancels the gesture; any unrelated disturbance
+requires restoring the terminal position. Once latched, `CLR` remains visible
+while Z/I graveyards are cleared and the standard board is restored. Holding
+standard occupancy for 500 ms returns to side selection and starts a fresh
+session with empty history and graveyard state.
+
+Host coverage is available with:
+
+```powershell
+cd app
+npm run test:offline-continuous
+```
+
+Compile-only firmware gates are:
+
+```powershell
+.\tools\verify-offline-continuous-gameplay.ps1 -Fixture Standard
+.\tools\verify-offline-continuous-gameplay.ps1 -Fixture TerminalReset
+```
+
+Pass `-UploadPort COM11` only for the guarded physical sessions. The verifier
+restores the accepted production firmware in `finally`. If the backend returns
+during offline play, an active motion transaction finishes, then the runtime
+freezes at the next exact turn boundary with `WAIT`; no state is transferred in
+this milestone.
+
+The complete real-board gate is accepted. The Standard fixture completed 12
+human moves and 12 robot replies across 18 verified motion phases while
+retaining six occupied graveyard slots. The terminal fixture verified Black
+kingside castling checkmate, the two-second king reset gesture, standard setup
+restoration, Human Black selection, exactly one White opener, and one complete
+Black/White turn. Both runs recorded a 10 ms maximum sensor gap, searches no
+longer than 3,011 ms, exact occupancy, and magnet LOW at completion.
+
+Setup feedback was aligned with the normal physical calibration workflow after
+the first reset trial exposed that `CLR` alone did not identify misplaced
+pieces. Initial `SET` and post-game `CLR` now keep the status glyph while
+painting detected required squares cyan, missing required squares red, and
+unexpected occupied squares yellow. The corrected colors were verified on the
+physical matrix before the terminal gate was repeated successfully.
+
+A separate reconnect run stopped at the untouched starting-position human-turn
+boundary after two successful backend heartbeats. It emitted `WAIT` with zero
+chess moves, motor activity, or magnet activation. The verifier then restored
+the exact `1,083,819` byte flash / `48,768` byte RAM production build. A final
+online regression committed human `e2e4` and robot `d7d5` with no pending job,
+motion transaction, synchronization warning, or error.
