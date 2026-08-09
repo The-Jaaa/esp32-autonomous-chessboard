@@ -21,8 +21,8 @@ $minimumLargestInternalBlockBytes = 64KB
 $minimumFreePsramBytes = 5MB
 $minimumStackHeadroomBytes = 2KB
 $maximumHeartbeatElapsedMs = 1250
-$expectedProductionFlashBytes = 1079947
-$expectedProductionRamBytes = 48456
+$expectedProductionFlashBytes = 1083819
+$expectedProductionRamBytes = 48768
 $expectedFinalFen = 'k7/8/8/8/4p3/8/8/4K3 w - - 0 2'
 
 function Get-ArduinoCliPath {

@@ -9,6 +9,7 @@
 #include "offline_diagnostic_serial.h"
 #include "offline_ownership_diagnostics.h"
 #include "offline_runtime_diagnostics.h"
+#include "offline_interaction_feedback.h"
 #include "offline_quiet_motion_hardware.h"
 #include "offline_capture_motion_hardware.h"
 #include "offline_lane_motion_hardware.h"
@@ -338,7 +339,9 @@ void loop() {
     ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
   publishOfflineRuntimeStableSnapshot(stableOccupancy, millis());
 #endif
-#if ENABLE_OFFLINE_OWNERSHIP_DIAGNOSTICS || ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || \
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+  serviceOfflineInteractionFrame();
+#elif ENABLE_OFFLINE_OWNERSHIP_DIAGNOSTICS || ENABLE_OFFLINE_RUNTIME_DIAGNOSTICS || \
     ENABLE_OFFLINE_PHASE_EXECUTION_DIAGNOSTICS || \
     ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS || \
     ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS || \
@@ -459,6 +462,9 @@ void scanSensors() {
     if (gap > offlineRuntimeSensorMaxGapMs) {
       offlineRuntimeSensorMaxGapMs = gap;
     }
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+    recordOfflineInteractionSensorGap(gap);
+#endif
   }
   previousRuntimeScanMs = runtimeScanStartedMs;
   offlineRuntimeSensorScanCount++;
@@ -1343,6 +1349,9 @@ bool executeOfflineCaptureProgram(
     }
     switch (primitive.kind) {
       case offline::CaptureMotionPrimitiveKind::TravelBoard:
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+        setOfflineInteractionSensorStage(OfflineInteractionSensorStage::Travel);
+#endif
         if (primitive.targetRawIndex < 0 || primitive.targetRawIndex >= 64) {
           result.error = "Capture travel has an invalid board target.";
           return false;
@@ -1353,6 +1362,9 @@ bool executeOfflineCaptureProgram(
         goToSquare(primitive.targetRawIndex, false);
         break;
       case offline::CaptureMotionPrimitiveKind::Pickup:
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+        setOfflineInteractionSensorStage(OfflineInteractionSensorStage::Pickup);
+#endif
         if (pickedUp) {
           result.error = "Capture pickup occurred while a piece was already held.";
           return false;
@@ -1364,6 +1376,9 @@ bool executeOfflineCaptureProgram(
         offlineQuietDelayWithSensorScans(160);
         break;
       case offline::CaptureMotionPrimitiveKind::DragBoard:
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+        setOfflineInteractionSensorStage(OfflineInteractionSensorStage::Drag);
+#endif
         if (!pickedUp || primitive.targetRawIndex < 0 ||
             primitive.targetRawIndex >= 64) {
           result.error = "Capture board drag is out of order or invalid.";
@@ -1380,6 +1395,9 @@ bool executeOfflineCaptureProgram(
         }
         break;
       case offline::CaptureMotionPrimitiveKind::DragCoordinate:
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+        setOfflineInteractionSensorStage(OfflineInteractionSensorStage::Drag);
+#endif
         if (!pickedUp || !isfinite(primitive.targetX) ||
             !isfinite(primitive.targetY)) {
           result.error = "Capture coordinate drag is out of order or invalid.";
@@ -1395,6 +1413,9 @@ bool executeOfflineCaptureProgram(
             true);
         break;
       case offline::CaptureMotionPrimitiveKind::Drop:
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+        setOfflineInteractionSensorStage(OfflineInteractionSensorStage::Drop);
+#endif
         if (!pickedUp) {
           result.error = "Capture drop occurred without a held piece.";
           return false;
@@ -1405,6 +1426,9 @@ bool executeOfflineCaptureProgram(
         offlineQuietDelayWithSensorScans(80);
         break;
       case offline::CaptureMotionPrimitiveKind::Verify:
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+        setOfflineInteractionSensorStage(OfflineInteractionSensorStage::Verify);
+#endif
         if (pickedUp) {
           result.error = "Capture verification occurred before drop.";
           return false;
@@ -1419,6 +1443,9 @@ bool executeOfflineCaptureProgram(
       program.phaseKind == offline::MotionPhaseKind::CapturedRemoval
           ? OFFLINE_GRAVEYARD_STABLE_MS
           : 0;
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+  setOfflineInteractionSensorStage(OfflineInteractionSensorStage::Settle);
+#endif
   if (!waitForOfflineQuietOccupancy(
           program.expectedAfter,
           OFFLINE_QUIET_SETTLE_TIMEOUT_MS,
@@ -1592,7 +1619,7 @@ void serviceOfflineQuietMotionHardware() {
   bool hasJob = false;
   if (xSemaphoreTake(sharedMutex, pdMS_TO_TICKS(2)) == pdTRUE) {
     if (hasPendingOfflineQuietHardwareJob) {
-      job = pendingOfflineQuietHardwareJob;
+      job = std::move(pendingOfflineQuietHardwareJob);
       pendingOfflineQuietHardwareJob = {};
       hasPendingOfflineQuietHardwareJob = false;
       hasJob = true;
@@ -1700,7 +1727,7 @@ void serviceOfflineCaptureMotionHardware() {
   bool hasJob = false;
   if (xSemaphoreTake(sharedMutex, pdMS_TO_TICKS(2)) == pdTRUE) {
     if (hasPendingOfflineCaptureHardwareJob) {
-      job = pendingOfflineCaptureHardwareJob;
+      job = std::move(pendingOfflineCaptureHardwareJob);
       pendingOfflineCaptureHardwareJob = {};
       hasPendingOfflineCaptureHardwareJob = false;
       hasJob = true;
@@ -1804,7 +1831,7 @@ void serviceOfflineLaneMotionHardware() {
   bool hasJob = false;
   if (xSemaphoreTake(sharedMutex, pdMS_TO_TICKS(2)) == pdTRUE) {
     if (hasPendingOfflineLaneHardwareJob) {
-      job = pendingOfflineLaneHardwareJob;
+      job = std::move(pendingOfflineLaneHardwareJob);
       pendingOfflineLaneHardwareJob = {};
       hasPendingOfflineLaneHardwareJob = false;
       hasJob = true;

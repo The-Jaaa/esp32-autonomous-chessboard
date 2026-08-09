@@ -1,5 +1,6 @@
 #include "EmbeddedConfig.h"
 
-#if ENABLE_OFFLINE_UNIFIED_TURN_DIAGNOSTICS
+#if ENABLE_OFFLINE_UNIFIED_TURN_DIAGNOSTICS || \
+    ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
 #include "../offline_unified_motion.cpp"
 #endif

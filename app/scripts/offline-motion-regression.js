@@ -65,12 +65,14 @@ const fixtures = [
   {
     id: 'capture-stage-first',
     fen: 'rnbq3r/ppppBpkp/4p2n/1P4p1/4P3/7N/P1PP1PPP/RNQ1KB1R w KQ - 1 9',
-    uci: 'e7d8', status: 'success', expectedStrategy: 'capture-stage-first-board'
+    uci: 'e7d8', status: 'success', expectedStrategy: 'capture-stage-first-board',
+    onlineTemporaryClearanceDiverges: true
   },
   {
     id: 'capture-remove-first-board',
     fen: 'rnb1k2r/2p5/2q1p2p/pP1p4/1PN4b/3BPQp1/2Pn1PPP/RNB1K2R b kq - 2 16',
-    uci: 'g3f2', status: 'success', expectedStrategy: 'capture-remove-first-board'
+    uci: 'g3f2', status: 'success', expectedStrategy: 'capture-remove-first-board',
+    onlineTemporaryClearanceDiverges: true
   },
   {
     id: 'capture-en-passant',
@@ -375,8 +377,10 @@ function verifyDeepFallbackRegression() {
       );
       assert.strictEqual(result.captureStrategy, 'capture-board-staging');
       assert.strictEqual(result.graveyardSlot.label, slot.label);
-      assert(physicalSession.robotGraveyardOccupied.includes(slot.label.toUpperCase()),
-        'Deep capture fallback must reserve the selected online slot.');
+      assert(physicalSession.robotGraveyardPending.includes(slot.label.toUpperCase()),
+        'Deep capture fallback must reserve the selected online slot as pending.');
+      assert(!physicalSession.robotGraveyardOccupied.includes(slot.label.toUpperCase()),
+        'Planning must not mark the selected slot occupied before verified removal.');
     }
   );
 }
@@ -428,6 +432,11 @@ for (const fixture of fixtures) {
   const js = jsPlan(fixture);
   assert.strictEqual(cpp.status, js.status, `${fixture.id}: status differs from JavaScript.`);
   if (js.status !== 'success') continue;
+  if (fixture.onlineTemporaryClearanceDiverges) {
+    assert.strictEqual(cpp.strategy, fixture.expectedStrategy,
+      `${fixture.id}: C++ no-clearance fixture changed strategy.`);
+    continue;
+  }
   assert.strictEqual(cpp.strategy, js.strategy, `${fixture.id}: strategy differs.`);
   if (fixture.expectedStrategy) {
     assert.strictEqual(cpp.strategy, fixture.expectedStrategy,

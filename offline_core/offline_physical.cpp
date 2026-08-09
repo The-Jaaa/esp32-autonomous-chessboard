@@ -195,6 +195,7 @@ SnapshotResult OfflinePhysicalController::resultFor(
   result.phase = phase_;
   result.event = event;
   result.diff = compareOccupancy(committedOccupancy_, occupancy);
+  result.humanPromotionRequest = pendingHumanPromotionRequest();
   result.message = std::move(message);
 
   if (phase_ == PhysicalPhase::SyncWarning) {
@@ -226,6 +227,31 @@ SnapshotResult OfflinePhysicalController::resultFor(
     result.highlights.push_back(makeHighlight(pendingMoves_.front().to, HighlightRole::SpecialTarget));
   }
   return result;
+}
+
+std::optional<HumanPromotionRequest>
+OfflinePhysicalController::pendingHumanPromotionRequest() const {
+  if (phase_ != PhysicalPhase::PromotionPending || pendingMoves_.empty() ||
+      !hasPendingPromotionOccupancy_) {
+    return std::nullopt;
+  }
+
+  HumanPromotionRequest request;
+  request.source = source_;
+  request.target = pendingMoves_.front().to;
+  request.color = humanColor_;
+  request.committedOccupancy = committedOccupancy_;
+  request.completedPawnOccupancy = pendingPromotionOccupancy_;
+  constexpr char kChoiceOrder[] = {'q', 'r', 'b', 'n'};
+  for (const char choice : kChoiceOrder) {
+    const auto found = std::find_if(
+        pendingMoves_.begin(), pendingMoves_.end(),
+        [choice](const MoveInfo& move) {
+          return !move.promotion.empty() && move.promotion.front() == choice;
+        });
+    if (found != pendingMoves_.end()) request.legalChoices.push_back(choice);
+  }
+  return request;
 }
 
 SnapshotResult OfflinePhysicalController::enterSyncWarning(const Occupancy& occupancy, std::string message) {

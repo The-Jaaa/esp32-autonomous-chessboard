@@ -61,6 +61,15 @@ struct Highlight {
   HighlightRole role = HighlightRole::Source;
 };
 
+struct HumanPromotionRequest {
+  std::string source;
+  std::string target;
+  HumanColor color = HumanColor::White;
+  std::vector<char> legalChoices;
+  Occupancy committedOccupancy{};
+  Occupancy completedPawnOccupancy{};
+};
+
 struct SnapshotResult {
   PhysicalPhase phase = PhysicalPhase::Ready;
   PhysicalEvent event = PhysicalEvent::None;
@@ -68,6 +77,7 @@ struct SnapshotResult {
   std::vector<Highlight> highlights;
   OccupancyDiff diff;
   std::optional<MoveInfo> acceptedMove;
+  std::optional<HumanPromotionRequest> humanPromotionRequest;
   std::string message;
 };
 
@@ -106,6 +116,8 @@ class OfflinePhysicalController {
   [[nodiscard]] PhysicalPhase phase() const { return phase_; }
   [[nodiscard]] const OfflineGame& game() const { return game_; }
   [[nodiscard]] const Occupancy& committedOccupancy() const { return committedOccupancy_; }
+  [[nodiscard]] std::optional<HumanPromotionRequest>
+  pendingHumanPromotionRequest() const;
 
  private:
   SnapshotResult resultFor(const Occupancy& occupancy, PhysicalEvent event, std::string message = {}) const;

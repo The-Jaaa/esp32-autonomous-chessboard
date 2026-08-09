@@ -15,6 +15,7 @@ enum class OfflineRuntimePhase {
   Disabled,
   WaitingForSetup,
   HumanTurn,
+  HumanPromotionPending,
   EngineSearchNeeded,
   PlanReady,
   OpponentExecuting,
@@ -34,6 +35,9 @@ enum class OfflineRuntimeEvent {
   SessionArmed,
   HumanSnapshotProcessed,
   HumanMoveAccepted,
+  HumanPromotionRequired,
+  HumanPromotionConfirmed,
+  PromotionConfirmationRejected,
   EngineSearchRequested,
   EngineResultRejected,
   MotionPlanReady,
@@ -60,6 +64,7 @@ struct OfflineRuntimeUpdate {
   std::optional<EngineSearchRequest> engineRequest;
   std::optional<MotionExecutionTransaction> motionTransaction;
   std::optional<MoveInfo> acceptedMove;
+  std::optional<HumanPromotionRequest> humanPromotionRequest;
   GameStatus gameStatus;
   std::string committedFen;
   std::string message;
@@ -76,6 +81,7 @@ class OfflineReadOnlyRuntime {
       const Occupancy& occupancy);
   OfflineRuntimeUpdate processStableSnapshot(
       std::uint32_t nowMs, const Occupancy& occupancy);
+  OfflineRuntimeUpdate confirmHumanPromotion(char promotionPiece);
   OfflineRuntimeUpdate submitEngineResult(
       std::uint32_t generation,
       const SearchResult& searchResult,

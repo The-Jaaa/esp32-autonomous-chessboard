@@ -119,6 +119,7 @@ struct OfflineTurnResult {
   std::optional<OpponentMovePlan> opponentPlan;
   std::optional<MotionExecutionTransaction> motionTransaction;
   std::optional<MoveInfo> acceptedMove;
+  std::optional<HumanPromotionRequest> humanPromotionRequest;
   std::vector<std::string> occupiedGraveyardKeys;
   OccupancyDiff differenceFromBefore;
   OccupancyDiff differenceFromExpected;

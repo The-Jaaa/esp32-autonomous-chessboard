@@ -16,8 +16,8 @@ $enabledOutput = Join-Path $root 'tmp\offline-embedded-enabled'
 $fqbn = 'esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=default,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,UploadMode=default,UploadSpeed=921600,LoopCore=1,EventsCore=1'
 $maximumApplicationBytes = 3145728
 $minimumApplicationHeadroomBytes = 512KB
-$expectedDisabledFlashBytes = 1079947
-$expectedDisabledRamBytes = 48456
+$expectedDisabledFlashBytes = 1083819
+$expectedDisabledRamBytes = 48768
 
 function Get-ArduinoCliPath {
     $command = Get-Command arduino-cli -ErrorAction SilentlyContinue

@@ -209,6 +209,7 @@ OfflineRuntimeUpdate OfflineReadOnlyRuntime::processStableSnapshot(
   hasLastProcessedOccupancy_ = true;
 
   if (phase_ != OfflineRuntimePhase::HumanTurn &&
+      phase_ != OfflineRuntimePhase::HumanPromotionPending &&
       phase_ != OfflineRuntimePhase::SyncWarning) {
     phase_ = OfflineRuntimePhase::Error;
     return updateFor(
@@ -217,6 +218,22 @@ OfflineRuntimeUpdate OfflineReadOnlyRuntime::processStableSnapshot(
   }
 
   return mapCoordinatorResult(coordinator_.processHumanSnapshot(occupancy));
+}
+
+OfflineRuntimeUpdate OfflineReadOnlyRuntime::confirmHumanPromotion(
+    char promotionPiece) {
+  if (phase_ != OfflineRuntimePhase::HumanPromotionPending) {
+    return updateFor(
+        OfflineRuntimeEvent::PromotionConfirmationRejected,
+        "No human promotion is waiting for confirmation.");
+  }
+  OfflineTurnResult result = coordinator_.confirmHumanPromotion(promotionPiece);
+  const bool rejected =
+      result.event == OfflineTurnEvent::PromotionConfirmationRejected;
+  OfflineRuntimeUpdate update = mapCoordinatorResult(std::move(result));
+  update.event = rejected ? OfflineRuntimeEvent::PromotionConfirmationRejected
+                          : OfflineRuntimeEvent::HumanPromotionConfirmed;
+  return update;
 }
 
 OfflineRuntimeUpdate OfflineReadOnlyRuntime::submitEngineResult(
@@ -248,6 +265,10 @@ OfflineRuntimeUpdate OfflineReadOnlyRuntime::mapCoordinatorResult(
       phase_ = OfflineRuntimePhase::HumanTurn;
       event = OfflineRuntimeEvent::HumanSnapshotProcessed;
       break;
+    case OfflineTurnPhase::HumanPromotionPending:
+      phase_ = OfflineRuntimePhase::HumanPromotionPending;
+      event = OfflineRuntimeEvent::HumanPromotionRequired;
+      break;
     case OfflineTurnPhase::EngineSearchNeeded:
       phase_ = OfflineRuntimePhase::EngineSearchNeeded;
       event = result.event == OfflineTurnEvent::EngineResultRejected
@@ -273,7 +294,6 @@ OfflineRuntimeUpdate OfflineReadOnlyRuntime::mapCoordinatorResult(
       phase_ = OfflineRuntimePhase::Error;
       event = OfflineRuntimeEvent::Error;
       break;
-    case OfflineTurnPhase::HumanPromotionPending:
     case OfflineTurnPhase::OpponentMoveExecuting:
     case OfflineTurnPhase::OpponentPromotionPending:
     case OfflineTurnPhase::Error:
@@ -295,11 +315,15 @@ OfflineRuntimeUpdate OfflineReadOnlyRuntime::updateFor(
   update.sessionActive = sessionActive_;
   update.frozen = isFrozenPhase(phase_);
   update.coordinatorResult = std::move(coordinatorResult);
-  update.engineRequest = coordinator_.pendingEngineRequest();
+  if (phase_ == OfflineRuntimePhase::EngineSearchNeeded) {
+    update.engineRequest = coordinator_.pendingEngineRequest();
+  }
   update.motionTransaction = coordinator_.pendingMotionTransaction();
   if (update.coordinatorResult && update.coordinatorResult->acceptedMove) {
     update.acceptedMove = update.coordinatorResult->acceptedMove;
   }
+  update.humanPromotionRequest =
+      coordinator_.physical().pendingHumanPromotionRequest();
   update.gameStatus = coordinator_.physical().game().status();
   update.committedFen = coordinator_.physical().game().fen();
   update.message = std::move(message);
@@ -314,6 +338,9 @@ OfflineRuntimeUpdate OfflineReadOnlyRuntime::currentState() const {
 }
 
 std::optional<EngineSearchRequest> OfflineReadOnlyRuntime::pendingEngineRequest() const {
+  if (phase_ != OfflineRuntimePhase::EngineSearchNeeded) {
+    return std::nullopt;
+  }
   return coordinator_.pendingEngineRequest();
 }
 
@@ -335,6 +362,7 @@ const char* offlineRuntimePhaseName(OfflineRuntimePhase phase) {
     case OfflineRuntimePhase::Disabled: return "disabled";
     case OfflineRuntimePhase::WaitingForSetup: return "waiting_for_setup";
     case OfflineRuntimePhase::HumanTurn: return "human_turn";
+    case OfflineRuntimePhase::HumanPromotionPending: return "human_promotion_pending";
     case OfflineRuntimePhase::EngineSearchNeeded: return "engine_search_needed";
     case OfflineRuntimePhase::PlanReady: return "plan_ready";
     case OfflineRuntimePhase::OpponentExecuting: return "opponent_executing";
@@ -357,6 +385,10 @@ const char* offlineRuntimeEventName(OfflineRuntimeEvent event) {
     case OfflineRuntimeEvent::SessionArmed: return "session_armed";
     case OfflineRuntimeEvent::HumanSnapshotProcessed: return "human_snapshot_processed";
     case OfflineRuntimeEvent::HumanMoveAccepted: return "human_move_accepted";
+    case OfflineRuntimeEvent::HumanPromotionRequired: return "human_promotion_required";
+    case OfflineRuntimeEvent::HumanPromotionConfirmed: return "human_promotion_confirmed";
+    case OfflineRuntimeEvent::PromotionConfirmationRejected:
+      return "promotion_confirmation_rejected";
     case OfflineRuntimeEvent::EngineSearchRequested: return "engine_search_requested";
     case OfflineRuntimeEvent::EngineResultRejected: return "engine_result_rejected";
     case OfflineRuntimeEvent::MotionPlanReady: return "motion_plan_ready";

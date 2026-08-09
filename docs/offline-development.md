@@ -1337,3 +1337,58 @@ seconds. That loop could cancel association on slower access points with reason
 network task now issues a non-destructive `WiFi.reconnect()` every ten seconds
 until connected. Connection and disconnect reason telemetry is available over
 Serial.
+
+## Guarded Production Interaction Gate
+
+`ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS` is a default-off firmware
+gate for the production-quality offline interaction path. With the flag off,
+the production image remains exactly `1,083,819` bytes flash and `48,768`
+bytes static RAM. The Standard guarded build is `1,401,191` bytes flash and
+`53,904` bytes static RAM, leaving `1,744,537` bytes of application-partition
+headroom.
+
+The portable interaction layer provides the measured 256-pixel LED mapping,
+complete status and square-role frames, a wrap-safe physical side selector,
+and occupancy-driven human promotion selection. Core 0 submits full frames
+through a synchronized mailbox; core 1 is the only owner of `strip.show()`.
+Identical pending or displayed frames are suppressed unless an intentional
+animation step is requested.
+
+Standard setup must match for 500 ms before side selection. Lifting only the
+White king on `e1` or Black king on `e8` for one second selects that side; the
+full setup must then be restored for 500 ms. Human Black receives one verified
+White robot opening move before input opens. Human promotion remains logically
+uncommitted while the pawn is removed and Q/R/B/N cycles every 2.5 seconds;
+the replacement must remain stable for 500 ms. Robot promotion uses the same
+replacement gate with the engine-selected fixed identity.
+
+The guarded runtime reuses the accepted ownership, engine, unified motion,
+phase-transaction, graveyard, bounded-homing, and hardware-execution paths. It
+supports `Standard`, `HumanPromotion`, and `RobotPromotion` verifier fixtures,
+emits `[OFFLINE_INTERACTION_DIAG]` JSON, blocks normal HTTP commands and speaker
+playback, and restores production firmware in the verifier's `finally` block.
+
+Host coverage is available through `npm run test:offline-interaction` and is
+part of `npm run test:foundation`. Compile-only verification is available with:
+
+```powershell
+.\tools\verify-offline-interaction.ps1 -Fixture Standard
+```
+
+The 100-game soak, complete foundation suite, client build/lint, aggregate
+host verifier, exact production compile, and every offline diagnostic compile
+gate pass. The guarded real-board gate is also accepted:
+
+- Standard Human White completed `g1f3` and one verified robot reply.
+- Standard Human Black completed the initial White robot move, `f7f5`, and a
+  second verified White reply.
+- Human promotion committed `a7a8n` only after the empty/occupied replacement
+  sequence and ended in the expected insufficient-material draw.
+- Robot promotion committed `a2a1q` only after the requested queen replacement.
+- All accepted fixture runs ended with the magnet LOW, exact occupancy, no
+  duplicate commit, and a maximum measured sensor-loop gap of 10 ms.
+- Production restoration was followed by a normal online regression with
+  three human moves and three distinct, hardware-verified robot replies.
+
+The gate remains default-off. Continuous offline play is intentionally deferred
+to Milestone 5.

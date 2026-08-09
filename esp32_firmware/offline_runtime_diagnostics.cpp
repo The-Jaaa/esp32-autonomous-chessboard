@@ -10,6 +10,7 @@
 #include "offline_quiet_motion_hardware.h"
 #include "offline_capture_motion_hardware.h"
 #include "offline_lane_motion_hardware.h"
+#include "offline_interaction_feedback.h"
 
 #include <AccelStepper.h>
 #include <ArduinoJson.h>
@@ -74,11 +75,16 @@ constexpr bool kPromotionMotionDiagnostic =
     ENABLE_OFFLINE_PROMOTION_MOTION_DIAGNOSTICS != 0;
 constexpr bool kUnifiedTurnDiagnostic =
     ENABLE_OFFLINE_UNIFIED_TURN_DIAGNOSTICS != 0;
+constexpr bool kInteractionDiagnostic =
+    ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS != 0;
 constexpr bool kLaneMotionDiagnostic =
     ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS != 0;
 constexpr bool kLaneBoardFixture = OFFLINE_LANE_MOTION_FIXTURE == 1;
 
 const char* diagnosticPrefix() {
+  if (kInteractionDiagnostic) {
+    return "OFFLINE_INTERACTION_DIAG";
+  }
   if (kUnifiedTurnDiagnostic) {
     return "OFFLINE_UNIFIED_TURN_DIAG";
   }
@@ -2106,8 +2112,12 @@ void emitPromotionSummary(
 
 #endif
 
-#if ENABLE_OFFLINE_UNIFIED_TURN_DIAGNOSTICS
+#if ENABLE_OFFLINE_UNIFIED_TURN_DIAGNOSTICS || \
+    ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
 #include "offline_unified_turn_diagnostic.inc"
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+#include "offline_interaction_diagnostic.inc"
+#endif
 #endif
 
 #endif
@@ -2578,7 +2588,12 @@ void runtimeTask(void*) {
   start["humanColor"] = "white";
   start["searchTimeMs"] = 3000;
   start["maxDepth"] = 12;
-  if (kUnifiedTurnDiagnostic) {
+  if (kInteractionDiagnostic) {
+    start["fixture"] = OFFLINE_INTERACTION_FIXTURE == 0
+        ? "Standard"
+        : (OFFLINE_INTERACTION_FIXTURE == 1
+               ? "HumanPromotion" : "RobotPromotion");
+  } else if (kUnifiedTurnDiagnostic) {
     start["fixture"] = "standard-three-turn";
     start["targetTurns"] = 3;
   } else if (kStagedCaptureMotionDiagnostic) {
@@ -2618,6 +2633,13 @@ void runtimeTask(void*) {
     vTaskDelete(nullptr);
     return;
   }
+
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+  runOfflineInteractionDiagnostic();
+  summaryEmitted = true;
+  vTaskDelete(nullptr);
+  return;
+#endif
 
   offline::OfflineRuntimeConfig config;
   config.setupStableMs = 500;

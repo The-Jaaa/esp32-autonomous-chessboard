@@ -209,6 +209,7 @@ OfflineTurnResult OfflineTurnCoordinator::resultFor(
   result.engineRequest = engineRequest_;
   result.opponentPlan = opponentPlan_;
   result.motionTransaction = motionTransaction_;
+  result.humanPromotionRequest = physical_.pendingHumanPromotionRequest();
   result.occupiedGraveyardKeys = occupiedGraveyardKeys_;
   result.gameStatus = physical_.game().status();
   result.message = std::move(message);

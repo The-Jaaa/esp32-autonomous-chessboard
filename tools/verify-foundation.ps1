@@ -80,6 +80,12 @@ if (-not $SkipFirmware) {
     Invoke-Checked 'ESP32 guarded promotion diagnostic firmware builds' {
         & (Join-Path $PSScriptRoot 'verify-offline-promotion-motion.ps1')
     }
+    Invoke-Checked 'ESP32 guarded unified-turn diagnostic firmware builds' {
+        & (Join-Path $PSScriptRoot 'verify-offline-unified-turn.ps1')
+    }
+    Invoke-Checked 'ESP32 guarded production interaction diagnostic firmware builds' {
+        & (Join-Path $PSScriptRoot 'verify-offline-interaction.ps1')
+    }
 }
 
 Write-Host "`nFoundation verification passed." -ForegroundColor Green

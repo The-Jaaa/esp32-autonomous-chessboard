@@ -207,16 +207,53 @@ bool handleUnifiedPromotion(
   prompt["message"] = message;
   emitDocument(prompt);
 
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+  offline::OfflineFeedbackInput promotionFeedback;
+  promotionFeedback.state = offline::OfflineFeedbackState::PromotionChoice;
+  promotionFeedback.promotionSquare = move.to;
+  promotionFeedback.promotionChoice = piece;
+  submitOfflineInteractionFrame(
+      offline::OfflineLedRenderer::render(promotionFeedback),
+      promotionFeedback.state,
+      false);
+#endif
+
   const std::uint32_t startedAt = millis();
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+  std::uint32_t replacementReadySince = 0;
+#endif
   while (millis() - startedAt < kUnifiedPromotionTimeoutMs) {
     offline::Occupancy occupancy;
     std::uint32_t revision = 0;
     std::uint32_t changedAtMs = 0;
-    if (!copySnapshot(occupancy, revision, changedAtMs) ||
-        revision == consumedRevision) {
+    if (!copySnapshot(occupancy, revision, changedAtMs)) {
       vTaskDelay(pdMS_TO_TICKS(kLoopDelayMs));
       continue;
     }
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+    if (revision == consumedRevision) {
+      if (replacementReadySince != 0 &&
+          millis() - replacementReadySince >= 500 &&
+          replacement.state() == offline::PromotionReplacementState::ReadyToConfirm &&
+          adapter.state() == offline::OfflinePhaseExecutionState::PromotionPending) {
+        replacement.confirm(piece, occupancy);
+        const auto update = adapter.confirmPromotion(piece, occupancy);
+        emitExecutionUpdate(update);
+        if (adapter.state() == offline::OfflinePhaseExecutionState::Complete ||
+            adapter.state() == offline::OfflinePhaseExecutionState::GameOver) {
+          diagnostic.promotionCount++;
+          return true;
+        }
+      }
+      vTaskDelay(pdMS_TO_TICKS(kLoopDelayMs));
+      continue;
+    }
+#else
+    if (revision == consumedRevision) {
+      vTaskDelay(pdMS_TO_TICKS(kLoopDelayMs));
+      continue;
+    }
+#endif
     (void)changedAtMs;
     consumedRevision = revision;
     replacementUpdate = replacement.processSnapshot(occupancy);
@@ -239,6 +276,9 @@ bool handleUnifiedPromotion(
     }
     if (replacement.state() == offline::PromotionReplacementState::ReadyToConfirm &&
         adapter.state() == offline::OfflinePhaseExecutionState::PromotionPending) {
+#if ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS
+      replacementReadySince = millis();
+#else
       replacement.confirm(piece, occupancy);
       const auto update = adapter.confirmPromotion(piece, occupancy);
       emitExecutionUpdate(update);
@@ -247,6 +287,7 @@ bool handleUnifiedPromotion(
         diagnostic.promotionCount++;
         return true;
       }
+#endif
     }
     if (!ownershipStillAllowsUnified(diagnostic.error)) return false;
     vTaskDelay(pdMS_TO_TICKS(kLoopDelayMs));

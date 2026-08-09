@@ -492,3 +492,31 @@ release from End, active-session replacement during handoff, and duplicate
 handoff safety. The complete Mentor and physical suites, client lint/build,
 backend syntax, and diff checks pass. A final real-board retest is still
 required before Milestone 3 acceptance.
+
+## Milestone 3 Accepted And Milestone 4 In Progress
+
+The corrected Milestone 3 real-board retest is accepted. A complete physical
+Stockfish-led game remained synchronized, grounded coaching and end/retry
+flows worked, speaker playback completed without the prior stalls, and the
+normal online board remained operational. This supersedes the earlier pending
+notes while preserving them as the history of the acceptance fixes.
+
+Milestone 4 adds the default-off guarded production offline interaction gate.
+Automated acceptance is complete: the deterministic 100-game soak, full host
+foundation suite, interaction regressions, aggregate host/client verifier,
+exact production firmware baseline, and all offline diagnostic firmware
+compile gates pass. Production remains `1,083,819` bytes flash and `48,768`
+bytes static RAM. The final Standard interaction build is `1,401,191` bytes
+flash and `53,904` bytes static RAM.
+
+Milestone 4 is accepted. Standard Human White and Human Black both completed
+their bounded real-board transactions. The HumanPromotion fixture committed
+`a7a8n` and the RobotPromotion fixture committed `a2a1q` only after their exact
+replacement gates. Every accepted run ended with matching occupancy, magnet
+LOW, no duplicate move, and a 10 ms maximum sensor-loop gap.
+
+The verifier restored production firmware, after which the normal online board
+completed three human moves (`e4`, `exd5`, `c4`) and three distinct verified
+robot replies (`d5`, `c6`, `cxd5`) without a synchronization or motion error.
+Continuous offline play and automatic online/offline ownership remain later
+milestones.

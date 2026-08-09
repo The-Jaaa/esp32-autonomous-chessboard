@@ -17,8 +17,8 @@ $fqbn = 'esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=default,CPUFreq=240,FlashMo
 $maximumApplicationBytes = 3145728
 $minimumApplicationHeadroomBytes = 512KB
 $maximumHeartbeatElapsedMs = 1250
-$expectedDisabledFlashBytes = 1079947
-$expectedDisabledRamBytes = 48456
+$expectedDisabledFlashBytes = 1083819
+$expectedDisabledRamBytes = 48768
 
 function Get-ArduinoCliPath {
     $command = Get-Command arduino-cli -ErrorAction SilentlyContinue

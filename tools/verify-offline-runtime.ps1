@@ -21,8 +21,8 @@ $minimumLargestInternalBlockBytes = 64KB
 $minimumFreePsramBytes = 5MB
 $minimumStackHeadroomBytes = 2KB
 $maximumHeartbeatElapsedMs = 1250
-$expectedDisabledFlashBytes = 1079947
-$expectedDisabledRamBytes = 48456
+$expectedDisabledFlashBytes = 1083819
+$expectedDisabledRamBytes = 48768
 
 function Get-ArduinoCliPath {
     $command = Get-Command arduino-cli -ErrorAction SilentlyContinue

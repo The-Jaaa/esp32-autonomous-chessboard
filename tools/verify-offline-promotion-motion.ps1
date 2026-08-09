@@ -21,8 +21,8 @@ $minimumLargestInternalBlockBytes = 64KB
 $minimumFreePsramBytes = 5MB
 $minimumStackHeadroomBytes = 2KB
 $maximumHeartbeatElapsedMs = 1250
-$expectedProductionFlashBytes = 1079947
-$expectedProductionRamBytes = 48456
+$expectedProductionFlashBytes = 1083819
+$expectedProductionRamBytes = 48768
 $expectedFinalFen = '4k3/8/8/8/8/8/5K2/q7 w - - 0 2'
 
 function Get-ArduinoCliPath {
@@ -59,7 +59,9 @@ function Invoke-ArduinoCompile {
 
     Write-Host "`n== $Label ==" -ForegroundColor Cyan
     Reset-WorkspaceOutputDirectory -Path $OutputDirectory
-    $arguments = @('compile', '--fqbn', $fqbn)
+    $buildDirectory = Join-Path $OutputDirectory 'build'
+    New-Item -ItemType Directory -Force -Path $buildDirectory | Out-Null
+    $arguments = @('compile', '--fqbn', $fqbn, '--build-path', $buildDirectory)
     if ($PromotionDiagnostics) {
         $arguments += @(
             '--library', $offlineCore,
