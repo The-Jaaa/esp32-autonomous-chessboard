@@ -667,6 +667,30 @@
 .mentor-speaker-state.is-degraded,
 .mentor-speaker-state.is-disconnected { color: #fcd34d; }
 
+.mentor-spotify-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 24px;
+  padding-left: 7px;
+  border-left: 1px solid var(--mentor-border);
+  color: var(--mentor-text);
+  white-space: nowrap;
+}
+
+.mentor-spotify-toggle input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: #22c55e;
+}
+
+.mentor-spotify-toggle span {
+  min-width: 48px;
+  color: var(--mentor-muted);
+  text-transform: capitalize;
+}
+
 .mentor-interrupt-output {
   min-height: 24px;
   padding: 0 8px;

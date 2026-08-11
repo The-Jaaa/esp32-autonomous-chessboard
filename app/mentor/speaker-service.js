@@ -11,6 +11,13 @@ const SPEAKER_TRANSPORT_BYTES_PER_SECOND = SPEAKER_SAMPLE_RATE / 2;
 const MAX_SPEAKER_QUEUE_BYTES = SPEAKER_BYTES_PER_SECOND * 42;
 const MAX_BUFFERED_RESPONSE_BYTES = SPEAKER_BYTES_PER_SECOND * 40;
 const SPEAKER_START_BUFFER_MS = 10000;
+const SPEAKER_ADAPTIVE_INITIAL_BUFFER_MS = 6000;
+const SPEAKER_ADAPTIVE_MIN_BUFFER_MS = 4000;
+const SPEAKER_ADAPTIVE_SAFETY_LEAD_MS = 3000;
+const SPEAKER_ADAPTIVE_MAX_PROVIDER_GAP_MS = 1500;
+const SPEAKER_ADAPTIVE_UNSTABLE_PROVIDER_GAP_MS = 3000;
+const SPEAKER_ADAPTIVE_STEP_MS = 1000;
+const SPEAKER_ADAPTIVE_SMOOTH_RESPONSES = 2;
 const SPEAKER_FEED_AHEAD_MS = 2500;
 const SPEAKER_DEGRADED_BUFFER_MS = 41000;
 const SPEAKER_IDLE_END_MS = 2000;
@@ -199,9 +206,17 @@ class MentorSpeakerService extends EventEmitter {
     emitStatus = () => {},
     logger = console,
     createServer = net.createServer,
+    relayService = null,
     maxQueueBytes = MAX_SPEAKER_QUEUE_BYTES,
     maxResponseBytes = MAX_BUFFERED_RESPONSE_BYTES,
     startBufferBytes = SPEAKER_START_BUFFER_BYTES,
+    adaptiveInitialBufferMs = SPEAKER_ADAPTIVE_INITIAL_BUFFER_MS,
+    adaptiveMinimumBufferMs = SPEAKER_ADAPTIVE_MIN_BUFFER_MS,
+    adaptiveSafetyLeadMs = SPEAKER_ADAPTIVE_SAFETY_LEAD_MS,
+    adaptiveMaximumProviderGapMs = SPEAKER_ADAPTIVE_MAX_PROVIDER_GAP_MS,
+    adaptiveUnstableProviderGapMs = SPEAKER_ADAPTIVE_UNSTABLE_PROVIDER_GAP_MS,
+    adaptiveStepMs = SPEAKER_ADAPTIVE_STEP_MS,
+    adaptiveSmoothResponses = SPEAKER_ADAPTIVE_SMOOTH_RESPONSES,
     idleEndMs = SPEAKER_IDLE_END_MS,
     now = () => Date.now()
   } = {}) {
@@ -213,10 +228,32 @@ class MentorSpeakerService extends EventEmitter {
     this.maxQueueBytes = maxQueueBytes;
     this.maxResponseBytes = maxResponseBytes;
     this.startBufferBytes = startBufferBytes;
+    this.maximumStartBufferMs = Math.max(
+      1,
+      Math.round(startBufferBytes * 1000 / SPEAKER_BYTES_PER_SECOND)
+    );
+    this.adaptiveMinimumBufferMs = Math.min(
+      this.maximumStartBufferMs,
+      Math.max(1, Math.round(adaptiveMinimumBufferMs))
+    );
+    this.adaptiveInitialBufferMs = Math.max(
+      this.adaptiveMinimumBufferMs,
+      Math.min(this.maximumStartBufferMs, Math.round(adaptiveInitialBufferMs))
+    );
+    this.adaptiveSafetyLeadMs = Math.max(0, Math.round(adaptiveSafetyLeadMs));
+    this.adaptiveMaximumProviderGapMs = Math.max(0, Math.round(adaptiveMaximumProviderGapMs));
+    this.adaptiveUnstableProviderGapMs = Math.max(
+      this.adaptiveMaximumProviderGapMs,
+      Math.round(adaptiveUnstableProviderGapMs)
+    );
+    this.adaptiveStepMs = Math.max(1, Math.round(adaptiveStepMs));
+    this.adaptiveSmoothResponses = Math.max(1, Math.round(adaptiveSmoothResponses));
     this.idleEndMs = idleEndMs;
     this.now = now;
+    this.relayService = relayService;
     this.devices = new Map();
     this.bindings = new Map();
+    this.bufferProfiles = new Map();
     this.sockets = new Set();
     this.server = createServer((socket) => this.accept(socket));
     this.pingTimer = null;
@@ -322,6 +359,97 @@ class MentorSpeakerService extends EventEmitter {
     this.logger.log?.(`[Mentor Speaker] ${boardId} connected`);
   }
 
+  bufferProfileFor(deviceId) {
+    let profile = this.bufferProfiles.get(deviceId);
+    if (!profile) {
+      profile = {
+        targetMs: this.adaptiveInitialBufferMs,
+        smoothResponses: 0,
+        lastReason: 'initial'
+      };
+      this.bufferProfiles.set(deviceId, profile);
+    }
+    return profile;
+  }
+
+  providerLeadMs(binding, at = this.now()) {
+    if (binding.firstProviderChunkAt === null) return 0;
+    const audioMs = Math.round(binding.providerBytes * 1000 / SPEAKER_BYTES_PER_SECOND);
+    return audioMs - Math.max(0, at - binding.firstProviderChunkAt);
+  }
+
+  prepareAdaptiveResponse(binding) {
+    const profile = this.bufferProfileFor(binding.deviceId);
+    binding.providerChunkCount = 0;
+    binding.providerBytes = 0;
+    binding.firstProviderChunkAt = null;
+    binding.lastProviderChunkAt = null;
+    binding.maxProviderGapMs = 0;
+    binding.responseHadUnderrun = false;
+    binding.responseQualityFinalized = false;
+    binding.adaptiveTargetMs = profile.targetMs;
+    binding.adaptiveStartReason = null;
+    binding.adaptiveBufferedAtStartMs = 0;
+  }
+
+  adaptiveStartDecision(binding) {
+    const bufferedMs = Math.round(binding.responseBytes * 1000 / SPEAKER_BYTES_PER_SECOND);
+    const providerLeadMs = this.providerLeadMs(binding);
+    if (binding.responseBytes >= this.startBufferBytes) {
+      return { start: true, reason: 'maximum_buffer', bufferedMs, providerLeadMs };
+    }
+    if (bufferedMs < binding.adaptiveTargetMs) {
+      return { start: false, reason: 'target_not_reached', bufferedMs, providerLeadMs };
+    }
+    if (binding.maxProviderGapMs > this.adaptiveMaximumProviderGapMs) {
+      return { start: false, reason: 'provider_gap', bufferedMs, providerLeadMs };
+    }
+    if (providerLeadMs < this.adaptiveSafetyLeadMs) {
+      return { start: false, reason: 'insufficient_lead', bufferedMs, providerLeadMs };
+    }
+    return { start: true, reason: 'adaptive_buffer', bufferedMs, providerLeadMs };
+  }
+
+  markAdaptiveResponseUnstable(binding, reason) {
+    if (binding.transport !== 'tcp') return;
+    const profile = this.bufferProfileFor(binding.deviceId);
+    profile.targetMs = this.maximumStartBufferMs;
+    profile.smoothResponses = 0;
+    profile.lastReason = reason;
+    binding.adaptiveTargetMs = profile.targetMs;
+  }
+
+  finalizeAdaptiveResponse(binding) {
+    if (binding.transport !== 'tcp' || binding.responseQualityFinalized) return;
+    binding.responseQualityFinalized = true;
+    const profile = this.bufferProfileFor(binding.deviceId);
+    const providerLeadMs = this.providerLeadMs(binding, binding.lastProviderChunkAt || this.now());
+    if (binding.responseHadUnderrun
+        || binding.maxProviderGapMs >= this.adaptiveUnstableProviderGapMs) {
+      this.markAdaptiveResponseUnstable(
+        binding,
+        binding.responseHadUnderrun ? 'device_underrun' : 'provider_gap'
+      );
+      return;
+    }
+    const smooth = binding.maxProviderGapMs <= this.adaptiveMaximumProviderGapMs
+      && providerLeadMs >= this.adaptiveSafetyLeadMs;
+    if (!smooth) {
+      profile.smoothResponses = 0;
+      profile.lastReason = 'held';
+      return;
+    }
+    profile.smoothResponses += 1;
+    profile.lastReason = 'smooth';
+    if (profile.smoothResponses < this.adaptiveSmoothResponses) return;
+    profile.targetMs = Math.max(
+      this.adaptiveMinimumBufferMs,
+      profile.targetMs - this.adaptiveStepMs
+    );
+    profile.smoothResponses = 0;
+    profile.lastReason = 'reduced_after_smooth_responses';
+  }
+
   handleTelemetry(device, message) {
     if (!message || typeof message.type !== 'string') return;
     device.lastSeenAt = this.now();
@@ -351,6 +479,10 @@ class MentorSpeakerService extends EventEmitter {
 
     const binding = device.activeSessionId ? this.bindings.get(device.activeSessionId) : null;
     if (binding && (!message.sessionId || message.sessionId === binding.sessionId)) {
+      if (message.type === 'underrun') {
+        binding.responseHadUnderrun = true;
+        this.markAdaptiveResponseUnstable(binding, 'device_underrun');
+      }
       if (Number.isFinite(Number(message.bufferedMs))) {
         binding.bufferedBytes = Math.max(
           0,
@@ -368,6 +500,7 @@ class MentorSpeakerService extends EventEmitter {
         if (resent) binding.lastEndSentAt = this.now();
       }
       if (message.type === 'ended' || message.type === 'cleared') {
+        if (message.type === 'ended') this.finalizeAdaptiveResponse(binding);
         binding.speaking = false;
         this.resetAudioQueue(binding);
       } else if (binding.speaking) {
@@ -381,12 +514,15 @@ class MentorSpeakerService extends EventEmitter {
           queuedMs: Math.round(binding.queuedBytes * 1000 / SPEAKER_BYTES_PER_SECOND),
           providerChunkCount: binding.providerChunkCount,
           maxProviderGapMs: binding.maxProviderGapMs,
+          adaptiveTargetMs: binding.adaptiveTargetMs,
+          providerLeadMs: this.providerLeadMs(binding),
           error: message.error || null,
           freeHeap: device.freeHeap,
           freePsram: device.freePsram,
           sensorMaxGapMs: device.sensorMaxGapMs,
           i2sBytesPerSecond: device.i2sBytesPerSecond,
-          i2sTimeoutsPerSecond: device.i2sTimeoutsPerSecond
+          i2sTimeoutsPerSecond: device.i2sTimeoutsPerSecond,
+          adaptiveStartBufferMs: this.bufferProfileFor(device.id).targetMs
         });
       }
       if (message.type === 'underrun') {
@@ -413,12 +549,19 @@ class MentorSpeakerService extends EventEmitter {
     const binding = device.activeSessionId ? this.bindings.get(device.activeSessionId) : null;
     if (binding) {
       binding.speaking = false;
-      binding.degraded = true;
-      if (binding.requestedMode === 'auto') {
+      if (this.relayService?.canMixMentor?.()) {
+        binding.transport = 'relay';
+        binding.resolvedOutput = 'board';
+        binding.fallback = false;
+        binding.degraded = false;
+        this.publish(binding, 'ready', { reason: 'spotify_relay_active' });
+      } else if (binding.requestedMode === 'auto') {
+        binding.degraded = true;
         binding.resolvedOutput = 'browser';
         binding.fallback = true;
         this.publish(binding, 'fallback', { reason });
       } else {
+        binding.degraded = true;
         this.publish(binding, 'disconnected', { reason });
       }
     }
@@ -428,7 +571,7 @@ class MentorSpeakerService extends EventEmitter {
   }
 
   listDevices() {
-    return [...this.devices.values()]
+    const devices = [...this.devices.values()]
       .map((device) => ({
         id: device.id,
         status: device.state,
@@ -441,22 +584,49 @@ class MentorSpeakerService extends EventEmitter {
         sensorMaxGapMs: device.sensorMaxGapMs,
         i2sBytesPerSecond: device.i2sBytesPerSecond,
         i2sTimeoutsPerSecond: device.i2sTimeoutsPerSecond,
+        adaptiveStartBufferMs: this.bufferProfileFor(device.id).targetMs,
         capabilities: {
           encoding: device.capabilities.encoding,
           sampleRate: Number(device.capabilities.sampleRate),
           channels: Number(device.capabilities.channels),
           bufferBytes: Number(device.capabilities.bufferBytes) || null
         }
-      }))
-      .sort((left, right) => left.id.localeCompare(right.id));
+      }));
+    if (this.relayService?.canMixMentor?.()
+        && !devices.some((device) => device.id === this.defaultDeviceId)) {
+      devices.push({
+        id: this.defaultDeviceId,
+        status: 'relay',
+        connectedAt: null,
+        lastSeenAt: this.now(),
+        bufferedMs: 0,
+        underruns: 0,
+        freeHeap: null,
+        freePsram: null,
+        sensorMaxGapMs: null,
+        i2sBytesPerSecond: null,
+        i2sTimeoutsPerSecond: null,
+        adaptiveStartBufferMs: null,
+        capabilities: {
+          encoding: 'pcm16_mixed_http_mp3',
+          sampleRate: SPEAKER_SAMPLE_RATE,
+          channels: 1,
+          bufferBytes: null
+        }
+      });
+    }
+    return devices.sort((left, right) => left.id.localeCompare(right.id));
   }
 
   bindSession({ conversationId, sessionId, outputMode = 'auto', deviceId, volume = DEFAULT_VOLUME }) {
     const requestedMode = normalizeOutputMode(outputMode);
     const selectedDeviceId = String(deviceId || this.defaultDeviceId);
     const device = this.devices.get(selectedDeviceId);
-    const available = device && !device.socket.destroyed && device.state !== 'degraded'
+    const tcpAvailable = device && !device.socket.destroyed && device.state !== 'degraded'
       && (!device.activeSessionId || device.activeSessionId === sessionId);
+    const relayAvailable = selectedDeviceId === this.defaultDeviceId
+      && this.relayService?.canMixMentor?.();
+    const available = tcpAvailable || relayAvailable;
     if (requestedMode === 'board' && !available) {
       throw speakerError(
         `Board speaker ${selectedDeviceId} is not available.`,
@@ -485,19 +655,28 @@ class MentorSpeakerService extends EventEmitter {
       bufferUpdatedAt: this.now(),
       pumpTimer: null,
       idleTimer: null,
+      relayEndTimer: null,
       endRequested: false,
       endSent: false,
       lastEndSentAt: 0,
       degraded: false,
       fallback: requestedMode === 'auto' && !available,
+      transport: relayAvailable ? 'relay' : tcpAvailable ? 'tcp' : 'browser',
       providerChunkCount: 0,
       providerBytes: 0,
       firstProviderChunkAt: null,
       lastProviderChunkAt: null,
-      maxProviderGapMs: 0
+      maxProviderGapMs: 0,
+      responseHadUnderrun: false,
+      responseQualityFinalized: false,
+      adaptiveTargetMs: this.bufferProfileFor(selectedDeviceId).targetMs,
+      adaptiveStartReason: null,
+      adaptiveBufferedAtStartMs: 0
     };
     this.bindings.set(sessionId, binding);
-    if (binding.resolvedOutput === 'board') device.activeSessionId = sessionId;
+    if (binding.resolvedOutput === 'board' && binding.transport === 'tcp') {
+      device.activeSessionId = sessionId;
+    }
     this.publish(binding, binding.fallback ? 'fallback' : 'ready', {
       reason: binding.fallback ? 'board_unavailable' : null
     });
@@ -510,7 +689,8 @@ class MentorSpeakerService extends EventEmitter {
       resolvedOutput: binding.resolvedOutput,
       deviceId: binding.deviceId,
       boardVolume: binding.volume,
-      speakerStatus: binding.fallback ? 'fallback' : binding.resolvedOutput === 'board' ? 'ready' : 'browser'
+      speakerStatus: binding.fallback ? 'fallback' : binding.resolvedOutput === 'board' ? 'ready' : 'browser',
+      adaptiveStartBufferMs: binding.transport === 'tcp' ? binding.adaptiveTargetMs : null
     };
   }
 
@@ -584,6 +764,8 @@ class MentorSpeakerService extends EventEmitter {
   resetPlaybackQueue(binding) {
     this.cancelPump(binding);
     this.cancelIdleGuard(binding);
+    if (binding.relayEndTimer) clearTimeout(binding.relayEndTimer);
+    binding.relayEndTimer = null;
     binding.audioQueue = [];
     binding.queuedBytes = 0;
     binding.bufferedBytes = 0;
@@ -699,7 +881,12 @@ class MentorSpeakerService extends EventEmitter {
     });
     if (!this.write(device, frame)) return false;
     binding.speaking = true;
-    this.publish(binding, 'playing');
+    this.publish(binding, 'playing', {
+      adaptiveStartBufferMs: binding.adaptiveTargetMs,
+      bufferedResponseMs: binding.adaptiveBufferedAtStartMs,
+      providerLeadMs: this.providerLeadMs(binding),
+      startReason: binding.adaptiveStartReason || 'response_complete'
+    });
     return true;
   }
 
@@ -708,6 +895,9 @@ class MentorSpeakerService extends EventEmitter {
     if (binding.responseBytes === 0) return false;
     const responseQueue = binding.responseQueue;
     const responseBytes = binding.responseBytes;
+    binding.adaptiveBufferedAtStartMs = Math.round(
+      responseBytes * 1000 / SPEAKER_BYTES_PER_SECOND
+    );
     binding.responseQueue = [];
     binding.responseBytes = 0;
     if (!this.startSpeech(binding, device)) {
@@ -723,10 +913,9 @@ class MentorSpeakerService extends EventEmitter {
 
   routeAudio({ conversationId, sessionId, pcm, sampleRate = SPEAKER_SAMPLE_RATE }) {
     const binding = this.bindings.get(sessionId);
-    if (!binding || binding.conversationId !== conversationId || binding.resolvedOutput !== 'board') {
+    if (!binding || binding.conversationId !== conversationId || binding.requestedMode === 'browser') {
       return { destination: 'browser', reason: binding?.fallback ? 'fallback' : 'browser_selected' };
     }
-    const device = this.devices.get(binding.deviceId);
     const bytes = Buffer.isBuffer(pcm) ? pcm : Buffer.from(pcm || []);
     if (binding.responseRejected) {
       return {
@@ -734,19 +923,74 @@ class MentorSpeakerService extends EventEmitter {
         reason: 'audio_response_limit'
       };
     }
+    const relayAvailable = binding.deviceId === this.defaultDeviceId
+      && this.relayService?.canMixMentor?.();
+    if (relayAvailable) {
+      if (sampleRate !== SPEAKER_SAMPLE_RATE || bytes.length === 0 || bytes.length % 2 !== 0) {
+        return this.degradeBinding(binding, 'relay_pcm_unavailable');
+      }
+      if (!binding.collectingResponse) {
+        binding.providerChunkCount = 0;
+        binding.providerBytes = 0;
+        binding.firstProviderChunkAt = null;
+        binding.lastProviderChunkAt = null;
+        binding.maxProviderGapMs = 0;
+        binding.collectingResponse = true;
+      }
+      const receivedAt = this.now();
+      if (binding.firstProviderChunkAt === null) binding.firstProviderChunkAt = receivedAt;
+      if (binding.lastProviderChunkAt !== null) {
+        binding.maxProviderGapMs = Math.max(binding.maxProviderGapMs, receivedAt - binding.lastProviderChunkAt);
+      }
+      binding.lastProviderChunkAt = receivedAt;
+      if (binding.providerBytes + bytes.length > this.maxResponseBytes) {
+        return this.rejectOversizedResponse(binding);
+      }
+      binding.providerChunkCount += 1;
+      binding.providerBytes += bytes.length;
+      binding.transport = 'relay';
+      binding.resolvedOutput = 'board';
+      binding.fallback = false;
+      binding.degraded = false;
+      if (!this.relayService.routeMentorPcm({
+        sessionId,
+        pcm: bytes,
+        volume: binding.volume,
+        sampleRate
+      })) {
+        return this.degradeBinding(binding, 'relay_backpressure');
+      }
+      if (!binding.speaking) {
+        binding.speaking = true;
+        this.publish(binding, 'playing', { transport: 'spotify-relay' });
+      }
+      return {
+        destination: 'board',
+        deviceId: binding.deviceId,
+        transport: 'spotify-relay',
+        bufferedResponseMs: Math.round(
+          (this.relayService.status().buffers?.voiceBytes || 0) * 1000 / SPEAKER_BYTES_PER_SECOND
+        )
+      };
+    }
+    if (binding.resolvedOutput !== 'board') {
+      return { destination: 'browser', reason: binding.fallback ? 'fallback' : 'browser_selected' };
+    }
+    const device = this.devices.get(binding.deviceId);
     if (!device || device.activeSessionId !== sessionId || device.state === 'degraded'
       || sampleRate !== SPEAKER_SAMPLE_RATE || bytes.length === 0 || bytes.length % 2 !== 0) {
       return this.degradeBinding(binding, 'device_or_pcm_unavailable');
     }
     if (!binding.collectingResponse && !binding.speaking && binding.responseBytes === 0) {
-      binding.providerChunkCount = 0;
-      binding.providerBytes = 0;
-      binding.firstProviderChunkAt = null;
-      binding.lastProviderChunkAt = null;
-      binding.maxProviderGapMs = 0;
+      this.prepareAdaptiveResponse(binding);
       binding.adpcmState = createImaAdpcmState();
       binding.collectingResponse = true;
-      this.publish(binding, 'buffering', { bufferedResponseMs: 0 });
+      this.publish(binding, 'buffering', {
+        bufferedResponseMs: 0,
+        adaptiveStartBufferMs: binding.adaptiveTargetMs,
+        maximumStartBufferMs: this.maximumStartBufferMs,
+        providerLeadMs: 0
+      });
     }
     const receivedAt = this.now();
     if (binding.firstProviderChunkAt === null) binding.firstProviderChunkAt = receivedAt;
@@ -771,9 +1015,12 @@ class MentorSpeakerService extends EventEmitter {
     } else {
       if (encodedAudio.length > 0) binding.responseQueue.push(encodedAudio);
       binding.responseBytes += decodedBytes;
-      if (binding.responseBytes >= this.startBufferBytes
-          && !this.startBufferedPlayback(binding, device)) {
-        return this.degradeBinding(binding, 'start_backpressure');
+      const decision = this.adaptiveStartDecision(binding);
+      if (decision.start) {
+        binding.adaptiveStartReason = decision.reason;
+        if (!this.startBufferedPlayback(binding, device)) {
+          return this.degradeBinding(binding, 'start_backpressure');
+        }
       }
     }
     return {
@@ -783,16 +1030,19 @@ class MentorSpeakerService extends EventEmitter {
       bufferedResponseMs: Math.round(
         (binding.responseBytes + binding.queuedBytes + this.estimatedBufferedBytes(binding))
         * 1000 / SPEAKER_BYTES_PER_SECOND
-      )
+      ),
+      adaptiveStartBufferMs: binding.adaptiveTargetMs,
+      providerLeadMs: this.providerLeadMs(binding)
     };
   }
 
   degradeBinding(binding, reason) {
+    if (binding.transport === 'relay') this.relayService?.clearMentorPcm?.(binding.sessionId);
     this.resetAudioQueue(binding);
     binding.speaking = false;
     binding.degraded = true;
     const device = this.devices.get(binding.deviceId);
-    if (device) device.state = 'degraded';
+    if (device && binding.transport !== 'relay') device.state = 'degraded';
     if (binding.requestedMode === 'auto') {
       binding.resolvedOutput = 'browser';
       binding.fallback = true;
@@ -805,6 +1055,7 @@ class MentorSpeakerService extends EventEmitter {
 
   rejectOversizedResponse(binding) {
     const device = this.devices.get(binding.deviceId);
+    if (binding.transport === 'relay') this.relayService?.clearMentorPcm?.(binding.sessionId);
     if (binding.speaking && device?.activeSessionId === binding.sessionId) {
       this.write(device, createSpeakerFrame(FRAME_TYPES.CLEAR, {
         sessionId: binding.sessionId,
@@ -828,6 +1079,22 @@ class MentorSpeakerService extends EventEmitter {
   endSpeech(conversationId, sessionId) {
     const binding = this.bindings.get(sessionId);
     if (!binding || binding.conversationId !== conversationId) return false;
+    if (binding.transport === 'relay') {
+      const ended = this.relayService?.endMentorPcm?.(sessionId) || false;
+      binding.collectingResponse = false;
+      if (binding.relayEndTimer) clearTimeout(binding.relayEndTimer);
+      const bufferedMs = Math.round(
+        (this.relayService?.status?.().buffers?.voiceBytes || 0) * 1000 / SPEAKER_BYTES_PER_SECOND
+      );
+      binding.relayEndTimer = setTimeout(() => {
+        binding.relayEndTimer = null;
+        if (!binding.speaking) return;
+        binding.speaking = false;
+        this.publish(binding, ended ? 'ended' : 'degraded', { transport: 'spotify-relay' });
+      }, bufferedMs + 2800);
+      binding.relayEndTimer.unref?.();
+      return ended;
+    }
     const device = this.devices.get(binding.deviceId);
     if (!device || device.activeSessionId !== sessionId) return false;
     if (binding.responseRejected) {
@@ -837,10 +1104,12 @@ class MentorSpeakerService extends EventEmitter {
     }
     binding.collectingResponse = false;
     this.flushPendingAudio(binding);
-    if (!binding.speaking && binding.responseBytes > 0
-        && !this.startBufferedPlayback(binding, device)) {
-      this.degradeBinding(binding, 'start_backpressure');
-      return false;
+    if (!binding.speaking && binding.responseBytes > 0) {
+      binding.adaptiveStartReason = 'response_complete';
+      if (!this.startBufferedPlayback(binding, device)) {
+        this.degradeBinding(binding, 'start_backpressure');
+        return false;
+      }
     }
     if (!binding.speaking) return false;
     binding.endRequested = true;
@@ -852,7 +1121,9 @@ class MentorSpeakerService extends EventEmitter {
     this.logger.log?.(
       `[Mentor Speaker] ${binding.deviceId} response received `
       + `${providerAudioMs}ms audio across ${providerElapsedMs}ms; `
-      + `${binding.providerChunkCount} chunks, largest gap ${binding.maxProviderGapMs}ms`
+      + `${binding.providerChunkCount} chunks, largest gap ${binding.maxProviderGapMs}ms; `
+      + `start=${binding.adaptiveStartReason || 'response_complete'} at `
+      + `${binding.adaptiveTargetMs}ms target`
     );
     this.pumpAudio(binding);
     return true;
@@ -862,6 +1133,9 @@ class MentorSpeakerService extends EventEmitter {
     const binding = this.bindings.get(sessionId);
     if (!binding || binding.conversationId !== conversationId) return false;
     const device = this.devices.get(binding.deviceId);
+    if (binding.transport === 'relay') this.relayService?.clearMentorPcm?.(sessionId);
+    if (binding.relayEndTimer) clearTimeout(binding.relayEndTimer);
+    binding.relayEndTimer = null;
     binding.speaking = false;
     this.resetAudioQueue(binding);
     if (device?.activeSessionId === sessionId) {
@@ -927,6 +1201,11 @@ module.exports = {
   SPEAKER_TRANSPORT_BYTES_PER_SECOND,
   SPEAKER_START_BUFFER_BYTES,
   SPEAKER_START_BUFFER_MS,
+  SPEAKER_ADAPTIVE_INITIAL_BUFFER_MS,
+  SPEAKER_ADAPTIVE_MIN_BUFFER_MS,
+  SPEAKER_ADAPTIVE_SAFETY_LEAD_MS,
+  SPEAKER_ADAPTIVE_MAX_PROVIDER_GAP_MS,
+  SPEAKER_ADAPTIVE_UNSTABLE_PROVIDER_GAP_MS,
   createSpeakerFrame,
   createImaAdpcmState,
   decodeImaAdpcmToPcm16Le,

@@ -9,6 +9,7 @@ const path = require('path');
 const fs = require('fs');
 const { randomUUID } = require('crypto');
 const { createMentorFeature, MentorSpeakerService } = require('./mentor');
+const { SpotifyRelayService } = require('./audio/spotify-relay-service');
 
 const app = express();
 const server = http.createServer(app);
@@ -32,8 +33,73 @@ app.use(express.json());
 // Serve React production build static assets
 app.use(express.static(path.join(__dirname, 'client/dist')));
 
+let physicalAudioControl = {
+  revision: 0,
+  mode: 'mentor',
+  streamUrl: null,
+  updatedAt: Date.now()
+};
+let physicalAudioReported = {
+  mode: 'unknown',
+  state: 'unknown',
+  retries: 0,
+  revision: 0,
+  lastError: null,
+  updatedAt: null
+};
+
+const spotifyRelayService = new SpotifyRelayService({
+  token: process.env.ESP32_AUDIO_TOKEN,
+  host: process.env.SPOTIFY_RELAY_HOST || '0.0.0.0',
+  streamHost: process.env.SPOTIFY_RELAY_PUBLIC_HOST || process.env.CHESS_AUDIO_SERVER_HOST || ''
+});
+
+function updatePhysicalAudioControl(status) {
+  const mode = status.enabled && status.spotifyActive && status.state !== 'recovering'
+    ? 'relay'
+    : 'mentor';
+  const streamUrl = mode === 'relay' ? status.streamUrl : null;
+  if (physicalAudioControl.mode === mode && physicalAudioControl.streamUrl === streamUrl) return;
+  physicalAudioControl = {
+    revision: physicalAudioControl.revision + 1,
+    mode,
+    streamUrl,
+    updatedAt: Date.now()
+  };
+}
+
+spotifyRelayService.on('status', (status) => {
+  updatePhysicalAudioControl(status);
+  io.emit('spotify-relay-status', { ...status, boardStatus: physicalAudioReported });
+});
+
+app.get('/api/audio/spotify', (req, res) => {
+  res.json({ ...spotifyRelayService.status(), boardStatus: physicalAudioReported });
+});
+
+app.put('/api/audio/spotify', async (req, res) => {
+  if (typeof req.body?.enabled !== 'boolean') {
+    return res.status(400).json({ success: false, error: 'enabled must be true or false.' });
+  }
+  try {
+    const status = req.body.enabled
+      ? await spotifyRelayService.enable()
+      : await spotifyRelayService.disable();
+    return res.json({ success: true, ...status, boardStatus: physicalAudioReported });
+  } catch (error) {
+    console.error('[Spotify Relay]', error.message);
+    return res.status(503).json({
+      success: false,
+      error: error.message,
+      ...spotifyRelayService.status(),
+      boardStatus: physicalAudioReported
+    });
+  }
+});
+
 const mentorSpeakerService = new MentorSpeakerService({
   token: process.env.ESP32_AUDIO_TOKEN,
+  relayService: spotifyRelayService,
   emitStatus: (conversationId, payload) => {
     io.to(`mentor:${conversationId}`).emit('mentor-speaker-status', payload);
   }
@@ -7266,6 +7332,21 @@ app.post('/api/physical/snapshot', async (req, res) => {
   }
 
   try {
+    if (req.body?.audioStatus && typeof req.body.audioStatus === 'object') {
+      physicalAudioReported = {
+        mode: String(req.body.audioStatus.mode || 'unknown'),
+        state: String(req.body.audioStatus.state || 'unknown'),
+        retries: Math.max(0, Number(req.body.audioStatus.retries) || 0),
+        revision: Math.max(0, Number(req.body.audioStatus.revision) || 0),
+        lastError: req.body.audioStatus.lastError
+          ? String(req.body.audioStatus.lastError).slice(0, 160)
+          : null,
+        updatedAt: Date.now()
+      };
+      spotifyRelayService.setBoardRelayReady(
+        physicalAudioReported.mode === 'relay' && physicalAudioReported.state === 'relay'
+      );
+    }
     const commandIdsBefore = new Set(physicalSession.commands.map((command) => command.id));
     await processPhysicalSnapshot(occupancy, {
       seq: req.body?.seq,
@@ -7290,6 +7371,7 @@ app.get('/api/physical/poll', (req, res) => {
     success: true,
     phase: physicalSession.phase,
     commands,
+    audio: physicalAudioControl,
     state: serializePhysicalState()
   });
 });
@@ -7585,6 +7667,14 @@ function startServers() {
 
 if (require.main === module) {
   startServers();
+  const shutdown = async () => {
+    await spotifyRelayService.close().catch(() => {});
+    await mentorFeature.close().catch(() => {});
+    if (server.listening) server.close(() => process.exit(0));
+    else process.exit(0);
+  };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
 }
 
 module.exports = {
@@ -7592,6 +7682,7 @@ module.exports = {
   server,
   audioServer,
   mentorFeature,
+  spotifyRelayService,
   startServers,
   physicalPlanner: {
     PHYSICAL_START_FEN,

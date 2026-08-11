@@ -65,6 +65,14 @@ export function useMentorLive({ socket, conversationId, onMessage, onError, onCo
   const [partialAssistant, setPartialAssistant] = useState(null);
   const [audioPreferences, setAudioPreferences] = useState(loadAudioPreferences);
   const [speakerDevices, setSpeakerDevices] = useState([]);
+  const [spotifyRelay, setSpotifyRelay] = useState({
+    enabled: false,
+    state: 'disabled',
+    spotifyActive: false,
+    boardMode: 'mentor',
+    lastError: null
+  });
+  const [spotifyRelayBusy, setSpotifyRelayBusy] = useState(false);
   const sessionRef = useRef(null);
   const startingRef = useRef(false);
   const startAttemptRef = useRef(0);
@@ -108,6 +116,51 @@ export function useMentorLive({ socket, conversationId, onMessage, onError, onCo
       cancelled = true;
       window.clearInterval(timer);
     };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const response = await fetch('/api/audio/spotify');
+        if (!response.ok) return;
+        const body = await response.json();
+        if (!cancelled) setSpotifyRelay(body);
+      } catch {
+        // The normal mentor speaker remains available when the optional relay is offline.
+      }
+    };
+    const onStatus = (status) => {
+      if (!cancelled) setSpotifyRelay(status);
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 5000);
+    socket?.on('spotify-relay-status', onStatus);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      socket?.off('spotify-relay-status', onStatus);
+    };
+  }, [socket]);
+
+  const setSpotifyRelayEnabled = useCallback(async (enabled) => {
+    setSpotifyRelayBusy(true);
+    try {
+      const response = await fetch('/api/audio/spotify', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled })
+      });
+      const body = await response.json().catch(() => ({}));
+      setSpotifyRelay(body);
+      if (!response.ok || body.success === false) {
+        throw new Error(body.error || 'Unable to change Spotify Connect state.');
+      }
+    } catch (error) {
+      callbacksRef.current.onError?.(error.message);
+    } finally {
+      setSpotifyRelayBusy(false);
+    }
   }, []);
 
   const updateState = useCallback((patch) => {
@@ -521,6 +574,8 @@ export function useMentorLive({ socket, conversationId, onMessage, onError, onCo
     partialAssistant,
     ...audioPreferences,
     speakerDevices,
+    spotifyRelay,
+    spotifyRelayBusy,
     start,
     stop,
     toggleMute,
@@ -528,6 +583,7 @@ export function useMentorLive({ socket, conversationId, onMessage, onError, onCo
     interruptOutput,
     setOutputMode,
     setDeviceId,
-    setBoardVolume
+    setBoardVolume,
+    setSpotifyRelayEnabled
   };
 }

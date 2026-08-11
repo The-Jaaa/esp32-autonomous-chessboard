@@ -16,6 +16,12 @@ const {
   SPEAKER_FEED_AHEAD_MS,
   SPEAKER_HEADER_BYTES,
   SPEAKER_PROTOCOL_VERSION,
+  SPEAKER_ADAPTIVE_INITIAL_BUFFER_MS,
+  SPEAKER_ADAPTIVE_MAX_PROVIDER_GAP_MS,
+  SPEAKER_ADAPTIVE_MIN_BUFFER_MS,
+  SPEAKER_ADAPTIVE_SAFETY_LEAD_MS,
+  SPEAKER_ADAPTIVE_UNSTABLE_PROVIDER_GAP_MS,
+  SPEAKER_BYTES_PER_SECOND,
   SPEAKER_START_BUFFER_BYTES,
   SPEAKER_START_BUFFER_MS,
   createImaAdpcmState,
@@ -124,12 +130,136 @@ class FakeSpeakerBoard {
   }
 }
 
+async function adaptiveBufferRegressions() {
+  let clock = 10000;
+  const statuses = [];
+  const service = new MentorSpeakerService({
+    token: 'speaker-test-token',
+    startBufferBytes: SPEAKER_BYTES_PER_SECOND,
+    adaptiveInitialBufferMs: 600,
+    adaptiveMinimumBufferMs: 400,
+    adaptiveSafetyLeadMs: 250,
+    adaptiveMaximumProviderGapMs: 100,
+    adaptiveUnstableProviderGapMs: 300,
+    adaptiveStepMs: 100,
+    adaptiveSmoothResponses: 2,
+    now: () => clock,
+    emitStatus: (_conversationId, status) => statuses.push(status),
+    logger: { log() {}, warn() {} }
+  });
+  service.listen(0, '127.0.0.1');
+  await waitForEvent(service.server, 'listening');
+  const board = new FakeSpeakerBoard({ port: service.server.address().port });
+  await board.connect();
+
+  service.bindSession({ conversationId: 'fast', sessionId: 'fast', outputMode: 'board' });
+  service.routeAudio({
+    conversationId: 'fast',
+    sessionId: 'fast',
+    pcm: Buffer.alloc(SPEAKER_BYTES_PER_SECOND * 0.6, 1)
+  });
+  await waitForCondition(
+    () => board.frames.some((frame) => frame.type === FRAME_TYPES.START),
+    'Fast provider audio should start at the adaptive target.'
+  );
+  const fastPlaying = statuses.find((status) => (
+    status.sessionId === 'fast' && status.status === 'playing'
+  ));
+  assert.strictEqual(fastPlaying.startReason, 'adaptive_buffer');
+  assert.strictEqual(fastPlaying.adaptiveStartBufferMs, 600);
+  assert.ok(fastPlaying.providerLeadMs >= 250);
+  service.endSpeech('fast', 'fast');
+  board.telemetry({ type: 'ended', sessionId: 'fast', bufferedMs: 0 });
+  await waitForCondition(
+    () => statuses.some((status) => status.sessionId === 'fast' && status.status === 'ended'),
+    'Expected the fast response to finalize.'
+  );
+  service.releaseSession('fast', 'fast', 'test_complete');
+
+  board.frames = [];
+  service.bindSession({ conversationId: 'slow', sessionId: 'slow', outputMode: 'board' });
+  const hundredMs = Buffer.alloc(SPEAKER_BYTES_PER_SECOND * 0.1, 2);
+  for (let index = 0; index < 6; index += 1) {
+    if (index > 0) clock += 100;
+    service.routeAudio({ conversationId: 'slow', sessionId: 'slow', pcm: hundredMs });
+  }
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.strictEqual(
+    board.frames.some((frame) => frame.type === FRAME_TYPES.START),
+    false,
+    'Near-real-time provider audio must not start with insufficient safety lead.'
+  );
+  for (let index = 6; index < 10; index += 1) {
+    clock += 100;
+    service.routeAudio({ conversationId: 'slow', sessionId: 'slow', pcm: hundredMs });
+  }
+  await waitForCondition(
+    () => board.frames.some((frame) => frame.type === FRAME_TYPES.START),
+    'The maximum buffer must eventually start a slow provider response.'
+  );
+  const slowPlaying = statuses.find((status) => (
+    status.sessionId === 'slow' && status.status === 'playing'
+  ));
+  assert.strictEqual(slowPlaying.startReason, 'maximum_buffer');
+  service.endSpeech('slow', 'slow');
+  board.telemetry({ type: 'ended', sessionId: 'slow', bufferedMs: 0 });
+  await waitForCondition(
+    () => statuses.some((status) => status.sessionId === 'slow' && status.status === 'ended'),
+    'Expected the slow response to finalize.'
+  );
+  service.releaseSession('slow', 'slow', 'test_complete');
+
+  board.frames = [];
+  clock += 1000;
+  service.bindSession({ conversationId: 'unstable', sessionId: 'unstable', outputMode: 'board' });
+  service.routeAudio({
+    conversationId: 'unstable',
+    sessionId: 'unstable',
+    pcm: Buffer.alloc(SPEAKER_BYTES_PER_SECOND * 0.6, 3)
+  });
+  await waitForCondition(
+    () => board.frames.some((frame) => frame.type === FRAME_TYPES.START),
+    'Expected the unstable test response to begin.'
+  );
+  board.telemetry({ type: 'underrun', sessionId: 'unstable', bufferedMs: 0 });
+  await waitForCondition(
+    () => service.listDevices()[0].adaptiveStartBufferMs === 1000,
+    'An underrun should restore the maximum startup buffer.'
+  );
+  service.endSpeech('unstable', 'unstable');
+  board.telemetry({ type: 'ended', sessionId: 'unstable', bufferedMs: 0 });
+  await waitForCondition(
+    () => statuses.some((status) => status.sessionId === 'unstable' && status.status === 'ended'),
+    'Expected the unstable response to finalize.'
+  );
+  service.releaseSession('unstable', 'unstable', 'test_complete');
+
+  board.frames = [];
+  service.bindSession({ conversationId: 'recovery', sessionId: 'recovery', outputMode: 'board' });
+  service.routeAudio({ conversationId: 'recovery', sessionId: 'recovery', pcm: hundredMs });
+  assert.strictEqual(service.listDevices()[0].adaptiveStartBufferMs, 1000);
+  const recoveryBuffering = statuses.find((status) => (
+    status.sessionId === 'recovery' && status.status === 'buffering'
+  ));
+  assert.strictEqual(recoveryBuffering.adaptiveStartBufferMs, 1000);
+  assert.strictEqual(board.frames.some((frame) => frame.type === FRAME_TYPES.START), false);
+  service.releaseSession('recovery', 'recovery', 'test_complete');
+
+  board.close();
+  await service.close();
+}
+
 async function protocolRegressions() {
   assert.strictEqual(SPEAKER_FEED_AHEAD_MS, 2500);
   assert.strictEqual(MAX_SPEAKER_QUEUE_BYTES, 24000 * 2 * 42);
   assert.strictEqual(MAX_BUFFERED_RESPONSE_BYTES, 24000 * 2 * 40);
   assert.strictEqual(SPEAKER_START_BUFFER_MS, 10000);
   assert.strictEqual(SPEAKER_START_BUFFER_BYTES, 24000 * 2 * 10);
+  assert.strictEqual(SPEAKER_ADAPTIVE_INITIAL_BUFFER_MS, 6000);
+  assert.strictEqual(SPEAKER_ADAPTIVE_MIN_BUFFER_MS, 4000);
+  assert.strictEqual(SPEAKER_ADAPTIVE_SAFETY_LEAD_MS, 3000);
+  assert.strictEqual(SPEAKER_ADAPTIVE_MAX_PROVIDER_GAP_MS, 1500);
+  assert.strictEqual(SPEAKER_ADAPTIVE_UNSTABLE_PROVIDER_GAP_MS, 3000);
   assert.strictEqual(SPEAKER_END_RESEND_MS, 250);
   const codecSamples = Array.from({ length: 240 }, (_, index) => (
     Math.round(Math.sin(index * Math.PI / 24) * 12000)
@@ -487,6 +617,7 @@ async function liveRoutingRegressions() {
 }
 
 async function main() {
+  await adaptiveBufferRegressions();
   await protocolRegressions();
   await liveRoutingRegressions();
   console.log('Mentor speaker regressions passed.');

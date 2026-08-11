@@ -15,6 +15,7 @@ import {
   Lightbulb,
   Mic,
   MicOff,
+  Music2,
   LoaderCircle,
   Pencil,
   Play,
@@ -491,6 +492,17 @@ function LiveAudioControls({ live }) {
       <span className={`mentor-speaker-state is-${live.speakerStatus}`}>
         {live.outputMode === 'browser' ? 'Browser audio' : boardStatus}
       </span>
+      <label className="mentor-spotify-toggle" title="Make the chessboard available in Spotify Connect">
+        <Music2 size={14} />
+        <input
+          type="checkbox"
+          checked={Boolean(live.spotifyRelay?.enabled)}
+          disabled={live.spotifyRelayBusy}
+          onChange={(event) => live.setSpotifyRelayEnabled(event.target.checked)}
+          aria-label="Spotify Connect receiver"
+        />
+        <span>{live.spotifyRelayBusy ? 'Starting' : live.spotifyRelay?.state || 'disabled'}</span>
+      </label>
       {live.micGated && (
         <button className="mentor-interrupt-output" type="button" onClick={live.interruptOutput}>
           Interrupt response
