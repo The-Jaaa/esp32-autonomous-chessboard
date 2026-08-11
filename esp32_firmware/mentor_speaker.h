@@ -13,6 +13,7 @@ struct MentorSpeakerConfig {
 };
 
 bool beginMentorSpeaker(const MentorSpeakerConfig& config);
+void endMentorSpeaker();
 bool mentorSpeakerAvailable();
 bool mentorSpeakerConnected();
 bool mentorSpeakerPlaying();

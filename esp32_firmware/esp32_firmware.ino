@@ -13,7 +13,7 @@
 #include "offline_quiet_motion_hardware.h"
 #include "offline_capture_motion_hardware.h"
 #include "offline_lane_motion_hardware.h"
-#include "mentor_speaker.h"
+#include "audio_coordinator.h"
 
 #if __has_include("firmware_secrets.h")
 #include "firmware_secrets.h"
@@ -290,12 +290,17 @@ void setup() {
     !ENABLE_OFFLINE_QUIET_MOTION_DIAGNOSTICS && \
     !ENABLE_OFFLINE_CAPTURE_MOTION_DIAGNOSTICS && \
     !ENABLE_OFFLINE_LANE_MOTION_DIAGNOSTICS
-  MentorSpeakerConfig speakerConfig;
-  speakerConfig.host = AUDIO_SERVER_HOST;
-  speakerConfig.port = CHESS_AUDIO_SERVER_PORT;
-  speakerConfig.boardId = AUDIO_BOARD_ID;
-  speakerConfig.token = AUDIO_TOKEN;
-  beginMentorSpeaker(speakerConfig);
+  BoardAudioCoordinatorConfig audioConfig;
+  audioConfig.mentor.host = AUDIO_SERVER_HOST;
+  audioConfig.mentor.port = CHESS_AUDIO_SERVER_PORT;
+  audioConfig.mentor.boardId = AUDIO_BOARD_ID;
+  audioConfig.mentor.token = AUDIO_TOKEN;
+  audioConfig.token = AUDIO_TOKEN;
+  audioConfig.bclkPin = 10;
+  audioConfig.lrclkPin = 9;
+  audioConfig.dataPin = 11;
+  audioConfig.relayVolume = 20;
+  beginBoardAudioCoordinator(audioConfig);
 #endif
   beginOfflineEmbeddedDiagnostics();
 }
@@ -529,7 +534,7 @@ bool postSnapshot(bool force) {
     return false;
   }
 
-  StaticJsonDocument<1536> doc;
+  StaticJsonDocument<2048> doc;
   doc["seq"] = snapshotSeq++;
   doc["stable"] = true;
   doc["source"] = "esp32";
@@ -537,6 +542,13 @@ bool postSnapshot(bool force) {
   for (int i = 0; i < 64; i++) {
     occupancy.add(stableOccupancy[i]);
   }
+  JsonObject audioStatus = doc.createNestedObject("audioStatus");
+  audioStatus["mode"] = boardAudioMode();
+  audioStatus["state"] = boardAudioState();
+  audioStatus["retries"] = boardAudioRetries();
+  audioStatus["revision"] = boardAudioRevision();
+  const char* audioError = boardAudioLastError();
+  if (audioError && audioError[0]) audioStatus["lastError"] = audioError;
   if (xSemaphoreTake(sharedMutex, pdMS_TO_TICKS(2)) == pdTRUE) {
     if (promotionLedDisplay.active) {
       JsonObject promotion = doc.createNestedObject("promotionDisplay");
@@ -606,6 +618,7 @@ bool postJson(const String& endpoint, const String& payload, String* responseOut
 }
 
 void pollPhysicalCommands() {
+  static uint32_t lastAudioStatusSequence = UINT32_MAX;
   HTTPClient http;
   http.begin(String(SERVER_BASE_URL) + "/api/physical/poll");
   const int code = http.GET();
@@ -627,6 +640,19 @@ void pollPhysicalCommands() {
 #if ENABLE_OFFLINE_EMBEDDED_DIAGNOSTICS
   offlineDiagnosticSuccessfulPollCount++;
 #endif
+
+  JsonObject audio = doc["audio"].as<JsonObject>();
+  if (!audio.isNull()) {
+    const char* mode = audio["mode"] | "mentor";
+    const char* streamUrl = audio["streamUrl"] | "";
+    const uint32_t revision = audio["revision"] | 0;
+    applyBoardAudioDesiredState(mode, streamUrl, revision);
+  }
+  const uint32_t audioStatusSequence = boardAudioStatusSequence();
+  if (audioStatusSequence != lastAudioStatusSequence) {
+    lastAudioStatusSequence = audioStatusSequence;
+    markSnapshotDirty();
+  }
 
   JsonArray commands = doc["commands"].as<JsonArray>();
   for (JsonObject command : commands) {

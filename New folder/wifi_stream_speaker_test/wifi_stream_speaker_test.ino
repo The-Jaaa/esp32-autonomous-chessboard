@@ -15,6 +15,12 @@
 #include "Audio.h"
 #include "esp_system.h"
 
+#if __has_include("wifi_stream_secrets.h")
+#include "wifi_stream_secrets.h"
+#else
+#include "wifi_stream_secrets.example.h"
+#endif
+
 constexpr uint8_t I2S_DOUT_PIN = 11;
 constexpr uint8_t I2S_BCLK_PIN = 10;
 constexpr uint8_t I2S_LRC_PIN = 9;
@@ -28,9 +34,10 @@ constexpr uint32_t WIFI_STATUS_INTERVAL_MS = 5000;
 constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 5000;
 constexpr uint32_t RESTART_DELAY_MS = 2000;
 
-const char* WIFI_SSID = "YOUR_WIFI_NAME";
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
-const char* STREAM_URL = "http://YOUR_PC_IP:8000/test.mp3";
+const char* WIFI_SSID = STREAM_WIFI_SSID;
+const char* WIFI_PASSWORD = STREAM_WIFI_PASSWORD;
+const char* STREAM_URL = SPOTIFY_STREAM_URL;
+const char* STREAM_TOKEN = SPOTIFY_STREAM_TOKEN;
 
 Audio audio;
 HardwareSerial& DebugUart = Serial0;
@@ -187,7 +194,7 @@ void startStream() {
   logLine(line);
   printMemoryStatus("before connecttohost");
 
-  const bool ok = audio.connecttohost(STREAM_URL);
+  const bool ok = audio.connecttohost(STREAM_URL, "esp32", STREAM_TOKEN);
   streamStarted = ok;
 
   snprintf(line, sizeof(line), "[STREAM] connecttohost result=%s", ok ? "ok" : "failed");

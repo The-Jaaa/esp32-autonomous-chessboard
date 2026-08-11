@@ -75,6 +75,7 @@ WiFiClient audioClient;
 i2s_chan_handle_t i2sTx = nullptr;
 TaskHandle_t audioTaskHandle = nullptr;
 TaskHandle_t playbackTaskHandle = nullptr;
+volatile bool stopRequested = false;
 SemaphoreHandle_t ringMutex = nullptr;
 SemaphoreHandle_t i2sMutex = nullptr;
 SemaphoreHandle_t socketWriteMutex = nullptr;
@@ -594,7 +595,7 @@ bool receiveHandshake() {
 
 void mentorSpeakerTask(void*) {
   speakerAvailable = true;
-  for (;;) {
+  while (!stopRequested) {
     if (WiFi.status() != WL_CONNECTED) {
       if (audioClient.connected() || handshakeAccepted) disconnectAudio();
       vTaskDelay(pdMS_TO_TICKS(100));
@@ -629,16 +630,21 @@ void mentorSpeakerTask(void*) {
     }
     vTaskDelay(pdMS_TO_TICKS(1));
   }
+  disconnectAudio();
+  audioTaskHandle = nullptr;
+  vTaskDelete(nullptr);
 }
 
 void mentorSpeakerPlaybackTask(void*) {
-  for (;;) {
+  while (!stopRequested) {
     for (uint8_t writeIndex = 0; writeIndex < PLAYBACK_BURST_WRITES; ++writeIndex) {
       servicePlayback();
       if (prebuffering || ringCount() == 0) break;
     }
     vTaskDelay(pdMS_TO_TICKS(prebuffering ? 2 : 1));
   }
+  playbackTaskHandle = nullptr;
+  vTaskDelete(nullptr);
 }
 
 }  // namespace
@@ -650,6 +656,7 @@ bool beginMentorSpeaker(const MentorSpeakerConfig& config) {
     Serial.println("[MENTOR_SPEAKER] unavailable: configuration or PSRAM missing");
     return false;
   }
+  stopRequested = false;
   pcmRing.data = static_cast<uint8_t*>(heap_caps_malloc(
     RING_BYTES,
     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
@@ -751,6 +758,45 @@ bool beginMentorSpeaker(const MentorSpeakerConfig& config) {
     static_cast<unsigned int>(RING_BYTES)
   );
   return speakerAvailable;
+}
+
+void endMentorSpeaker() {
+  if (!audioTaskHandle && !playbackTaskHandle && !pcmRing.data && !i2sTx) return;
+  stopRequested = true;
+  audioClient.stop();
+  const uint32_t deadline = millis() + 750;
+  while ((audioTaskHandle || playbackTaskHandle) && static_cast<int32_t>(deadline - millis()) > 0) {
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+  if (audioTaskHandle) {
+    vTaskDelete(audioTaskHandle);
+    audioTaskHandle = nullptr;
+  }
+  if (playbackTaskHandle) {
+    vTaskDelete(playbackTaskHandle);
+    playbackTaskHandle = nullptr;
+  }
+  if (i2sTx) {
+    i2s_channel_disable(i2sTx);
+    i2s_del_channel(i2sTx);
+    i2sTx = nullptr;
+  }
+  if (ringMutex) vSemaphoreDelete(ringMutex);
+  if (i2sMutex) vSemaphoreDelete(i2sMutex);
+  if (socketWriteMutex) vSemaphoreDelete(socketWriteMutex);
+  ringMutex = nullptr;
+  i2sMutex = nullptr;
+  socketWriteMutex = nullptr;
+  if (pcmRing.data) heap_caps_free(pcmRing.data);
+  pcmRing = {};
+  receiver = {};
+  speakerAvailable = false;
+  speakerConnected = false;
+  speakerPlaying = false;
+  speakerBufferedMilliseconds = 0;
+  handshakeAccepted = false;
+  activeSessionId[0] = '\0';
+  Serial.println("[MENTOR_SPEAKER] stopped");
 }
 
 bool mentorSpeakerAvailable() {
