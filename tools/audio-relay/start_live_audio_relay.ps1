@@ -1,30 +1,41 @@
 param(
-  [string]$Device = "@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\wave_{39F03D20-FBE1-44F4-8E9C-B133CD54BC16}",
-  [int]$Port = 8001
+  [int]$Port = 8001,
+  [string]$HostAddress = "0.0.0.0",
+  [string]$PublicHost = ""
 )
 
 $ErrorActionPreference = "Stop"
 
-$root = Split-Path -Parent $PSScriptRoot
-$project = Split-Path -Parent $root
+$project = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $ffmpeg = Join-Path $project "tools\ffmpeg\extract\ffmpeg-8.1.2-essentials_build\bin\ffmpeg.exe"
+$librespot = Join-Path $project "tools\librespot\bin\librespot.exe"
 $relay = Join-Path $PSScriptRoot "live_audio_relay.js"
+$envFile = Join-Path $project "app\.env"
 
-if (!(Test-Path -LiteralPath $ffmpeg)) {
-  throw "ffmpeg.exe not found at $ffmpeg"
+if (!(Test-Path -LiteralPath $ffmpeg)) { throw "ffmpeg.exe not found at $ffmpeg" }
+if (!(Test-Path -LiteralPath $librespot)) {
+  throw "librespot.exe not found. Run tools\setup-librespot.ps1 first."
+}
+if (!(Test-Path -LiteralPath $relay)) { throw "Relay script not found at $relay" }
+
+if (!$env:ESP32_AUDIO_TOKEN -and (Test-Path -LiteralPath $envFile)) {
+  $tokenLine = Get-Content -LiteralPath $envFile |
+    Where-Object { $_ -match '^\s*ESP32_AUDIO_TOKEN\s*=' } |
+    Select-Object -First 1
+  if ($tokenLine) { $env:ESP32_AUDIO_TOKEN = ($tokenLine -split '=', 2)[1].Trim() }
+}
+if (!$env:ESP32_AUDIO_TOKEN) {
+  throw "ESP32_AUDIO_TOKEN is required in app\.env or the current environment."
 }
 
-if (!(Test-Path -LiteralPath $relay)) {
-  throw "Relay script not found at $relay"
-}
-
+$env:CHESS_PROJECT_ROOT = $project
 $env:FFMPEG_PATH = $ffmpeg
-$env:AUDIO_DEVICE = $Device
-$env:RELAY_PORT = [string]$Port
+$env:LIBRESPOT_PATH = $librespot
+$env:SPOTIFY_RELAY_HOST = $HostAddress
+$env:SPOTIFY_RELAY_PORT = [string]$Port
+if ($PublicHost) { $env:SPOTIFY_RELAY_PUBLIC_HOST = $PublicHost }
 
-Write-Host "Starting live audio relay."
-Write-Host "Device: $Device"
-Write-Host "URL: http://0.0.0.0:$Port/live.mp3"
+Write-Host "Starting UoM Chessboard Spotify Connect relay."
+Write-Host "HTTP port: $Port"
 Write-Host "Press Ctrl+C to stop."
-
 node $relay

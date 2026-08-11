@@ -1,0 +1,10 @@
+{
+  "repository": "https://github.com/librespot-org/librespot.git",
+  "tag": "v0.8.0",
+  "revision": "d36f9f1907e8cc9d68a93f8ebc6b627b1bf7267d",
+  "features": [
+    "native-tls",
+    "with-libmdns"
+  ],
+  "defaultFeatures": false
+}

@@ -4,6 +4,7 @@
 !*.env.example
 app/.env
 esp32_firmware/firmware_secrets.h
+New folder/wifi_stream_speaker_test/wifi_stream_secrets.h
 
 # Dependency folders
 node_modules/
@@ -33,7 +34,11 @@ app/data/*.sqlite-wal
 
 # Downloaded tools and generated audio captures
 tools/ffmpeg/
+tools/librespot/
+tools/audio-relay/runtime/
 tools/audio-relay/*.mp3
+tools/audio-relay/*.pcm
+tools/audio-relay/*.fifo
 
 # Audio test assets. Keep public repos free of copyrighted songs.
 *.mp3
