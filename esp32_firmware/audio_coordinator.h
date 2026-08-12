@@ -10,7 +10,7 @@ struct BoardAudioCoordinatorConfig {
   uint8_t bclkPin = 10;
   uint8_t lrclkPin = 9;
   uint8_t dataPin = 11;
-  uint8_t relayVolume = 20;
+  uint8_t relayVolume = 21;
 };
 
 bool beginBoardAudioCoordinator(const BoardAudioCoordinatorConfig& config);

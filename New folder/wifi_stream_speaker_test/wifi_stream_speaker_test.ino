@@ -26,7 +26,7 @@ constexpr uint8_t I2S_BCLK_PIN = 10;
 constexpr uint8_t I2S_LRC_PIN = 9;
 
 constexpr uint32_t RUN_CPU_MHZ = 240;
-constexpr uint8_t START_VOLUME = 20;
+constexpr uint8_t START_VOLUME = 21;
 constexpr uint32_t STARTUP_DELAY_MS = 5000;
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 20000;
 constexpr uint32_t STATUS_INTERVAL_MS = 1000;

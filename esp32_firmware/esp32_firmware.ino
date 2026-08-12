@@ -299,7 +299,7 @@ void setup() {
   audioConfig.bclkPin = 10;
   audioConfig.lrclkPin = 9;
   audioConfig.dataPin = 11;
-  audioConfig.relayVolume = 20;
+  audioConfig.relayVolume = 21;
   beginBoardAudioCoordinator(audioConfig);
 #endif
   beginOfflineEmbeddedDiagnostics();

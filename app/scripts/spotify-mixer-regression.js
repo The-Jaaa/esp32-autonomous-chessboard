@@ -56,6 +56,21 @@ function rms(pcm, fromSeconds, toSeconds) {
   return Math.sqrt(sum / Math.max(1, last - first));
 }
 
+function peak(pcm) {
+  let maximum = 0;
+  for (let offset = 0; offset + 1 < pcm.length; offset += 2) {
+    maximum = Math.max(maximum, Math.abs(pcm.readInt16LE(offset) / 32768));
+  }
+  return maximum;
+}
+
+async function decodeMp3(ffmpeg, encoded) {
+  return (await runProcess(ffmpeg, [
+    '-hide_banner', '-loglevel', 'error', '-i', 'pipe:0',
+    '-f', 's16le', '-codec:a', 'pcm_s16le', '-ar', String(SAMPLE_RATE), '-ac', '1', 'pipe:1'
+  ], [encoded])).stdout;
+}
+
 function toDb(ratio) {
   return 20 * Math.log10(Math.max(ratio, Number.EPSILON));
 }
@@ -68,6 +83,8 @@ async function run() {
   );
   const ffprobe = path.join(path.dirname(ffmpeg), 'ffprobe.exe');
   const service = new SpotifyRelayService({ rootDir: projectRoot, token: 'test' });
+  assert.strictEqual(service.status().musicGainDb, 6);
+  assert(service.ffmpegArgs().join(' ').includes('volume=6.0dB'));
   const music = sinePcm({ sampleRate: SAMPLE_RATE, channels: 2, frequency: 440, amplitude: 0.55 });
   const voice = sinePcm({
     sampleRate: VOICE_RATE,
@@ -90,10 +107,7 @@ async function run() {
   assert.strictEqual(Number(stream.sample_rate), SAMPLE_RATE);
   assert.strictEqual(Number(stream.channels), 1);
 
-  const decoded = (await runProcess(ffmpeg, [
-    '-hide_banner', '-loglevel', 'error', '-i', 'pipe:0',
-    '-f', 's16le', '-codec:a', 'pcm_s16le', '-ar', String(SAMPLE_RATE), '-ac', '1', 'pipe:1'
-  ], [encoded])).stdout;
+  const decoded = await decodeMp3(ffmpeg, encoded);
   const baseline = rms(decoded, 1.0, 1.6);
   const ducked = rms(decoded, 2.55, 2.7);
   const recovered = rms(decoded, 5.5, 6.1);
@@ -101,9 +115,22 @@ async function run() {
   const recoveryDb = toDb(recovered / baseline);
   assert(duckDb <= -14 && duckDb >= -24, `Expected about 18 dB ducking, measured ${duckDb.toFixed(1)} dB.`);
   assert(Math.abs(recoveryDb) <= 1.5, `Music did not recover to baseline: ${recoveryDb.toFixed(1)} dB.`);
+  assert(peak(decoded) <= 1, 'Limiter allowed samples outside the digital range.');
+
+  const quietMusic = sinePcm({ sampleRate: SAMPLE_RATE, channels: 2, frequency: 440, amplitude: 0.1 });
+  const silence = Buffer.alloc(VOICE_RATE * DURATION_SECONDS * 2);
+  const zeroGainService = new SpotifyRelayService({ rootDir: projectRoot, token: 'test', musicGainDb: 0 });
+  const zeroGainEncoded = (await runProcess(ffmpeg, zeroGainService.ffmpegArgs(), [quietMusic, silence])).stdout;
+  const boostedEncoded = (await runProcess(ffmpeg, service.ffmpegArgs(), [quietMusic, silence])).stdout;
+  const zeroGainRms = rms(await decodeMp3(ffmpeg, zeroGainEncoded), 1, 6);
+  const boostedRms = rms(await decodeMp3(ffmpeg, boostedEncoded), 1, 6);
+  const measuredGainDb = toDb(boostedRms / zeroGainRms);
+  assert(measuredGainDb >= 5.5 && measuredGainDb <= 6.5,
+    `Expected 6 dB music gain, measured ${measuredGainDb.toFixed(1)} dB.`);
 
   console.log(
-    `Spotify mixer regression passed: 44.1 kHz mono MP3, duck=${duckDb.toFixed(1)} dB, recovery=${recoveryDb.toFixed(1)} dB.`
+    `Spotify mixer regression passed: 44.1 kHz mono MP3, gain=${measuredGainDb.toFixed(1)} dB, `
+      + `duck=${duckDb.toFixed(1)} dB, recovery=${recoveryDb.toFixed(1)} dB.`
   );
 }
 

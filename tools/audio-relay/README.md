@@ -43,6 +43,10 @@ seconds after Spotify becomes inactive, it releases the HTTP decoder and
 returns to the normal mentor speaker transport. Mentor speech is delayed about
 750 ms, mixed over ducked music, and the song continues underneath.
 
+The relay applies `SPOTIFY_MUSIC_GAIN_DB` before mixing (default `6` dB) and
+limits the final signal to prevent digital clipping. Keep Spotify's device
+volume at 100% and tune this setting between `0` and `12` dB if needed.
+
 Status endpoints:
 
 ```text

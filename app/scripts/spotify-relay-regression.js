@@ -80,6 +80,23 @@ async function run() {
   assert(librespot.args.includes('--disable-audio-cache'));
   assert.strictEqual(librespot.args[librespot.args.indexOf('--volume-ctrl') + 1], 'linear');
 
+  clearInterval(service.paceTimer);
+  service.paceTimer = null;
+  service.musicQueue.clear();
+  service.voiceQueue.clear();
+  service.paceStartedAt = now;
+  service.pacedFrames = 0;
+  let pacedMusicBytes = 0;
+  let pacedVoiceBytes = 0;
+  ffmpeg.child.stdin.on('data', (chunk) => { pacedMusicBytes += chunk.length; });
+  ffmpeg.child.stdio[3].on('data', (chunk) => { pacedVoiceBytes += chunk.length; });
+  service.musicQueue.push(Buffer.alloc(MUSIC_FRAME_BYTES * 5, 64));
+  now += 100;
+  service.pace();
+  assert.strictEqual(pacedMusicBytes, MUSIC_FRAME_BYTES * 5);
+  assert.strictEqual(pacedVoiceBytes, 960 * 5);
+  assert.strictEqual(service.pacedFrames, 5);
+
   const port = service.server.address().port;
   const unauthorized = await fetch(`http://127.0.0.1:${port}/live.mp3`);
   assert.strictEqual(unauthorized.status, 401);

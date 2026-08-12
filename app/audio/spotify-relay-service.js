@@ -11,7 +11,10 @@ const VOICE_SAMPLE_RATE = 24000;
 const FRAME_MS = 20;
 const MUSIC_FRAME_BYTES = MUSIC_SAMPLE_RATE * MUSIC_CHANNELS * 2 * FRAME_MS / 1000;
 const VOICE_FRAME_BYTES = VOICE_SAMPLE_RATE * 2 * FRAME_MS / 1000;
+const MAX_PACE_CATCHUP_FRAMES = 8;
+const PACE_RESET_AFTER_MS = 1000;
 const DEFAULT_IDLE_MS = 10000;
+const DEFAULT_MUSIC_GAIN_DB = 6;
 const STABLE_PROCESS_MS = 30000;
 const RESTART_DELAYS_MS = Object.freeze([1000, 2000, 4000, 8000, 16000, 30000]);
 
@@ -112,6 +115,7 @@ class SpotifyRelayService extends EventEmitter {
     token = process.env.ESP32_AUDIO_TOKEN || '',
     deviceName = process.env.SPOTIFY_DEVICE_NAME || 'UoM Chessboard',
     idleMs = Number(process.env.SPOTIFY_IDLE_MS || DEFAULT_IDLE_MS),
+    musicGainDb = Number(process.env.SPOTIFY_MUSIC_GAIN_DB ?? DEFAULT_MUSIC_GAIN_DB),
     spawnProcess = spawn,
     createServer = http.createServer,
     fileExists = fs.existsSync,
@@ -129,6 +133,9 @@ class SpotifyRelayService extends EventEmitter {
     this.token = String(token || '');
     this.deviceName = deviceName;
     this.idleMs = idleMs;
+    this.musicGainDb = Math.max(0, Math.min(12, Number.isFinite(musicGainDb)
+      ? musicGainDb
+      : DEFAULT_MUSIC_GAIN_DB));
     this.spawnProcess = spawnProcess;
     this.fileExists = fileExists;
     this.logger = logger;
@@ -145,6 +152,8 @@ class SpotifyRelayService extends EventEmitter {
     this.librespot = null;
     this.ffmpeg = null;
     this.paceTimer = null;
+    this.paceStartedAt = null;
+    this.pacedFrames = 0;
     this.activityTimer = null;
     this.restartTimers = new Set();
     this.restartAttempts = { librespot: 0, ffmpeg: 0 };
@@ -175,6 +184,7 @@ class SpotifyRelayService extends EventEmitter {
       restartCount: this.restartCount,
       lastError: this.lastError,
       streamUrl: this.streamUrl(),
+      musicGainDb: this.musicGainDb,
       buffers: {
         musicBytes: this.musicQueue.length,
         voiceBytes: this.voiceQueue.length,
@@ -257,10 +267,12 @@ class SpotifyRelayService extends EventEmitter {
   }
 
   ffmpegArgs() {
+    const musicGain = this.musicGainDb.toFixed(1);
     const filter = [
       '[1:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,asplit=2[voice_sc][voice_mix]',
       '[voice_mix]adelay=750|750[voice_delayed]',
-      '[0:a][voice_sc]sidechaincompress=threshold=0.048:ratio=20:attack=600:release=1200:makeup=1[ducked]',
+      `[0:a]volume=${musicGain}dB[music_boosted]`,
+      '[music_boosted][voice_sc]sidechaincompress=threshold=0.048:ratio=20:attack=600:release=1200:makeup=1[ducked]',
       '[ducked][voice_delayed]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95,pan=mono|c0=0.5*c0+0.5*c1[out]'
     ].join(';');
     return [
@@ -374,6 +386,8 @@ class SpotifyRelayService extends EventEmitter {
 
   startTimers() {
     if (!this.paceTimer) {
+      this.paceStartedAt = this.now();
+      this.pacedFrames = 0;
       this.paceTimer = setInterval(() => this.pace(), FRAME_MS);
       this.paceTimer.unref?.();
     }
@@ -385,14 +399,26 @@ class SpotifyRelayService extends EventEmitter {
 
   pace() {
     if (!this.ffmpeg) return;
-    if (!this.musicBlocked && this.ffmpeg.stdin?.writable) {
+    const now = this.now();
+    if (this.paceStartedAt === null) this.paceStartedAt = now;
+    let targetFrames = Math.floor((now - this.paceStartedAt) / FRAME_MS);
+    if (targetFrames - this.pacedFrames > PACE_RESET_AFTER_MS / FRAME_MS) {
+      this.paceStartedAt = now;
+      this.pacedFrames = 0;
+      targetFrames = 1;
+    }
+
+    let sent = 0;
+    while (this.pacedFrames < targetFrames && sent < MAX_PACE_CATCHUP_FRAMES) {
+      if (this.musicBlocked || this.voiceBlocked
+          || !this.ffmpeg.stdin?.writable || !this.ffmpeg.stdio[3]?.writable) break;
       this.musicBlocked = !this.ffmpeg.stdin.write(this.musicQueue.read(MUSIC_FRAME_BYTES));
+      this.voiceBlocked = !this.ffmpeg.stdio[3].write(this.voiceQueue.read(VOICE_FRAME_BYTES));
+      this.pacedFrames += 1;
+      sent += 1;
     }
     if (this.librespot?.stdout?.isPaused?.() && this.musicQueue.length <= MUSIC_FRAME_BYTES * 80) {
       this.librespot.stdout.resume();
-    }
-    if (!this.voiceBlocked && this.ffmpeg.stdio[3]?.writable) {
-      this.voiceBlocked = !this.ffmpeg.stdio[3].write(this.voiceQueue.read(VOICE_FRAME_BYTES));
     }
     if (this.voiceActive && this.voiceQueue.length === 0
         && this.now() - this.lastVoiceAudioAt > 2000) {
@@ -543,6 +569,8 @@ class SpotifyRelayService extends EventEmitter {
     if (this.paceTimer) clearInterval(this.paceTimer);
     if (this.activityTimer) clearInterval(this.activityTimer);
     this.paceTimer = null;
+    this.paceStartedAt = null;
+    this.pacedFrames = 0;
     this.activityTimer = null;
     this.closeClients();
     this.terminate(this.librespot);
@@ -574,6 +602,7 @@ class SpotifyRelayService extends EventEmitter {
 module.exports = {
   ByteQueue,
   DEFAULT_IDLE_MS,
+  DEFAULT_MUSIC_GAIN_DB,
   FRAME_MS,
   MUSIC_FRAME_BYTES,
   SpotifyRelayService,

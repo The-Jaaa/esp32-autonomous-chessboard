@@ -16,7 +16,7 @@
 Use the standalone Wi-Fi stream sketch before flashing production firmware.
 
 1. Enable the relay and select `UoM Chessboard` in Spotify.
-2. Confirm both speakers are clear at ESP volume 20.
+2. Confirm both speakers are clear at ESP volume 21.
 3. Confirm initial audio begins within three seconds of the board entering relay
    mode.
 4. Interrupt and restore the hotspot, terminate FFmpeg, terminate librespot, and
@@ -30,7 +30,7 @@ Use the standalone Wi-Fi stream sketch before flashing production firmware.
 2. Trigger Gemini speech while music plays. Music must duck smoothly to quiet
    but audible background; speech must start without clipped words; music must
    recover smoothly.
-3. Run both speakers at volume 20 for 30 minutes with track changes and repeated
+3. Run both speakers at volume 21 for 30 minutes with track changes and repeated
    mentor interruptions.
 4. Reject any brownout, watchdog, OOM, reboot, sustained dropout, distortion, or
    steadily growing relay buffer.
