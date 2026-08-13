@@ -1,7 +1,6 @@
 param(
     [string]$UploadPort = '',
     [switch]$SkipFirmware,
-    [switch]$SkipSoak,
     [switch]$SkipNetworkPreflight
 )
 
@@ -124,9 +123,6 @@ try {
     Push-Location $app
     try {
         Invoke-Checked 'Mentor regressions' { npm run test:mentor }
-        if (-not $SkipSoak) {
-            Invoke-Checked 'Offline 100-game soak' { npm run test:offline-soak }
-        }
     }
     finally {
         Pop-Location

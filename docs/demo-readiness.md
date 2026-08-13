@@ -6,11 +6,10 @@ Milestone 0 was accepted on 2026-08-03 on `codex/demo-baseline`, based on
 commit `95c8d69` plus the isolated baseline changes recorded here. The complete
 automated gate and every required physical check passed on production firmware.
 
-The intended demonstration is the complete system: normal virtual chess,
-server-authoritative physical chess, Gemini text and Live mentoring, board
-speaker output, physical-board observation, and reviewed opening instruction.
-Host-only offline components remain development foundations and are not yet a
-production standalone game mode.
+The intended demonstration is the complete online system: normal virtual
+chess, server-authoritative physical chess, Gemini text and Live mentoring,
+board speaker output, physical-board observation, and reviewed opening
+instruction. Physical gameplay requires the ChessProject backend.
 
 ## Repeatable Verification
 
@@ -20,10 +19,10 @@ From the repository root, run the complete automated gate:
 .\tools\verify-demo-baseline.ps1
 ```
 
-This runs the mentor regression suite, deterministic 100-game offline soak,
-complete physical/offline foundation suite, client lint and production build,
-and all firmware compile gates. It also verifies that the private firmware HTTP
-and audio hosts match the laptop's active IPv4 address.
+This runs the mentor regression suite, online physical/settings foundation,
+client lint and production build, and the production firmware compile gate. It
+also verifies that the private firmware HTTP and audio hosts match the laptop's
+active IPv4 address.
 
 For the final production upload and speaker registration check, keep the gantry
 idle and the magnet off, start the backend, connect the USB cable, and run:
@@ -34,8 +33,8 @@ idle and the magnet off, start the backend, connect the USB cable, and run:
 
 The verified production target is ESP32-S3 with the 16 MB
 `app3M_fat9M_16MB` partition, OPI PSRAM, `CDCOnBoot=default`, and USB upload.
-The accepted compile baseline is `1,079,947` bytes flash and `48,456` bytes
-static RAM.
+The current online-only production baseline is `1,894,091` bytes flash and
+`58,888` bytes static RAM.
 
 Result summaries are written to ignored `logs/demo-baseline-*.json` files.
 
@@ -50,7 +49,7 @@ both `CHESS_SERVER_BASE_URL` and `CHESS_AUDIO_SERVER_HOST` in the ignored
 Do not begin a physical game unless:
 
 - ports 3000 and 3001 are listening;
-- `/api/physical/heartbeat` responds;
+- `/api/physical/status` responds with a fresh sensor snapshot;
 - `main-board` appears ready in `/api/mentor/audio/devices`;
 - the physical log receives current sensor snapshots;
 - no old movement command remains queued.
@@ -87,21 +86,17 @@ bytes static RAM.
 ## Known Accepted Hardware Caveats
 
 - A damaged board sticker can physically catch a dragged piece. Repairing the
-  surface remains recommended before the final demonstration.
+surface remains recommended before the final demonstration.
 - Brief LED corruption can be induced by disturbing the LED data wire. The
-  renderer minimizes writes, but the signal-integrity issue remains physical.
+renderer minimizes writes, but the signal-integrity issue remains physical.
 - Binary occupancy sensors cannot identify promotion piece type; workflows must
-  ask the user to provide the requested piece.
+ask the user to provide the requested piece.
 
-## Remaining Demo Milestones
+## Remaining Demo Work
 
-1. Complete the real-board Human Black acceptance gate for shared side and difficulty settings.
-2. Online physical promotions.
-3. Gemini-led physical curriculum beyond fixed opening drills.
-4. Production offline feedback, side selection, and promotion interaction.
-5. Continuous production offline gameplay.
-6. Online/offline ownership, persistence, and reconnect handoff.
-7. Final demo operations, documentation, and release acceptance.
+1. Re-run the reduced online-only acceptance gate after firmware cleanup.
+2. Complete one physical Companion turn and one Mentor speaker response on the cleaned firmware.
+3. Freeze final demonstration operations, documentation, and release evidence.
 
 ## Shared Side And Difficulty Configuration
 
@@ -130,7 +125,7 @@ socket behavior, mentor tool use, Human Black move interpretation, captures,
 castling, engine-level snapshotting, one-time White opening scheduling,
 actor-based undo/redo, and desktop virtual Human Black play. Client lint/build,
 backend syntax, physical regressions, and relevant mentor regressions pass. The
-firmware and offline core are unchanged. The required real-board Human Black
+firmware is unchanged. The required real-board Human Black
 test remains pending before this milestone is physically accepted.
 
 ## Mentor Physical Intent And Selective Coaching
@@ -199,8 +194,8 @@ ChessProject server` instead of silently creating independent browser settings.
 Automated checks cover shared normal/Mentor knight planning, white and black
 rook-pawn clearance, undo/redo, deterministic selection, pending graveyard
 state, phase-only retries, stale/out-of-order/duplicate reports, logical-state
-immutability, and existing capture/castling behavior. Firmware and
-`offline_core` are unchanged. Real-board acceptance of the Human Black settings
+immutability, and existing capture/castling behavior. Firmware is unchanged.
+Real-board acceptance of the Human Black settings
 gate and the new phased clearance sequence remains pending.
 
 The shared-settings and unified-transfer physical gates were subsequently
@@ -279,7 +274,7 @@ remain internally compatible.
 Automated acceptance passed: `npm run test:physical`, the complete
 `npm run test:mentor` suite, Playwright at `1440x900` and `1920x1080`, zero-
 warning client lint, production client build, backend syntax checks, and diff
-checks. Firmware and `offline_core` were not changed; the accepted production
+checks. Firmware was not changed; the accepted production
 baseline remains `1,083,819` bytes flash and `48,768` bytes static RAM.
 
 Real-board acceptance remains required before this milestone is marked
@@ -387,7 +382,7 @@ repeated development commentary is explicitly disallowed.
 Regression coverage includes duplicate activity startup, missing learner-move
 analysis, status-revision execution, and a learner move committed during active
 narration. Complete Mentor and physical suites, browser checks, client
-lint/build, and backend syntax checks pass. Firmware and `offline_core` remain
+lint/build, and backend syntax checks pass. Firmware remains
 unchanged; a real guided-game retest remains required.
 
 ## Milestone 3.5: Physical Mentor Ownership And Activity Switching
@@ -422,7 +417,7 @@ unchanged, and opening/puzzle scripts are not altered mid-activity.
 Automated acceptance passed: the new handoff regressions, game-settings suite,
 physical curriculum suite, complete Mentor and physical suites, Playwright at
 `1440x900` and `1920x1080`, zero-warning client lint, production client build,
-backend syntax, and diff checks. Firmware and `offline_core` remain unchanged.
+backend syntax, and diff checks. Firmware remains unchanged.
 The eight-step real-board handoff/opening/puzzle gate remains required before
 Milestone 3 and 3.5 are marked demonstration-ready.
 
@@ -493,83 +488,16 @@ handoff safety. The complete Mentor and physical suites, client lint/build,
 backend syntax, and diff checks pass. A final real-board retest is still
 required before Milestone 3 acceptance.
 
-## Milestone 3 Accepted And Milestone 4 In Progress
+## Offline Gameplay Retirement
 
-The corrected Milestone 3 real-board retest is accepted. A complete physical
-Stockfish-led game remained synchronized, grounded coaching and end/retry
-flows worked, speaker playback completed without the prior stalls, and the
-normal online board remained operational. This supersedes the earlier pending
-notes while preserving them as the history of the acceptance fixes.
+As of 2026-08-13, standalone offline gameplay and server-ownership switching
+are retired from the active product. The board now always waits for and retries
+its normal backend connection. The production path retains sensors, LEDs,
+speaker audio, bounded motion, promotion handling, online routing, graveyards,
+Undo/Redo, Mentor observation/control, and all stale-session safety checks.
 
-Milestone 4 adds the default-off guarded production offline interaction gate.
-Automated acceptance is complete: the deterministic 100-game soak, full host
-foundation suite, interaction regressions, aggregate host/client verifier,
-exact production firmware baseline, and all offline diagnostic firmware
-compile gates pass. Production remains `1,083,819` bytes flash and `48,768`
-bytes static RAM. The final Standard interaction build is `1,401,191` bytes
-flash and `53,904` bytes static RAM.
-
-Milestone 4 is accepted. Standard Human White and Human Black both completed
-their bounded real-board transactions. The HumanPromotion fixture committed
-`a7a8n` and the RobotPromotion fixture committed `a2a1q` only after their exact
-replacement gates. Every accepted run ended with matching occupancy, magnet
-LOW, no duplicate move, and a 10 ms maximum sensor-loop gap.
-
-The verifier restored production firmware, after which the normal online board
-completed three human moves (`e4`, `exd5`, `c4`) and three distinct verified
-robot replies (`d5`, `c6`, `cxd5`) without a synchronization or motion error.
-Continuous offline play and automatic online/offline ownership remain later
-milestones.
-
-## Milestone 5 Guarded Continuous Gameplay
-
-The default-off continuous diagnostic now loops the accepted interaction,
-engine, route, promotion, and phase-execution layers without resetting state
-between turns. Robot graveyard slots remain occupied for the game, Human Black
-gets one White opener, and every next human turn requires an exact verified
-boundary. A session generation rejects work left over from an earlier game.
-
-The terminal reset is deliberately physical and difficult to trigger by
-accident: only both current king squares may be empty, both kings must remain
-lifted for two seconds, and the standard setup must later remain exact for 500
-ms. `CLR` tells the user to clear unsensed Z/I areas before choosing a new side.
-
-The portable reset/session regression and the Standard embedded build pass.
-The final Standard diagnostic compiles at `1,444,227` bytes flash and `54,352`
-bytes static RAM; TerminalReset compiles at `1,444,311 / 54,352`. Production
-remains exactly `1,083,819 / 48,768`.
-
-Milestone 5 is accepted. Standard play completed 12 full human/robot turns and
-retained six graveyard slots without duplicate commits or unresolved recovery.
-TerminalReset completed the controlled castling checkmate, two-king reset,
-standard-board restoration, Human Black opener, and one further complete turn.
-Setup and reset LEDs now show detected required squares cyan, missing squares
-red, and extra squares yellow. A separate backend-return run froze at an exact
-untouched boundary with `WAIT`, and the restored production firmware then
-completed verified online `e4 d5` play. Continuous offline production activation
-and persisted restart recovery remain Milestone 6.
-
-## Milestone 5.5 LED And Transfer-Planner Parity
-
-The parity milestone is in progress. Its first isolated commit establishes the
-fixed sideways LED text orientation and the online physical palette while
-preserving the measured 16x16 mapping. The second change centralizes temporary
-pawn clearance in the offline planner, after ordinary board and lane routes,
-and exposes deterministic stage/transfer/restore metadata.
-
-Focused host regressions pass. The clean tracked production image remains
-`1,083,819` flash / `48,768` static RAM. The three parity diagnostic variants
-compile with motors locked: the LED gallery is `1,134,535` flash / `53,744`
-RAM, White clearance is `1,276,443` / `53,744`, and Black clearance is
-`1,276,507` / `53,744`. The live worktree has unrelated uncommitted speaker
-changes, so its production image is not used as the baseline evidence.
-
-Milestone 5.5 physical acceptance is complete. The corrected COM11 gallery
-visibly rendered the fixed sideways text and online-aligned palette, and its
-telemetry confirmed 14 submitted and 14 displayed frames. White and Black
-planner fixtures selected the expected rook-pawn clearance sequences, rendered
-all three phases, and retained motors locked, magnet LOW, and a 10 ms maximum
-sensor gap. The verifier restored the exact production baseline after every
-run. Focused LED and temporary-clearance regressions pass; the foundation
-component groups passed previously, while the aggregate wrapper remains a slow
-repetition of those compile-heavy groups.
+Historical implementation and hardware evidence remain available through Git
+history. It is no longer part of current source, firmware builds, verification,
+or the demonstration roadmap. Removing the default-off sources did not alter
+the production image: the measured baseline remains `1,894,091` bytes flash and
+`58,888` bytes static RAM.

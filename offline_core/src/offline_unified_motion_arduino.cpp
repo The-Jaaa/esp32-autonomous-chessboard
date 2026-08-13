@@ -1,7 +1,0 @@
-#include "EmbeddedConfig.h"
-
-#if ENABLE_OFFLINE_UNIFIED_TURN_DIAGNOSTICS || \
-    ENABLE_OFFLINE_PRODUCTION_INTERACTION_DIAGNOSTICS || \
-    ENABLE_OFFLINE_CONTINUOUS_GAMEPLAY_DIAGNOSTICS
-#include "../offline_unified_motion.cpp"
-#endif

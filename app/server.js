@@ -942,7 +942,7 @@ const PHYSICAL_LED_COLORS = {
   draw: { r: 170, g: 70, b: 255 }
 };
 
-const PHYSICAL_OWNERSHIP_PROTOCOL_VERSION = 1;
+const PHYSICAL_PROTOCOL_VERSION = 1;
 const PHYSICAL_SENSOR_FRESH_MS = 5000;
 const PHYSICAL_SERVER_INSTANCE_ID = randomUUID();
 
@@ -1538,7 +1538,7 @@ function serializePhysicalState() {
   };
 
   return {
-    protocolVersion: PHYSICAL_OWNERSHIP_PROTOCOL_VERSION,
+    protocolVersion: PHYSICAL_PROTOCOL_VERSION,
     serverInstanceId: PHYSICAL_SERVER_INSTANCE_ID,
     sessionGeneration: physicalSession.sessionGeneration,
     stateRevision: physicalSession.stateRevision,
@@ -4246,31 +4246,6 @@ function makeRunwayMotionStep(label, squares = [], colorName = 'quiet') {
 
 function compactSteps(steps = []) {
   return steps.filter(Boolean);
-}
-
-function physicalSessionSafeForOwnershipSwitch() {
-  const noPendingWork = !physicalSession.pendingRobotJob &&
-    !physicalSession.pendingUndo &&
-    !physicalSession.pendingRedo &&
-    !physicalSession.selectedSource &&
-    !physicalSession.pendingCaptureTarget &&
-    !physicalSession.pendingCastleMove;
-
-  return !physicalSession.active ||
-    (physicalSession.phase === 'game_over' && noPendingWork);
-}
-
-function serializePhysicalHeartbeat() {
-  return {
-    success: true,
-    protocolVersion: PHYSICAL_OWNERSHIP_PROTOCOL_VERSION,
-    serverInstanceId: PHYSICAL_SERVER_INSTANCE_ID,
-    sessionGeneration: physicalSession.sessionGeneration,
-    sessionActive: physicalSession.active,
-    phase: physicalSession.phase,
-    safeToSwitch: physicalSessionSafeForOwnershipSwitch(),
-    serverTimeMs: Date.now()
-  };
 }
 
 function buildCaptureBoardStagingFallback(
@@ -7237,10 +7212,6 @@ app.post('/api/physical/browser-move', (req, res) => {
   }
 });
 
-app.get('/api/physical/heartbeat', (req, res) => {
-  res.json(serializePhysicalHeartbeat());
-});
-
 app.get('/api/physical/logs', (req, res) => {
   res.json({
     success: true,
@@ -7907,10 +7878,8 @@ module.exports = {
     normalizeProfile,
     clampLevel
   },
-  physicalOwnershipTest: {
-    protocolVersion: PHYSICAL_OWNERSHIP_PROTOCOL_VERSION,
-    serverInstanceId: PHYSICAL_SERVER_INSTANCE_ID,
-    serializeHeartbeat: serializePhysicalHeartbeat,
-    safeForOwnershipSwitch: physicalSessionSafeForOwnershipSwitch
+  physicalProtocolTest: {
+    protocolVersion: PHYSICAL_PROTOCOL_VERSION,
+    serverInstanceId: PHYSICAL_SERVER_INSTANCE_ID
   }
 };

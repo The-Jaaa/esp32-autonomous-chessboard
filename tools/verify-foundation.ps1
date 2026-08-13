@@ -25,7 +25,7 @@ function Invoke-Checked {
 Push-Location $app
 try {
     Invoke-Checked 'Backend syntax' { node --check server.js }
-    Invoke-Checked 'Physical and host-only offline regressions' { npm run test:foundation }
+    Invoke-Checked 'Online physical and shared-settings regressions' { npm run test:online-foundation }
 }
 finally {
     Pop-Location
@@ -43,52 +43,6 @@ finally {
 if (-not $SkipFirmware) {
     Invoke-Checked 'ESP32 mentor speaker production firmware build' {
         & (Join-Path $PSScriptRoot 'verify-mentor-speaker.ps1')
-    }
-    Invoke-Checked 'ESP32 USB-only and offline resource diagnostic firmware builds' {
-        & (Join-Path $PSScriptRoot 'verify-offline-embedded.ps1')
-    }
-    Invoke-Checked 'ESP32 offline ownership diagnostic firmware builds' {
-        & (Join-Path $PSScriptRoot 'verify-offline-ownership.ps1')
-    }
-    Invoke-Checked 'ESP32 read-only offline runtime diagnostic firmware builds' {
-        & (Join-Path $PSScriptRoot 'verify-offline-runtime.ps1')
-    }
-    Invoke-Checked 'ESP32 motor-locked offline phase execution diagnostic firmware builds' {
-        & (Join-Path $PSScriptRoot 'verify-offline-phase-execution.ps1')
-    }
-    Invoke-Checked 'ESP32 guarded real quiet-motion diagnostic firmware builds' {
-        & (Join-Path $PSScriptRoot 'verify-offline-quiet-motion.ps1')
-    }
-    Invoke-Checked 'ESP32 guarded real capture-motion diagnostic firmware builds' {
-        & (Join-Path $PSScriptRoot 'verify-offline-capture-motion.ps1')
-    }
-    Invoke-Checked 'ESP32 guarded real staged-capture diagnostic firmware builds' {
-        & (Join-Path $PSScriptRoot 'verify-offline-staged-capture-motion.ps1')
-    }
-    Invoke-Checked 'ESP32 guarded real lane-motion diagnostic firmware builds' {
-        & (Join-Path $PSScriptRoot 'verify-offline-lane-motion.ps1')
-    }
-    Invoke-Checked 'ESP32 guarded capture-with-lane diagnostic firmware builds' {
-        & (Join-Path $PSScriptRoot 'verify-offline-capture-lane-motion.ps1')
-    }
-    Invoke-Checked 'ESP32 guarded en passant diagnostic firmware builds' {
-        & (Join-Path $PSScriptRoot 'verify-offline-en-passant-motion.ps1')
-    }
-    Invoke-Checked 'ESP32 guarded castling diagnostic firmware builds' {
-        & (Join-Path $PSScriptRoot 'verify-offline-castling-motion.ps1')
-    }
-    Invoke-Checked 'ESP32 guarded promotion diagnostic firmware builds' {
-        & (Join-Path $PSScriptRoot 'verify-offline-promotion-motion.ps1')
-    }
-    Invoke-Checked 'ESP32 guarded unified-turn diagnostic firmware builds' {
-        & (Join-Path $PSScriptRoot 'verify-offline-unified-turn.ps1')
-    }
-    Invoke-Checked 'ESP32 guarded production interaction diagnostic firmware builds' {
-        & (Join-Path $PSScriptRoot 'verify-offline-interaction.ps1')
-    }
-    Invoke-Checked 'ESP32 guarded continuous-gameplay diagnostic firmware builds' {
-        & (Join-Path $PSScriptRoot 'verify-offline-continuous-gameplay.ps1')
-        & (Join-Path $PSScriptRoot 'verify-offline-continuous-gameplay.ps1') -Fixture TerminalReset
     }
 }
 

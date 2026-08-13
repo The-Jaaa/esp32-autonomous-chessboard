@@ -2354,3 +2354,12 @@ Verification:
 - Final COM11 parity acceptance passed. The gallery visibly rendered the fixed sideways words and complete color sequence; telemetry recorded 14 submitted and 14 displayed frames, motors locked, magnet LOW, and a 10 ms sensor gap.
 - White planner acceptance selected `h2-h4`, `g1-f3`, `h4-h2`; Black selected `h7-h5`, `g8-f6`, `h5-h7`. Both preserved logical state, rendered all three frames, kept motors locked and magnet LOW, and recorded 10 ms sensor gaps.
 - Production firmware was restored after every fixture at the exact `1,083,819 / 48,768` clean baseline. Milestone 5.5 is accepted.
+
+## 2026-08-13 Offline Gameplay Retirement
+
+- Preserved the accepted browser-controlled physical-move and Mentor fixes in checkpoint commit `573fc43` before beginning removal.
+- Permanently retired the portable offline chess core, embedded offline diagnostics, ownership heartbeat, offline host regressions, soak tests, and firmware verifier infrastructure. Historical commits and branches remain the recovery path.
+- Production firmware now always runs the server-controlled sensor, LED, command-polling, snapshot, job-report, and board-audio paths. If the backend is unavailable, the board waits and retries its normal connection; it never starts a local chess game.
+- Retained online routing, Z/I graveyards, captures, castling, en passant, promotions, temporary clearance, Undo/Redo, browser-controlled physical moves, Mentor observation/control, speaker `PING/PONG`, session generations, revisions, snapshot freshness, and magnet safety.
+- Replaced the offline-heavy foundation with `test:online-foundation`; `test:foundation` remains a compatibility alias. The aggregate verifier now checks backend syntax, online physical/settings regressions, client lint/build, and production speaker firmware only.
+- The cleaned production firmware compiles at exactly `1,894,091` bytes flash and `58,888` bytes static RAM. This matches the previous production image because the removed diagnostics were already disabled in production.
