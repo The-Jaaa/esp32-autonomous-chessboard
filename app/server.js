@@ -2828,6 +2828,10 @@ async function finalizeHumanPhysicalMove(move, occupancy) {
     return;
   }
 
+  schedulePhysicalReplyAfterHumanMove();
+}
+
+function schedulePhysicalReplyAfterHumanMove() {
   const nextOpening = physicalSession.mentorOpeningDrill;
   if (isRobotTurn() && nextOpening?.expectedActor === 'mentor' && nextOpening.expectedUci) {
     physicalSession.phase = 'robot_thinking';
@@ -3209,6 +3213,11 @@ async function commitPendingPromotion(occupancy) {
     physicalSession.pendingPromotion = null;
     await finalizeHumanPhysicalMove(move, occupancy);
     return { success: true, committed: true };
+  }
+
+  if (promotion.actor === 'browser-human') {
+    physicalSession.pendingPromotion = null;
+    return completePendingRobotMove(occupancy);
   }
 
   if (promotion.operation === 'redo') {
@@ -5035,6 +5044,130 @@ function robotPlanningSnapshotStatus() {
   };
 }
 
+function physicalBrowserMoveError(message, code, statusCode = 409) {
+  const error = new Error(message);
+  error.code = code;
+  error.statusCode = statusCode;
+  return error;
+}
+
+function queueBrowserPhysicalMove({
+  uci,
+  expectedSessionGeneration,
+  expectedRevision,
+  requestId = null
+} = {}) {
+  if (!physicalSession.active) {
+    throw physicalBrowserMoveError('Start a physical game before moving from the web app.', 'physical_game_inactive');
+  }
+  if (Number(expectedSessionGeneration) !== Number(physicalSession.sessionGeneration)) {
+    throw physicalBrowserMoveError('The physical game changed. Refresh before trying that move again.', 'stale_session_generation');
+  }
+  if (Number(expectedRevision) !== Number(physicalSession.stateRevision)) {
+    throw physicalBrowserMoveError('The physical board changed. Refresh before trying that move again.', 'stale_revision');
+  }
+  if (physicalSession.phase !== 'ready' || physicalSession.pendingRobotJob
+    || physicalSession.pendingUndo || physicalSession.pendingRedo || physicalSession.pendingPromotion) {
+    throw physicalBrowserMoveError('The physical board is busy. Wait until it is ready for your move.', 'physical_board_busy');
+  }
+  if (!isHumanTurn()) {
+    throw physicalBrowserMoveError('It is not the configured player side\'s turn.', 'physical_not_human_turn');
+  }
+
+  const snapshot = robotPlanningSnapshotStatus();
+  if (!snapshot.ready) {
+    throw physicalBrowserMoveError('Restore or center the physical board before moving from the web app.', 'physical_board_not_exact');
+  }
+  if (!physicalSession.lastSnapshotAt || Date.now() - physicalSession.lastSnapshotAt > PHYSICAL_SENSOR_FRESH_MS) {
+    throw physicalBrowserMoveError('The latest sensor snapshot is stale. Wait for the board to reconnect.', 'physical_sensor_stale');
+  }
+
+  const normalizedUci = String(uci || '').trim().toLowerCase();
+  const legalMove = physicalSession.game.moves({ verbose: true })
+    .filter(isPhysicalMoveAllowed)
+    .find((candidate) => legalMoveMatchesUci(candidate, normalizedUci));
+  if (!legalMove) {
+    throw physicalBrowserMoveError('That move is not legal in the current physical position.', 'physical_move_illegal', 400);
+  }
+  if (legalMove.color !== physicalColorCode(physicalSession.humanColor)) {
+    throw physicalBrowserMoveError('Only the configured player side can be moved from the web app.', 'physical_wrong_color');
+  }
+
+  const opening = physicalSession.mentorOpeningDrill;
+  const openingConversationId = activePhysicalMentorConversationId();
+  if (opening?.expectedActor === 'learner') {
+    if (opening.expectedUci && normalizedUci !== opening.expectedUci) {
+      throw physicalBrowserMoveError(
+        `${opening.title}: play the reviewed move ${opening.expectedUci}.`,
+        'opening_drill_wrong_move'
+      );
+    }
+    if (openingConversationId) {
+      mentorFeature.activityService.validatePhysicalLearnerMove(openingConversationId, normalizedUci);
+    }
+  }
+
+  const graveyardState = {
+    next: physicalSession.nextGraveyardSlot,
+    occupied: [...physicalSession.robotGraveyardOccupied],
+    pending: [...physicalSession.robotGraveyardPending]
+  };
+  let command;
+  try {
+    command = buildRobotMoveCommand(legalMove);
+  } catch (error) {
+    physicalSession.nextGraveyardSlot = graveyardState.next;
+    physicalSession.robotGraveyardOccupied = graveyardState.occupied;
+    physicalSession.robotGraveyardPending = graveyardState.pending;
+    throw physicalBrowserMoveError(error.message, 'physical_route_blocked');
+  }
+
+  physicalSession.pendingRobotJob = {
+    id: command.id,
+    kind: 'browser-human',
+    actor: 'human',
+    requestId: requestId ? String(requestId).slice(0, 120) : null,
+    uci: moveToUci(legalMove),
+    san: legalMove.san,
+    command: { ...command, actor: 'human', source: 'browser' },
+    preMoveFen: physicalSession.game.fen(),
+    mentorActivityId: opening?.activityId || null,
+    engineLevel: null,
+    engineProfile: 'browser-human',
+    applied: false,
+    appliedMove: null
+  };
+  physicalSession.selectedSource = null;
+  physicalSession.pendingCaptureTarget = null;
+  physicalSession.pendingCastleMove = null;
+  physicalSession.legalTargets = [];
+  physicalSession.phase = 'robot_busy';
+  physicalSession.statusText = `Robot moving your selected move: ${legalMove.san}`;
+  clearPhysicalLeds();
+  logPhysicalEvent('browser_human_move_planned', physicalSession.statusText, {
+    commandId: command.id,
+    details: {
+      requestId: physicalSession.pendingRobotJob.requestId,
+      move: moveToUci(legalMove),
+      san: legalMove.san,
+      routeMode: command.routeMode,
+      routeCost: command.routeCost ?? null,
+      capture: Boolean(legalMove.captured),
+      promotion: legalMove.promotion || null
+    }
+  });
+  emitPhysicalState('physical-move', {
+    side: 'human',
+    move: moveToUci(legalMove),
+    san: legalMove.san,
+    planned: true,
+    source: 'browser'
+  });
+  startPendingMotionTransaction(physicalSession.pendingRobotJob, physicalSession.occupancy);
+  emitPhysicalState();
+  return { success: true, state: serializePhysicalState() };
+}
+
 function applyPendingRobotMoveToGame(pending) {
   if (!pending) return null;
   if (pending.applied) return pending.appliedMove || parseUciToMove(pending.uci);
@@ -5054,7 +5187,8 @@ function applyPendingRobotMoveToGame(pending) {
     promotion: moveObj.promotion || null,
     san: moveObj.san
   };
-  physicalSession.lastMove = { side: 'engine', move: moveToUci(moveObj), san: moveObj.san, at: Date.now() };
+  const side = pending.actor === 'human' ? 'human' : 'engine';
+  physicalSession.lastMove = { side, move: moveToUci(moveObj), san: moveObj.san, at: Date.now() };
   return pending.appliedMove;
 }
 
@@ -5472,17 +5606,20 @@ function completePendingRobotMove(occupancy = null) {
     return { success: false, error: 'No robot job is pending.' };
   }
 
+  const humanActor = pending.actor === 'human' || pending.kind === 'browser-human';
+  const moveLogSide = humanActor ? 'human' : 'robot';
+  const publicSide = humanActor ? 'human' : 'engine';
   let moveObj = pending.appliedMove || null;
   if (!pending.applied) {
     moveObj = physicalSession.game.move(parseUciToMove(pending.uci));
     if (!moveObj) {
-      setPhysicalError(`Robot move ${pending.uci} is no longer legal.`, { id: pending.id });
-      return { success: false, error: `Robot move ${pending.uci} is no longer legal.` };
+      setPhysicalError(`Physical move ${pending.uci} is no longer legal.`, { id: pending.id });
+      return { success: false, error: `Physical move ${pending.uci} is no longer legal.` };
     }
   }
 
   physicalSession.occupancy = occupancy || occupancyFromGame(physicalSession.game);
-  const moveEntry = recordPhysicalMove('robot', moveObj, pending.preMoveFen || null, physicalSession.game.fen(), {
+  const moveEntry = recordPhysicalMove(moveLogSide, moveObj, pending.preMoveFen || null, physicalSession.game.fen(), {
     verified: true,
     robotGraveyardSlot: pending.command?.graveyardSlot || null,
     robotCapturedPathSquares: pending.command?.capturePreview?.capturedSquares || [],
@@ -5495,12 +5632,16 @@ function completePendingRobotMove(occupancy = null) {
   });
   physicalSession.pendingRobotJob = null;
   physicalSession.syncWarningReason = null;
-  physicalSession.lastMove = { side: 'engine', move: pending.uci, san: moveObj?.san || pending.san, at: Date.now() };
+  physicalSession.lastMove = { side: publicSide, move: pending.uci, san: moveObj?.san || pending.san, at: Date.now() };
   physicalSession.phase = physicalSession.game.isGameOver() ? 'game_over' : 'ready';
   physicalSession.statusText = physicalSession.game.isGameOver()
     ? gameResultMessage(physicalSession.game) || 'Game over.'
     : waitingForTurnStatus();
-  logPhysicalEvent('robot_move_committed', `Robot move committed after hardware verification: ${moveObj?.san || pending.san}.`, {
+  const commitEvent = humanActor ? 'browser_human_move_committed' : 'robot_move_committed';
+  const commitMessage = humanActor
+    ? `Browser-selected human move committed after hardware verification: ${moveObj?.san || pending.san}.`
+    : `Robot move committed after hardware verification: ${moveObj?.san || pending.san}.`;
+  logPhysicalEvent(commitEvent, commitMessage, {
     commandId: pending.id,
     actualOccupancy: occupancy || occupancyFromGame(physicalSession.game),
     details: {
@@ -5513,7 +5654,7 @@ function completePendingRobotMove(occupancy = null) {
   clearPhysicalLeds();
   queueGameStatusLedCommand(physicalSession.game);
   if (physicalSession.phase === 'ready') {
-    armPostRobotSettleGuard('robot_move');
+    armPostRobotSettleGuard(humanActor ? 'browser_human_move' : 'robot_move');
   }
 
   if (physicalSession.phase === 'game_over') {
@@ -5532,7 +5673,7 @@ function completePendingRobotMove(occupancy = null) {
     if (conversationId) {
       try {
         mentorFeature.activityService.physicalMoveCommitted(conversationId, {
-          side: 'engine',
+          side: publicSide,
           uci: pending.uci,
           san: moveObj?.san || pending.san,
           revision: physicalSession.stateRevision + 1,
@@ -5550,10 +5691,11 @@ function completePendingRobotMove(occupancy = null) {
   }
 
   emitPhysicalState('physical-move', {
-    side: 'engine',
+    side: publicSide,
     move: pending.uci,
     san: moveObj?.san || pending.san,
-    verified: true
+    verified: true,
+    source: humanActor ? 'browser' : 'physical'
   });
 
   settlePhysicalActivityMove(pending.activityExecutionId, {
@@ -5564,6 +5706,10 @@ function completePendingRobotMove(occupancy = null) {
     fallback: Boolean(pending.activityFallback),
     state: serializePhysicalState()
   });
+
+  if (humanActor && physicalSession.phase === 'ready') {
+    schedulePhysicalReplyAfterHumanMove();
+  }
 
   return { success: true, moveObj };
 }
@@ -7077,6 +7223,20 @@ app.get('/api/physical/status', (req, res) => {
   res.json({ success: true, state: serializePhysicalState() });
 });
 
+app.post('/api/physical/browser-move', (req, res) => {
+  try {
+    const result = queueBrowserPhysicalMove(req.body || {});
+    return res.json(result);
+  } catch (error) {
+    return res.status(error.statusCode || 400).json({
+      success: false,
+      code: error.code || 'physical_browser_move_failed',
+      error: error.message,
+      state: serializePhysicalState()
+    });
+  }
+});
+
 app.get('/api/physical/heartbeat', (req, res) => {
   res.json(serializePhysicalHeartbeat());
 });
@@ -7258,8 +7418,11 @@ app.post('/api/physical/retry-robot', (req, res) => {
     return res.json({ success: true, state: serializePhysicalState() });
   }
 
+  const retryingHumanMove = pending.actor === 'human' || pending.kind === 'browser-human';
   physicalSession.phase = 'robot_busy';
-  physicalSession.statusText = `Retrying robot move: ${pending.san}`;
+  physicalSession.statusText = retryingHumanMove
+    ? `Retrying your browser move: ${pending.san}`
+    : `Retrying robot move: ${pending.san}`;
   physicalSession.syncWarningReason = null;
   const appliedMove = applyPendingRobotMoveToGame(pending);
   if (!appliedMove) {
@@ -7268,11 +7431,12 @@ app.post('/api/physical/retry-robot', (req, res) => {
   }
   clearPhysicalLeds();
   emitPhysicalState('physical-move', {
-    side: 'engine',
+    side: retryingHumanMove ? 'human' : 'engine',
     move: pending.uci,
     san: pending.san,
     planned: true,
-    retry: true
+    retry: true,
+    source: retryingHumanMove ? 'browser' : 'physical'
   });
   queuePhysicalCommand(pending.command);
   logPhysicalEvent('robot_job_retry', `Retrying robot move ${pending.san}.`, {
@@ -7499,7 +7663,11 @@ app.post('/api/physical/job-result', (req, res) => {
   if (pending.kind !== 'undo' && pending.uci?.length === 5 && occupancy) {
     const move = promotionMoveFromGame(physicalSession.game, pending.uci);
     const promotion = beginFixedPromotion({
-      actor: pending.kind === 'redo' ? 'redo' : 'robot',
+      actor: pending.kind === 'redo'
+        ? 'redo'
+        : pending.actor === 'human' || pending.kind === 'browser-human'
+          ? 'browser-human'
+          : 'robot',
       operation: pending.kind === 'redo' ? 'redo' : 'move',
       move,
       occupancy,
@@ -7712,6 +7880,7 @@ module.exports = {
     startPhysicalSession,
     validatePhysicalCustomFen,
     summarizePendingPromotion,
+    queueBrowserPhysicalMove,
     processPendingPromotionSnapshot,
     selectPhysicalPromotionIdentity,
     beginHumanPromotion,

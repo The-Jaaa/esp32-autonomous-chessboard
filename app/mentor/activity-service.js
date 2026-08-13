@@ -1445,6 +1445,13 @@ class MentorActivityService {
   validateTool(conversationId, requestId, name, args = {}) {
     if (ACTIVITY_TOOL_NAMES.has(name)) return null;
     const activity = this.store.getActiveActivity(conversationId);
+    if (name === 'play_physical_move' && (!activity || !ACTIVE_STATUSES.has(activity.status))) {
+      throw new MentorActivityError(
+        'A physical move is available only during the mentor\'s assigned turn in an active Mentor-led game.',
+        'physical_mentor_move_unavailable',
+        409
+      );
+    }
     if (!activity || !ACTIVE_STATUSES.has(activity.status)) return null;
     if (READ_ONLY_TOOLS.has(name) && name !== 'request_prediction') return activity;
     if (this.isPhysicalActivity(activity) && name === 'play_physical_move') {
@@ -1478,8 +1485,13 @@ class MentorActivityService {
   }
 
   validatePhysicalMentorMove(conversationId, requestId, activity, uci) {
-    if (activity.type !== 'practice_game' || activity.config.opponentMode !== 'mentor') {
-      throw new MentorActivityError('Gemini move selection is unavailable for this physical activity.', 'physical_mentor_move_unavailable', 409);
+    if (!activity || !ACTIVE_STATUSES.has(activity.status)
+      || activity.type !== 'practice_game' || activity.config?.opponentMode !== 'mentor') {
+      throw new MentorActivityError(
+        'A physical move is available only during the mentor\'s assigned turn in an active Mentor-led game.',
+        'physical_mentor_move_unavailable',
+        409
+      );
     }
     if (activity.status !== 'active' || activity.phase !== 'mentor_thinking'
       || activity.pendingRequestId !== requestId) {

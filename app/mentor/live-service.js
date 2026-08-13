@@ -49,6 +49,8 @@ const LIVE_SYSTEM_INSTRUCTION = [
   'Never ask the learner to connect the board to a chat. Idle, ended, and stale ownership is handled automatically.',
   'Flipping orientation only changes the app view; it never changes the learner side and never replaces start_activity.',
   'For openings, retain the named opening across later color answers and use the exact reviewed sourceId when known. Ask only for a missing learner color; reviewed opening moves are prescribed.',
+  'When a reviewed opening finishes and the learner asks to keep playing, call resolve_opening_drill with action continue exactly once. After that, the learner physically moves their own color and Stockfish supplies the opponent replies with selective coaching.',
+  'Never call play_physical_move for a learner-side suggested move or after an opening has continued into normal Stockfish play. Tell the learner which move to make physically instead.',
   'Physical puzzles are not part of this product. If asked for one, briefly recommend a guided physical game or reviewed opening and do not call a board-changing tool.',
   'During an assigned activity turn, analyze first and then make exactly one mentor move, unless you explicitly request a prediction.',
   'For a guided physical game, analyze the learner\'s latest move with analyze_move and state its classification plainly after your physical reply verifies.',

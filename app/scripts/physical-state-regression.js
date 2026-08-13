@@ -8,6 +8,7 @@ const {
     physicalSession,
     processPhysicalSnapshot,
     startPhysicalSession,
+    queueBrowserPhysicalMove,
     queueRobotReply,
     pausePendingRobotJobAfterFailure,
     startPhysicalUndoTurn,
@@ -151,6 +152,55 @@ function verifyAllCurrentMotionPhases() {
   return finalOccupancy;
 }
 
+function verifyBrowserPhysicalMoveTransaction() {
+  resetPhysicalSession(PHYSICAL_START_FEN);
+  physicalSession.sessionGeneration = 77;
+  physicalSession.autoRobotReply = false;
+  const beforeFen = physicalSession.game.fen();
+  const expectedRevision = physicalSession.stateRevision;
+  const result = queueBrowserPhysicalMove({
+    uci: 'e2e4',
+    requestId: 'browser-human-e2e4',
+    expectedSessionGeneration: 77,
+    expectedRevision
+  });
+
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(physicalSession.phase, 'robot_busy');
+  assert.strictEqual(physicalSession.pendingRobotJob?.kind, 'browser-human');
+  assert.strictEqual(physicalSession.pendingRobotJob?.actor, 'human');
+  assert.strictEqual(physicalSession.game.fen(), beforeFen, 'browser move must not commit before physical verification');
+  assert.strictEqual(physicalSession.moveLog.length, 0);
+
+  assert.throws(
+    () => queueBrowserPhysicalMove({
+      uci: 'd2d4',
+      requestId: 'browser-duplicate',
+      expectedSessionGeneration: 77,
+      expectedRevision: physicalSession.stateRevision
+    }),
+    (error) => error.code === 'physical_board_busy'
+  );
+
+  const finalOccupancy = verifyAllCurrentMotionPhases();
+  const completed = completePendingRobotMove(finalOccupancy);
+  assert.strictEqual(completed.success, true);
+  assert.strictEqual(physicalSession.game.history().at(-1), 'e4');
+  assert.strictEqual(physicalSession.moveLog.at(-1)?.side, 'human');
+  assert.strictEqual(physicalSession.lastMove?.side, 'human');
+  assert.strictEqual(physicalSession.pendingRobotJob, null);
+  assert.strictEqual(physicalSession.phase, 'ready');
+
+  assert.throws(
+    () => queueBrowserPhysicalMove({
+      uci: 'e7e5',
+      expectedSessionGeneration: 76,
+      expectedRevision: physicalSession.stateRevision
+    }),
+    (error) => error.code === 'stale_session_generation'
+  );
+}
+
 function verifyOpeningAutoContinueLift() {
   const game = new Chess(PHYSICAL_START_FEN);
   for (const uci of ['d2d4', 'g8f6', 'c2c4', 'g7g6', 'b1c3', 'f8g7', 'e2e4', 'd7d6', 'g1f3', 'e8g8']) {
@@ -248,6 +298,7 @@ async function verifyMotionTransactionEndpoint() {
 }
 
 async function run() {
+  verifyBrowserPhysicalMoveTransaction();
   verifyOpeningAutoContinueLift();
   startPhysicalSession({ humanColor: 'black', level: 6, profile: 'aggressive' });
   let state = serializePhysicalState();
@@ -755,6 +806,7 @@ async function run() {
     success: true,
     checked: [
       'physical sessions retain Human Black and Robot White actor colors',
+      'browser-selected physical moves commit as human only after verified motion',
       'Human Black rejects White lifts and accepts Black lifts',
       'Human Black captures and castling commit through the existing sensor state machine',
       'difficulty changes during search apply only to the next robot turn',

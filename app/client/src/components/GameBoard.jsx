@@ -209,6 +209,7 @@ export default function GameBoard() {
   const [customPhysicalFen, setCustomPhysicalFen] = useState('7k/P7/8/8/8/8/8/7K w - - 0 1');
   const [customFenError, setCustomFenError] = useState('');
   const [pendingVirtualPromotion, setPendingVirtualPromotion] = useState(null);
+  const [physicalMoveSubmitting, setPhysicalMoveSubmitting] = useState(false);
 
   // ── Mutable refs for values needed inside stable callbacks ──
   const depthRef = useRef(1);
@@ -222,6 +223,7 @@ export default function GameBoard() {
   const activeHumanColorRef = useRef('white');
   const gameGenerationRef = useRef(1);
   const settingsInitializedRef = useRef(false);
+  const physicalMoveSubmittingRef = useRef(false);
 
   // ── Audio refs ──
   const canvasRef = useRef(null);
@@ -455,9 +457,43 @@ export default function GameBoard() {
     return null;
   }, []);
 
-  const onDrop = useCallback((args) => {
-    if (physicalModeRef.current) return false;
+  const submitPhysicalMove = useCallback(async (uci) => {
+    if (physicalMoveSubmittingRef.current) return;
+    physicalMoveSubmittingRef.current = true;
+    setPhysicalMoveSubmitting(true);
+    setPhysicalState((current) => ({
+      ...current,
+      statusText: `Sending ${uci} to the physical board...`
+    }));
+    try {
+      const response = await fetch('/api/physical/browser-move', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          uci,
+          requestId: globalThis.crypto?.randomUUID?.() || `browser-${Date.now()}`,
+          expectedSessionGeneration: physicalState.sessionGeneration,
+          expectedRevision: physicalState.stateRevision
+        })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || 'The physical move could not be started.');
+      }
+      if (data.state) setPhysicalState((current) => ({ ...current, ...data.state }));
+    } catch (error) {
+      console.error('Browser physical move failed:', error);
+      setPhysicalState((current) => ({
+        ...current,
+        statusText: error.message
+      }));
+    } finally {
+      physicalMoveSubmittingRef.current = false;
+      setPhysicalMoveSubmitting(false);
+    }
+  }, [physicalState.sessionGeneration, physicalState.stateRevision]);
 
+  const onDrop = useCallback((args) => {
     setOptionSquares({});
     // react-chessboard v5 passes an object
     const { sourceSquare, targetSquare } = args;
@@ -466,6 +502,36 @@ export default function GameBoard() {
     console.log(`[onDrop] isThinking: ${isThinkingRef.current}, gameOver: ${g.isGameOver()}, turn: ${g.turn()}`);
 
     const humanColorCode = activeHumanColorRef.current === 'white' ? 'w' : 'b';
+    if (physicalModeRef.current) {
+      if (physicalMoveSubmittingRef.current
+        || physicalState.phase !== 'ready'
+        || physicalState.robotBusy
+        || physicalState.pendingPromotion
+        || !physicalState.board?.ready
+        || g.isGameOver()
+        || g.turn() !== humanColorCode) {
+        return false;
+      }
+      const piece = g.get(sourceSquare);
+      if (!piece || piece.color !== humanColorCode) return false;
+      const candidates = g.moves({ square: sourceSquare, verbose: true })
+        .filter((candidate) => candidate.to === targetSquare);
+      if (candidates.length === 0) return false;
+      const promotionMoves = candidates.filter((candidate) => candidate.promotion);
+      if (promotionMoves.length > 0) {
+        setPendingVirtualPromotion({
+          physical: true,
+          from: sourceSquare,
+          to: targetSquare,
+          fen: g.fen(),
+          choices: promotionMoves.map((candidate) => candidate.promotion)
+        });
+        return false;
+      }
+      submitPhysicalMove(`${sourceSquare}${targetSquare}`);
+      return false;
+    }
+
     if (isThinkingRef.current || g.isGameOver() || g.turn() !== humanColorCode) {
       console.log('[onDrop] Blocked by state check');
       return false;
@@ -497,13 +563,18 @@ export default function GameBoard() {
       console.error('[onDrop] Caught error during move:', error);
       return false;
     }
-  }, [syncDisplay, onUserMove]);
+  }, [onUserMove, physicalState.board?.ready, physicalState.pendingPromotion, physicalState.phase, physicalState.robotBusy, submitPhysicalMove, syncDisplay]);
 
   const commitVirtualPromotion = useCallback((piece) => {
     const pending = pendingVirtualPromotion;
     const g = gameRef.current;
     if (!pending || g.fen() !== pending.fen || !pending.choices.includes(piece)) {
       setPendingVirtualPromotion(null);
+      return;
+    }
+    if (pending.physical) {
+      setPendingVirtualPromotion(null);
+      submitPhysicalMove(`${pending.from}${pending.to}${piece}`);
       return;
     }
     try {
@@ -516,13 +587,20 @@ export default function GameBoard() {
       console.error('Virtual promotion failed:', error);
       setPendingVirtualPromotion(null);
     }
-  }, [onUserMove, pendingVirtualPromotion, syncDisplay]);
+  }, [onUserMove, pendingVirtualPromotion, submitPhysicalMove, syncDisplay]);
 
   const onSquareClick = useCallback(({ square }) => {
-    if (physicalModeRef.current) return;
-
     const g = gameRef.current;
-    if (g.isGameOver() || isThinkingRef.current) return;
+    const physicalInteraction = physicalModeRef.current;
+    if (g.isGameOver()
+      || (!physicalInteraction && isThinkingRef.current)
+      || (physicalInteraction && (
+        physicalMoveSubmittingRef.current
+        || physicalState.phase !== 'ready'
+        || physicalState.robotBusy
+        || physicalState.pendingPromotion
+        || !physicalState.board?.ready
+      ))) return;
 
     // Check if the clicked square is one of the highlighted target squares
     if (optionSquares[square] && optionSquares[square].background !== 'rgba(255, 255, 0, 0.4)') {
@@ -566,7 +644,7 @@ export default function GameBoard() {
     } else {
       setOptionSquares({});
     }
-  }, [onDrop, optionSquares]);
+  }, [onDrop, optionSquares, physicalState.board?.ready, physicalState.pendingPromotion, physicalState.phase, physicalState.robotBusy]);
 
   const onPieceDrag = useCallback(({ square }) => {
     // Show possible moves as soon as the user starts dragging the piece
@@ -1110,10 +1188,10 @@ export default function GameBoard() {
   const diagnosticSquareResolved = parseDiagnosticSquare(diagSquare);
   const visiblePhysicalLogs = physicalLogs.slice(-12).reverse();
   const physicalUndoDisabled = physicalState.active
-    ? !physicalState.canUndoPhysical || physicalState.robotBusy || Boolean(physicalState.pendingPromotion) || ['setup', 'piece_lifted', 'castle_pending_rook', 'sync_warning', 'error', 'undo_waiting_human_restore'].includes(physicalState.phase)
+    ? !physicalState.canUndoPhysical || physicalMoveSubmitting || physicalState.robotBusy || Boolean(physicalState.pendingPromotion) || ['setup', 'piece_lifted', 'castle_pending_rook', 'sync_warning', 'error', 'undo_waiting_human_restore'].includes(physicalState.phase)
     : history.length === 0 || isEngineThinking;
   const physicalRedoDisabled = physicalState.active
-    ? !physicalState.canRedoPhysical || physicalState.robotBusy || Boolean(physicalState.pendingPromotion) || ['setup', 'piece_lifted', 'castle_pending_rook', 'sync_warning', 'error', 'undo_waiting_human_restore'].includes(physicalState.phase)
+    ? !physicalState.canRedoPhysical || physicalMoveSubmitting || physicalState.robotBusy || Boolean(physicalState.pendingPromotion) || ['setup', 'piece_lifted', 'castle_pending_rook', 'sync_warning', 'error', 'undo_waiting_human_restore'].includes(physicalState.phase)
     : undoStack.length === 0 || isEngineThinking;
   const displayedMoveLog = physicalState.active
     ? (Array.isArray(physicalState.physicalMoveLog) ? physicalState.physicalMoveLog : [])

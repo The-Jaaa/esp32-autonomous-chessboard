@@ -47,7 +47,7 @@ const TOOL_DECLARATIONS = [{
   }
 }, {
   name: 'play_physical_move',
-  description: 'Play one Stockfish-verified move for Gemini during the active mentor-led physical turn. The backend validates and executes the move through the guarded physical planner.',
+  description: 'Play one Stockfish-verified opponent move only during Gemini\'s assigned turn in an active Mentor-led physical game. Never use this tool to move the learner\'s pieces or to continue normal play after a reviewed opening.',
   parametersJsonSchema: {
     type: 'object',
     properties: {
@@ -267,7 +267,7 @@ const TOOL_DECLARATIONS = [{
   parametersJsonSchema: { type: 'object', properties: {}, additionalProperties: false }
 }, {
   name: 'resolve_opening_drill',
-  description: 'Resolve a completed or blocked physical opening drill by retrying, repeating, continuing normal play, finishing the lesson, or resuming a finished board.',
+  description: 'Resolve a completed or blocked physical opening drill. Use action continue when the learner asks to keep playing after the reviewed line; the learner keeps moving their own color and Stockfish supplies opponent replies with selective coaching.',
   parametersJsonSchema: {
     type: 'object',
     properties: {

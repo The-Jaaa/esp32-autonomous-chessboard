@@ -58,6 +58,27 @@ function verifyNaturalVoiceActivityConsent() {
   }
 }
 
+async function verifyPhysicalMoveRequiresActiveMentorTurn() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mentor-physical-move-guard-'));
+  const store = new MentorStore({ dbPath: path.join(tempDir, 'mentor.sqlite') });
+  const service = new MentorActivityService({ store, chessService: {}, analysisService: {}, emit: () => {} });
+  const conversation = store.createConversation();
+  try {
+    await assert.rejects(
+      service.playPhysicalMove(conversation.id, 'post-opening-request', 'a2a4'),
+      (error) => error.code === 'physical_mentor_move_unavailable'
+        && !/reading ['\"]type['\"]/.test(error.message)
+    );
+    assert.throws(
+      () => service.validateTool(conversation.id, 'post-opening-request', 'play_physical_move', { uci: 'a2a4' }),
+      (error) => error.code === 'physical_mentor_move_unavailable'
+    );
+  } finally {
+    store.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
 async function verifyPhysicalAnalysisSurvivesStatusRevisionChurn() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mentor-physical-analysis-revision-'));
   const store = new MentorStore({ dbPath: path.join(tempDir, 'mentor.sqlite') });
@@ -634,6 +655,7 @@ async function verifyVoiceFirstPhysicalOrchestration() {
 
 (async () => {
   verifyNaturalVoiceActivityConsent();
+  await verifyPhysicalMoveRequiresActiveMentorTurn();
   await verifyGuidedPhysicalFallback();
   await verifyPhysicalAnalysisSurvivesStatusRevisionChurn();
   await verifyMoveDuringNarrationQueuesNextTurn();
