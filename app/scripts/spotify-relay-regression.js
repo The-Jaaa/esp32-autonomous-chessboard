@@ -43,6 +43,21 @@ async function run() {
   assert.deepStrictEqual([...queue.read(8)], [3, 4, 5, 6, 7, 8, 9, 10]);
   assert.strictEqual(queue.droppedBytes, 2);
 
+  const alignedQueue = new ByteQueue(16, 4);
+  alignedQueue.push(Buffer.from([1, 2, 3, 4, 5, 6, 7]));
+  assert.deepStrictEqual(
+    [...alignedQueue.read(8)],
+    [1, 2, 3, 4, 0, 0, 0, 0],
+    'An underrun must pad only after the last complete stereo frame.'
+  );
+  assert.strictEqual(alignedQueue.length, 3, 'An incomplete stereo frame must remain queued.');
+  alignedQueue.push(Buffer.from([8, 9, 10, 11, 12]));
+  assert.deepStrictEqual(
+    [...alignedQueue.read(8)],
+    [5, 6, 7, 8, 9, 10, 11, 12],
+    'Bytes split across a track gap must rejoin without shifting PCM alignment.'
+  );
+
   const scaled = scalePcm16Le(Buffer.from([0x10, 0x27, 0xf0, 0xd8]), 50);
   assert.strictEqual(scaled.readInt16LE(0), 5000);
   assert.strictEqual(scaled.readInt16LE(2), -5000);

@@ -19,8 +19,9 @@ const STABLE_PROCESS_MS = 30000;
 const RESTART_DELAYS_MS = Object.freeze([1000, 2000, 4000, 8000, 16000, 30000]);
 
 class ByteQueue {
-  constructor(maxBytes) {
-    this.maxBytes = maxBytes;
+  constructor(maxBytes, alignment = 1) {
+    this.alignment = Math.max(1, Math.floor(alignment));
+    this.maxBytes = Math.max(this.alignment, Math.floor(maxBytes / this.alignment) * this.alignment);
     this.chunks = [];
     this.offset = 0;
     this.length = 0;
@@ -32,13 +33,16 @@ class ByteQueue {
     if (!chunk.length) return;
     this.chunks.push(chunk);
     this.length += chunk.length;
-    while (this.length > this.maxBytes && this.chunks.length) {
-      const overflow = this.length - this.maxBytes;
+    let bytesToDrop = this.length > this.maxBytes
+      ? Math.ceil((this.length - this.maxBytes) / this.alignment) * this.alignment
+      : 0;
+    while (bytesToDrop > 0 && this.chunks.length) {
       const firstAvailable = this.chunks[0].length - this.offset;
-      const removed = Math.min(overflow, firstAvailable);
+      const removed = Math.min(bytesToDrop, firstAvailable);
       this.offset += removed;
       this.length -= removed;
       this.droppedBytes += removed;
+      bytesToDrop -= removed;
       if (this.offset === this.chunks[0].length) {
         this.chunks.shift();
         this.offset = 0;
@@ -48,11 +52,12 @@ class ByteQueue {
 
   read(size) {
     const output = Buffer.alloc(size);
+    const readable = Math.floor(Math.min(size, this.length) / this.alignment) * this.alignment;
     let written = 0;
-    while (written < size && this.chunks.length) {
+    while (written < readable && this.chunks.length) {
       const chunk = this.chunks[0];
       const available = chunk.length - this.offset;
-      const count = Math.min(size - written, available);
+      const count = Math.min(readable - written, available);
       chunk.copy(output, written, this.offset, this.offset + count);
       written += count;
       this.offset += count;
@@ -160,8 +165,8 @@ class SpotifyRelayService extends EventEmitter {
     this.stopping = false;
     this.musicBlocked = false;
     this.voiceBlocked = false;
-    this.musicQueue = new ByteQueue(MUSIC_FRAME_BYTES * 200);
-    this.voiceQueue = new ByteQueue(VOICE_FRAME_BYTES * 2000);
+    this.musicQueue = new ByteQueue(MUSIC_FRAME_BYTES * 200, MUSIC_CHANNELS * 2);
+    this.voiceQueue = new ByteQueue(VOICE_FRAME_BYTES * 2000, 2);
     this.currentVoiceSession = null;
     this.clients = new Set();
     this.rollingChunks = [];
