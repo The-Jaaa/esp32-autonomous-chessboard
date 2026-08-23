@@ -70,6 +70,7 @@ hardware/*.docx
 /docs_and_media/*.pdf
 /docs_and_media/*.png
 /docs_and_media/*.drawio
+/docs_and_media/*.txt
 /hardware/New folder/
 
 # Local handoff/scratch notes. Keep polished summaries in docs/ instead.

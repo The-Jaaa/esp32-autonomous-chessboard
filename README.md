@@ -5,6 +5,8 @@ with a companion server, and moves the engine's pieces with a CoreXY gantry and
 electromagnet. The completed student prototype was demonstrated at the
 University of Moratuwa in 2026.
 
+![Completed autonomous chessboard](docs/media/completed-chessboard.jpg)
+
 ![System architecture](docs/media/system-architecture.png)
 
 ## What It Does
@@ -39,6 +41,48 @@ The final speaker wiring avoids ESP32-S3 octal PSRAM pins:
 Final design exports are in [`hardware/`](hardware/), and the demonstration
 deck is available at [`docs/final-presentation.pdf`](docs/final-presentation.pdf).
 
+## Results
+
+The integrated prototype was completed and demonstrated successfully. The
+demonstration combined the production subsystems rather than presenting them
+as isolated experiments:
+
+- Full-board piece sensing and physical position synchronization
+- Legal-move and game-state guidance through the 256-LED surface
+- Stockfish move selection and automatic CoreXY piece movement
+- Capture handling with an external graveyard route
+- Browser control, calibration, difficulty selection, and live board telemetry
+- Position-aware Gemini voice coaching through the onboard speakers
+- Optional Spotify Connect playback over the local Wi-Fi relay
+
+The release was checked with physical-state, motion-planning, mentor, browser,
+and Spotify relay regression suites. The production ESP32-S3 firmware also
+passes the 16 MB flash and OPI PSRAM compile gate.
+
+## My Contributions
+
+This repository is maintained by **Thejaka Seneviratne**. My primary project
+responsibilities were:
+
+- Leading the CoreXY layout, construction, calibration, and board-coordinate mapping
+- Leading the 64-square Hall-effect sensor system and multiplexer integration
+- Designing and aligning the chessboard grid with the sensing and LED layers
+- Building the companion application, Stockfish integration, and physical-board communication
+- Integrating and debugging firmware, motion planning, mentor audio, and system-level behavior
+- Supporting motor testing, electromagnet integration, driver wiring, and PCB routing
+
+## Team
+
+Chess Companion was built by **IT Group 27 - Roasted Resistors**:
+
+| Member | Primary responsibilities |
+| --- | --- |
+| Thejaka Seneviratne | CoreXY, sensors, chessboard grid, companion application, integration |
+| Sithum Sandaruwan | Speaker system, LED system, wiring and assembly support |
+| Avindu Thilakarathne | Stepper motors, motor control, PCB and circuit design |
+| Sahan Wijerathne | Enclosure, limit switches, power supply and distribution |
+| Harishan Nirmalan | Electromagnet system, gantry and wiring support |
+
 ## Repository Layout
 
 ```text
@@ -47,7 +91,7 @@ esp32_firmware/          Production ESP32-S3 firmware
 firmware_tests/audio/    Speaker, Wi-Fi, filesystem, and power diagnostics
 firmware_tests/hardware/ Motion, sensor, and LED diagnostics
 firmware_tests/ota_led/  OTA/LED/sensor test sketch
-hardware/                Schematics, PCB exports, and Gerber files
+hardware/                BOM, board pattern, schematics, PCB exports, and Gerbers
 tools/                   Verification, setup, and audio-relay scripts
 docs/                    Architecture, acceptance notes, and presentation
 ```
