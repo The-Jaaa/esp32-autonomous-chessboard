@@ -30,7 +30,7 @@ Use:
 
 ```powershell
 $port = "COM9"
-$sketch = "C:\Users\Thejaka\Desktop\ChessProject\New folder\speaker_wav_test"
+$sketch = "C:\Users\Thejaka\Desktop\ChessProject\firmware_tests\audio\speaker_wav_test"
 $mkspiffs = "$env:LOCALAPPDATA\Arduino15\packages\esp32\tools\mkspiffs\0.2.3\mkspiffs.exe"
 $esptool = "$env:LOCALAPPDATA\Arduino15\packages\esp32\tools\esptool_py\5.2.0\esptool.exe"
 
@@ -46,7 +46,7 @@ Use:
 
 ```powershell
 $port = "COM9"
-$sketch = "C:\Users\Thejaka\Desktop\ChessProject\New folder\speaker_wav_test"
+$sketch = "C:\Users\Thejaka\Desktop\ChessProject\firmware_tests\audio\speaker_wav_test"
 $mkspiffs = "$env:LOCALAPPDATA\Arduino15\packages\esp32\tools\mkspiffs\0.2.3\mkspiffs.exe"
 $esptool = "$env:LOCALAPPDATA\Arduino15\packages\esp32\tools\esptool_py\5.2.0\esptool.exe"
 

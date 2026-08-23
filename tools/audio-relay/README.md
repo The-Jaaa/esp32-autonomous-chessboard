@@ -65,7 +65,7 @@ The PowerShell entrypoint runs the same relay service without the chess app:
 ```
 
 For the standalone ESP sketch, create the ignored file
-`New folder/wifi_stream_speaker_test/wifi_stream_secrets.h` beside the example
+`firmware_tests/audio/wifi_stream_speaker_test/wifi_stream_secrets.h` beside the example
 header, fill in Wi-Fi, URL, and the matching token, then upload the sketch with
 the normal ESP32-S3 N16R8 settings.
 

@@ -44,7 +44,7 @@ After uploading the sketch, run this from PowerShell while the ESP is connected
 over USB:
 
 ```powershell
-& "C:\Users\Thejaka\Desktop\ChessProject\New folder\speaker_test\upload_littlefs_com9.ps1"
+& "C:\Users\Thejaka\Desktop\ChessProject\firmware_tests\audio\speaker_test\upload_littlefs_com9.ps1"
 ```
 
 This creates a LittleFS image from `data\test.mp3` and writes it to offset

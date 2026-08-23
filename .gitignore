@@ -4,7 +4,7 @@
 !*.env.example
 app/.env
 esp32_firmware/firmware_secrets.h
-New folder/wifi_stream_speaker_test/wifi_stream_secrets.h
+firmware_tests/audio/wifi_stream_speaker_test/wifi_stream_secrets.h
 
 # Dependency folders
 node_modules/
@@ -54,6 +54,24 @@ docs_and_media/*.mp4
 docs_and_media/handoff.pdf
 hardware/*.docx
 
+# Local project archives, coursework, and raw demonstration exports
+/Proj/
+/Projects P1/
+/output/
+/sound/
+/sketch_jun3b/
+/account_activities_combined.txt
+/IT_27_RoastedResistor*
+/Autonomous-Chessboard-IPO-Block-Diagram*
+/Schematic_chessboard_2026-08-13.svg
+/chessboard pattern.pdf
+/chessboard.jpeg
+/docs_and_media/comps/
+/docs_and_media/*.pdf
+/docs_and_media/*.png
+/docs_and_media/*.drawio
+/hardware/New folder/
+
 # Local handoff/scratch notes. Keep polished summaries in docs/ instead.
 codex.md
 antigravity.md
@@ -64,6 +82,7 @@ handoff_speaker_gemini.txt
 *.tmp
 *.bak
 *.orig
+*.crswap
 
 # OS/editor files
 .DS_Store

@@ -9,7 +9,7 @@ Set-StrictMode -Version Latest
 
 $root = Split-Path -Parent $PSScriptRoot
 $firmware = Join-Path $root 'esp32_firmware'
-$diagnosticSketch = Join-Path $root 'tests_and_misc\esp32_led_flicker_diag'
+$diagnosticSketch = Join-Path $root 'firmware_tests\hardware\esp32_led_flicker_diag'
 $productionOutput = Join-Path $root 'tmp\led-flicker-production'
 $diagnosticOutput = Join-Path $root 'tmp\led-flicker-diagnostic'
 $fqbn = 'esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=default,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,UploadMode=default,UploadSpeed=921600,LoopCore=1,EventsCore=1'

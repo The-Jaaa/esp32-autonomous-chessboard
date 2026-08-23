@@ -5,7 +5,7 @@ Use this checklist before pushing the project to a public GitHub repository.
 ## Safe To Commit
 
 - Source code under `app/`
-- Firmware sketches under `esp32_firmware/`, `esp32_ota_led/`, `tests_and_misc/`, and the ESP32 audio/WiFi test sketch folders
+- Firmware sketches under `esp32_firmware/` and `firmware_tests/`
 - Hardware schematics, PCB exports, and Gerber files under `hardware/`
 - Markdown documentation
 - Public images or diagrams you own
@@ -22,15 +22,13 @@ Use this checklist before pushing the project to a public GitHub repository.
 - portable FFmpeg downloads or extracted binaries
 - local logs and temporary render files
 
-## Recommended First Publish Flow
+## Recommended Publish Flow
 
 ```powershell
-git init
 git add .
 git status
-git commit -m "Initial public project snapshot"
-git branch -M main
-git remote add origin https://github.com/YOUR_USERNAME/YOUR_REPO.git
+git diff --cached --check
+git commit -m "Describe the change"
 git push -u origin main
 ```
 

@@ -9,7 +9,7 @@ Set-StrictMode -Version Latest
 
 $root = Split-Path -Parent $PSScriptRoot
 $productionSketch = Join-Path $root 'esp32_firmware'
-$calibrationSketch = Join-Path $root 'tests_and_misc\esp32_led_index_calibration'
+$calibrationSketch = Join-Path $root 'firmware_tests\hardware\esp32_led_index_calibration'
 $productionOutput = Join-Path $root 'tmp\led-index-production'
 $calibrationOutput = Join-Path $root 'tmp\led-index-calibration'
 $fqbn = 'esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=default,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,UploadMode=default,UploadSpeed=921600,LoopCore=1,EventsCore=1'
