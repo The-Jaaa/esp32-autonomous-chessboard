@@ -11,7 +11,7 @@ University of Moratuwa in 2026.
 
 ## What It Does
 
-- Detects all 64 squares through Hall-effect sensors and four 16-channel multiplexers.
+- Detects square occupancy across all 64 squares through Hall-effect sensors and four 16-channel multiplexers.
 - Guides the player with 256 addressable LEDs, four per square.
 - Offers idle Exhibition lighting, an eight-column music Spectrum, and autonomous demonstration playback with placement recovery.
 - Uses Stockfish for engine play and `chess.js` for game-state validation.
@@ -20,6 +20,22 @@ University of Moratuwa in 2026.
 - Adds a Gemini-powered voice mentor grounded in the live chess position.
 - Plays mentor audio through dual MAX98357A I2S amplifiers.
 - Supports a private-demo Spotify Connect relay through librespot, FFmpeg, Wi-Fi, and the ESP32 speakers.
+
+## Technologies
+
+| Layer | Main technologies |
+| --- | --- |
+| Board firmware | ESP32-S3, C++, Arduino framework, FreeRTOS |
+| Companion interface | React, Vite, Socket.IO |
+| Backend and game rules | Node.js, Express, `chess.js`, SQLite |
+| Chess engine | Native Stockfish 19 through UCI |
+| Voice mentoring | Google Gemini API and onboard I2S audio |
+| Music and visualisation | librespot, FFmpeg, local PCM analysis and a 2,048-point FFT |
+
+The laptop runs the backend, chess engine, mentoring integration, and music
+relay. The ESP32 handles sensing, LEDs, audio playback, and motion. Physical
+gameplay requires the backend connection. Hall sensors detect magnetic square
+occupancy; the server tracks piece identities through the game state.
 
 ## Hardware
 
@@ -56,9 +72,16 @@ as isolated experiments:
 - Position-aware Gemini voice coaching through the onboard speakers
 - Optional Spotify Connect playback over the local Wi-Fi relay
 
-The release was checked with physical-state, motion-planning, mentor, browser,
-and Spotify relay regression suites. The production ESP32-S3 firmware also
-passes the 16 MB flash and OPI PSRAM compile gate.
+Final software verification on 9 November 2026 passed the client build and lint,
+physical-state and motion-planning checks, shared settings, Mentor, Spotify,
+Ultra, autonomous playback/recovery, Exhibition, and Spectrum regression suites.
+The production ESP32-S3 compile gate passed at **1,908,183 bytes flash** and
+**101,464 bytes static RAM**, using 16 MB flash and OPI PSRAM.
+
+These software results are separate from physical acceptance. Feature-specific
+notes retain the remaining hardware checks, including physical Ultra gameplay,
+Spectrum sound-to-light timing/endurance, and autonomous recovery/restoration
+scenarios. See the linked operation and acceptance documents below.
 
 ## My Contributions
 
@@ -110,35 +133,77 @@ is remembered in that browser; physical changes apply to the current session.
 Normal levels 1-15 remain available. Mentor activities retain normal difficulty.
 See [engine setup and Ultra](docs/stockfish-ultra.md).
 
-## Companion App
+## Getting Started
 
-Requirements: Windows x64 for the provided engine setup, Node.js 22.13 or newer
-(the Mentor store uses built-in SQLite),
-and credentials supplied through an ignored `.env` file.
+The provided setup targets **Windows x64**. Use **Node.js 22.13 or newer**;
+final verification used Node.js 24.14.0. Git is needed to clone the project.
+Gemini mentoring needs your own API key. Physical play additionally requires
+the assembled board and the firmware setup below.
+
+From PowerShell:
 
 ```powershell
+git clone https://github.com/The-Jaaa/esp32-autonomous-chessboard.git
+cd esp32-autonomous-chessboard
+.\tools\setup-stockfish.ps1
+
 cd app
-npm install
+npm ci
 Copy-Item .env.example .env
+```
+
+Before starting the backend, edit `app/.env` with your own Gemini key, the
+laptop's Wi-Fi IPv4 address, and a private `ESP32_AUDIO_TOKEN`. Use the same
+audio token in the firmware configuration. Keep the real configuration files
+local; example files are included in the repository.
+
+Build the companion interface and start the server:
+
+```powershell
+# From app/
+cd client
+npm ci
+npm run build
+cd ..
 npm start
 ```
 
-In a second terminal:
+Open **http://localhost:3000** for the companion page or
+**http://localhost:3000/mentor** for voice mentoring. Keep the backend terminal
+running. For frontend development, run `npm run dev` from `app/client/` in a
+second terminal and open the Vite URL; API and WebSocket traffic is proxied to
+the backend on port 3000.
 
-```powershell
-cd app/client
-npm install
-npm run dev
-```
+## Exhibition Modes
 
-Open the Vite URL shown in the terminal. Configure `app/.env` with your own
-Gemini key, LAN address, and audio token. Never commit that file.
+The companion page includes a Light Show panel and an Autonomous Game panel:
+
+- **Light Show:** select a pattern, start or stop it, and adjust brightness.
+- **Spectrum:** eight coloured bars across files A-H react to music through the
+  board's Spotify relay. Bass is on A, treble on H, and bars rise toward rank 8.
+  Timing follows the audio, so the Speed control is disabled.
+- **Autonomous Game:** replay the reviewed Tal-Shamkovich game, reverse verified
+  transfers to restore the pieces, and repeat. Pause, restoration, takeover,
+  and placement-recovery controls use the existing motion and sensing guards.
+
+Ordinary Light Show operation is idle-only. Autonomous playback has a guarded
+path for retaining music/Spectrum during its demonstration. Physical-game and
+Mentor ownership checks remain in place. Operation and limitations are detailed
+in [Exhibition modes](docs/exhibition-modes.md),
+[autonomous playback](docs/autonomous-exhibition.md), and
+[placement recovery](docs/autonomous-recovery.md).
 
 ## Firmware
 
 The production sketch is in `esp32_firmware/`. Copy
 `firmware_secrets.example.h` to the ignored `firmware_secrets.h`, fill in the
-local Wi-Fi and backend values, and compile for an ESP32-S3 N16R8 using:
+local Wi-Fi and backend values. Install the Espressif ESP32 Arduino board package
+and the libraries used by the production sketch: **ArduinoJson**, **AccelStepper**,
+**Adafruit NeoPixel**, and **ESP32-audioI2S** (`Audio.h`). The audio library must
+provide the `audio_process_i2s` PCM callback used by Spectrum. The verified build
+uses ESP32 core **3.3.8**, ArduinoJson **7.4.3**, AccelStepper **1.64**,
+Adafruit NeoPixel **1.15.5**, and ESP32-audioI2S **3.4.6**. Compile for an
+ESP32-S3 N16R8 using:
 
 - CPU frequency: 240 MHz
 - Flash size: 16 MB
@@ -171,6 +236,10 @@ npm run test:exhibition
 npm run test:music-spectrum
 ```
 
+The combined foundation gate can also be run from the repository root with
+`.\tools\verify-foundation.ps1`; it includes the client checks and production
+firmware compile and requires Arduino CLI. This command compiles without uploading.
+
 Hardware acceptance and recovery procedures are documented in
 [`docs/demo-readiness.md`](docs/demo-readiness.md) and
 [`docs/spotify-relay-acceptance.md`](docs/spotify-relay-acceptance.md).
@@ -188,4 +257,7 @@ binaries, generated captures, Wi-Fi credentials, or API keys.
 
 ## License
 
-Released under the [MIT License](LICENSE).
+Project source is released under the [MIT License](LICENSE). Third-party tools
+and libraries retain their respective licenses. Stockfish and librespot are
+separate upstream projects; downloaded distributions and local credentials are
+not included in this repository.
