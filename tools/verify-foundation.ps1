@@ -25,6 +25,7 @@ function Invoke-Checked {
 Push-Location $app
 try {
     Invoke-Checked 'Backend syntax' { node --check server.js }
+    Invoke-Checked 'Native Stockfish 19 and Ultra regressions' { npm run test:ultra }
     Invoke-Checked 'Online physical and shared-settings regressions' { npm run test:online-foundation }
 }
 finally {
@@ -35,6 +36,16 @@ Push-Location $client
 try {
     Invoke-Checked 'Client production build' { npm run build }
     Invoke-Checked 'Client lint' { npm run lint }
+}
+finally {
+    Pop-Location
+}
+
+Push-Location $app
+try {
+    Invoke-Checked 'Autonomous game, restoration, firmware guard, and browser regressions' { npm run test:autonomous }
+    Invoke-Checked 'Spectrum DSP, timing, and display regressions' { npm run test:music-spectrum }
+    Invoke-Checked 'Exhibition state, protocol, and browser regressions' { npm run test:exhibition }
 }
 finally {
     Pop-Location

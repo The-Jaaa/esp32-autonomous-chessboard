@@ -13,6 +13,7 @@ export function GameSettingsControls({
   activeGame = false,
   activeSearch = false,
   disabled = false,
+  difficultyDisabled = false,
   onColorChange,
   onLevelChange,
   compact = false
@@ -49,7 +50,7 @@ export function GameSettingsControls({
         min="1"
         max="15"
         value={level}
-        disabled={disabled}
+        disabled={disabled || difficultyDisabled}
         onChange={(event) => onLevelChange(Number(event.target.value))}
       />
       <div className="shared-setting-scale"><span>Beginner</span><span>Expert</span></div>

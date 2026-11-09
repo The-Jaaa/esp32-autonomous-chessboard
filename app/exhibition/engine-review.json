@@ -1,0 +1,1184 @@
+{
+  "source": "https://github.com/brianerdelyi/ChessPGN/blob/main/Life%20and%20Games%20of%20Mikhail%20Tal.pgn",
+  "game": {
+    "Event": "USSR Championship 1964/65",
+    "Site": "Kiev URS",
+    "Date": "1965.01.17",
+    "Round": "14",
+    "White": "Mikhail Tal",
+    "Black": "Leonid Alexandrovich Shamkovich",
+    "Result": "1-0",
+    "WhiteElo": "?",
+    "BlackElo": "?",
+    "EventDate": "1964.??.??",
+    "ECO": "C87",
+    "PlyCount": "83"
+  },
+  "engine": "Stockfish 18 lite, existing MentorEngineService",
+  "movetimeMs": 200,
+  "scope": "Position-by-position tactical review of the fixed historical game; not a claim that every played move is the engine best move.",
+  "rows": [
+    {
+      "ply": 1,
+      "played": "e4",
+      "best": {
+        "uci": "e2e4",
+        "san": "e4"
+      },
+      "score": {
+        "type": "cp",
+        "value": 36,
+        "perspective": "white"
+      },
+      "depth": 15
+    },
+    {
+      "ply": 2,
+      "played": "e5",
+      "best": {
+        "uci": "e7e5",
+        "san": "e5"
+      },
+      "score": {
+        "type": "cp",
+        "value": 36,
+        "perspective": "white"
+      },
+      "depth": 17
+    },
+    {
+      "ply": 3,
+      "played": "Nf3",
+      "best": {
+        "uci": "g1f3",
+        "san": "Nf3"
+      },
+      "score": {
+        "type": "cp",
+        "value": 41,
+        "perspective": "white"
+      },
+      "depth": 16
+    },
+    {
+      "ply": 4,
+      "played": "Nc6",
+      "best": {
+        "uci": "b8c6",
+        "san": "Nc6"
+      },
+      "score": {
+        "type": "cp",
+        "value": 44,
+        "perspective": "white"
+      },
+      "depth": 14
+    },
+    {
+      "ply": 5,
+      "played": "Bb5",
+      "best": {
+        "uci": "d2d4",
+        "san": "d4"
+      },
+      "score": {
+        "type": "cp",
+        "value": 31,
+        "perspective": "white"
+      },
+      "depth": 16
+    },
+    {
+      "ply": 6,
+      "played": "a6",
+      "best": {
+        "uci": "a7a6",
+        "san": "a6"
+      },
+      "score": {
+        "type": "cp",
+        "value": 22,
+        "perspective": "white"
+      },
+      "depth": 16
+    },
+    {
+      "ply": 7,
+      "played": "Ba4",
+      "best": {
+        "uci": "b5a4",
+        "san": "Ba4"
+      },
+      "score": {
+        "type": "cp",
+        "value": 31,
+        "perspective": "white"
+      },
+      "depth": 13
+    },
+    {
+      "ply": 8,
+      "played": "Nf6",
+      "best": {
+        "uci": "g8f6",
+        "san": "Nf6"
+      },
+      "score": {
+        "type": "cp",
+        "value": 39,
+        "perspective": "white"
+      },
+      "depth": 14
+    },
+    {
+      "ply": 9,
+      "played": "O-O",
+      "best": {
+        "uci": "e1g1",
+        "san": "O-O"
+      },
+      "score": {
+        "type": "cp",
+        "value": 46,
+        "perspective": "white"
+      },
+      "depth": 14
+    },
+    {
+      "ply": 10,
+      "played": "Be7",
+      "best": {
+        "uci": "f6e4",
+        "san": "Nxe4"
+      },
+      "score": {
+        "type": "cp",
+        "value": 55,
+        "perspective": "white"
+      },
+      "depth": 11
+    },
+    {
+      "ply": 11,
+      "played": "Re1",
+      "best": {
+        "uci": "f1e1",
+        "san": "Re1"
+      },
+      "score": {
+        "type": "cp",
+        "value": 41,
+        "perspective": "white"
+      },
+      "depth": 13
+    },
+    {
+      "ply": 12,
+      "played": "d6",
+      "best": {
+        "uci": "b7b5",
+        "san": "b5"
+      },
+      "score": {
+        "type": "cp",
+        "value": 41,
+        "perspective": "white"
+      },
+      "depth": 17
+    },
+    {
+      "ply": 13,
+      "played": "c3",
+      "best": {
+        "uci": "c2c3",
+        "san": "c3"
+      },
+      "score": {
+        "type": "cp",
+        "value": 47,
+        "perspective": "white"
+      },
+      "depth": 13
+    },
+    {
+      "ply": 14,
+      "played": "O-O",
+      "best": {
+        "uci": "c8g4",
+        "san": "Bg4"
+      },
+      "score": {
+        "type": "cp",
+        "value": 41,
+        "perspective": "white"
+      },
+      "depth": 14
+    },
+    {
+      "ply": 15,
+      "played": "d4",
+      "best": {
+        "uci": "h2h3",
+        "san": "h3"
+      },
+      "score": {
+        "type": "cp",
+        "value": 53,
+        "perspective": "white"
+      },
+      "depth": 12
+    },
+    {
+      "ply": 16,
+      "played": "exd4",
+      "best": {
+        "uci": "b7b5",
+        "san": "b5"
+      },
+      "score": {
+        "type": "cp",
+        "value": 52,
+        "perspective": "white"
+      },
+      "depth": 17
+    },
+    {
+      "ply": 17,
+      "played": "cxd4",
+      "best": {
+        "uci": "c3d4",
+        "san": "cxd4"
+      },
+      "score": {
+        "type": "cp",
+        "value": 53,
+        "perspective": "white"
+      },
+      "depth": 13
+    },
+    {
+      "ply": 18,
+      "played": "Bg4",
+      "best": {
+        "uci": "b7b5",
+        "san": "b5"
+      },
+      "score": {
+        "type": "cp",
+        "value": 48,
+        "perspective": "white"
+      },
+      "depth": 14
+    },
+    {
+      "ply": 19,
+      "played": "Nc3",
+      "best": {
+        "uci": "b1c3",
+        "san": "Nc3"
+      },
+      "score": {
+        "type": "cp",
+        "value": 76,
+        "perspective": "white"
+      },
+      "depth": 14
+    },
+    {
+      "ply": 20,
+      "played": "Nd7",
+      "best": {
+        "uci": "g4h5",
+        "san": "Bh5"
+      },
+      "score": {
+        "type": "cp",
+        "value": 78,
+        "perspective": "white"
+      },
+      "depth": 14
+    },
+    {
+      "ply": 21,
+      "played": "Be3",
+      "best": {
+        "uci": "a2a3",
+        "san": "a3"
+      },
+      "score": {
+        "type": "cp",
+        "value": 78,
+        "perspective": "white"
+      },
+      "depth": 13
+    },
+    {
+      "ply": 22,
+      "played": "Nb6",
+      "best": {
+        "uci": "b7b5",
+        "san": "b5"
+      },
+      "score": {
+        "type": "cp",
+        "value": 60,
+        "perspective": "white"
+      },
+      "depth": 16
+    },
+    {
+      "ply": 23,
+      "played": "Bb3",
+      "best": {
+        "uci": "a4b3",
+        "san": "Bb3"
+      },
+      "score": {
+        "type": "cp",
+        "value": 67,
+        "perspective": "white"
+      },
+      "depth": 15
+    },
+    {
+      "ply": 24,
+      "played": "Bf6",
+      "best": {
+        "uci": "c6a5",
+        "san": "Na5"
+      },
+      "score": {
+        "type": "cp",
+        "value": 62,
+        "perspective": "white"
+      },
+      "depth": 15
+    },
+    {
+      "ply": 25,
+      "played": "Qd3",
+      "best": {
+        "uci": "a2a4",
+        "san": "a4"
+      },
+      "score": {
+        "type": "cp",
+        "value": 83,
+        "perspective": "white"
+      },
+      "depth": 14
+    },
+    {
+      "ply": 26,
+      "played": "Bxf3",
+      "best": {
+        "uci": "f8e8",
+        "san": "Re8"
+      },
+      "score": {
+        "type": "cp",
+        "value": 93,
+        "perspective": "white"
+      },
+      "depth": 13
+    },
+    {
+      "ply": 27,
+      "played": "gxf3",
+      "best": {
+        "uci": "g2f3",
+        "san": "gxf3"
+      },
+      "score": {
+        "type": "cp",
+        "value": 87,
+        "perspective": "white"
+      },
+      "depth": 15
+    },
+    {
+      "ply": 28,
+      "played": "Qd7",
+      "best": {
+        "uci": "d8d7",
+        "san": "Qd7"
+      },
+      "score": {
+        "type": "cp",
+        "value": 92,
+        "perspective": "white"
+      },
+      "depth": 13
+    },
+    {
+      "ply": 29,
+      "played": "Kg2",
+      "best": {
+        "uci": "g1h1",
+        "san": "Kh1"
+      },
+      "score": {
+        "type": "cp",
+        "value": 97,
+        "perspective": "white"
+      },
+      "depth": 14
+    },
+    {
+      "ply": 30,
+      "played": "Ne7",
+      "best": {
+        "uci": "c6a5",
+        "san": "Na5"
+      },
+      "score": {
+        "type": "cp",
+        "value": 77,
+        "perspective": "white"
+      },
+      "depth": 13
+    },
+    {
+      "ply": 31,
+      "played": "Rg1",
+      "best": {
+        "uci": "g2h1",
+        "san": "Kh1"
+      },
+      "score": {
+        "type": "cp",
+        "value": 98,
+        "perspective": "white"
+      },
+      "depth": 13
+    },
+    {
+      "ply": 32,
+      "played": "g6",
+      "best": {
+        "uci": "d6d5",
+        "san": "d5"
+      },
+      "score": {
+        "type": "cp",
+        "value": 103,
+        "perspective": "white"
+      },
+      "depth": 13
+    },
+    {
+      "ply": 33,
+      "played": "Kh1",
+      "best": {
+        "uci": "a2a4",
+        "san": "a4"
+      },
+      "score": {
+        "type": "cp",
+        "value": 97,
+        "perspective": "white"
+      },
+      "depth": 14
+    },
+    {
+      "ply": 34,
+      "played": "d5",
+      "best": {
+        "uci": "d6d5",
+        "san": "d5"
+      },
+      "score": {
+        "type": "cp",
+        "value": 73,
+        "perspective": "white"
+      },
+      "depth": 13
+    },
+    {
+      "ply": 35,
+      "played": "Bg5",
+      "best": {
+        "uci": "g1g2",
+        "san": "Rg2"
+      },
+      "score": {
+        "type": "cp",
+        "value": 73,
+        "perspective": "white"
+      },
+      "depth": 13
+    },
+    {
+      "ply": 36,
+      "played": "Bxg5",
+      "best": {
+        "uci": "f6g5",
+        "san": "Bxg5"
+      },
+      "score": {
+        "type": "cp",
+        "value": 36,
+        "perspective": "white"
+      },
+      "depth": 13
+    },
+    {
+      "ply": 37,
+      "played": "Rxg5",
+      "best": {
+        "uci": "g1g5",
+        "san": "Rxg5"
+      },
+      "score": {
+        "type": "cp",
+        "value": 38,
+        "perspective": "white"
+      },
+      "depth": 14
+    },
+    {
+      "ply": 38,
+      "played": "c6",
+      "best": {
+        "uci": "a8d8",
+        "san": "Rad8"
+      },
+      "score": {
+        "type": "cp",
+        "value": 39,
+        "perspective": "white"
+      },
+      "depth": 14
+    },
+    {
+      "ply": 39,
+      "played": "Ne2",
+      "best": {
+        "uci": "a1g1",
+        "san": "Rag1"
+      },
+      "score": {
+        "type": "cp",
+        "value": 39,
+        "perspective": "white"
+      },
+      "depth": 13
+    },
+    {
+      "ply": 40,
+      "played": "Rad8",
+      "best": {
+        "uci": "g8h8",
+        "san": "Kh8"
+      },
+      "score": {
+        "type": "cp",
+        "value": 44,
+        "perspective": "white"
+      },
+      "depth": 14
+    },
+    {
+      "ply": 41,
+      "played": "Rd1",
+      "best": {
+        "uci": "g5g3",
+        "san": "Rg3"
+      },
+      "score": {
+        "type": "cp",
+        "value": 47,
+        "perspective": "white"
+      },
+      "depth": 13
+    },
+    {
+      "ply": 42,
+      "played": "Na8",
+      "best": {
+        "uci": "b6a8",
+        "san": "Na8"
+      },
+      "score": {
+        "type": "cp",
+        "value": 8,
+        "perspective": "white"
+      },
+      "depth": 13
+    },
+    {
+      "ply": 43,
+      "played": "Qe3",
+      "best": {
+        "uci": "g5g2",
+        "san": "Rg2"
+      },
+      "score": {
+        "type": "cp",
+        "value": 17,
+        "perspective": "white"
+      },
+      "depth": 14
+    },
+    {
+      "ply": 44,
+      "played": "Nc7",
+      "best": {
+        "uci": "a8c7",
+        "san": "Nc7"
+      },
+      "score": {
+        "type": "cp",
+        "value": -22,
+        "perspective": "white"
+      },
+      "depth": 13
+    },
+    {
+      "ply": 45,
+      "played": "Rdg1",
+      "best": {
+        "uci": "g5g3",
+        "san": "Rg3"
+      },
+      "score": {
+        "type": "cp",
+        "value": -22,
+        "perspective": "white"
+      },
+      "depth": 12
+    },
+    {
+      "ply": 46,
+      "played": "Kh8",
+      "best": {
+        "uci": "g8h8",
+        "san": "Kh8"
+      },
+      "score": {
+        "type": "cp",
+        "value": -37,
+        "perspective": "white"
+      },
+      "depth": 13
+    },
+    {
+      "ply": 47,
+      "played": "R5g3",
+      "best": {
+        "uci": "g5g3",
+        "san": "R5g3"
+      },
+      "score": {
+        "type": "cp",
+        "value": -43,
+        "perspective": "white"
+      },
+      "depth": 13
+    },
+    {
+      "ply": 48,
+      "played": "Ng8",
+      "best": {
+        "uci": "c7e6",
+        "san": "Ne6"
+      },
+      "score": {
+        "type": "cp",
+        "value": -42,
+        "perspective": "white"
+      },
+      "depth": 12
+    },
+    {
+      "ply": 49,
+      "played": "Bc2",
+      "best": {
+        "uci": "b3c2",
+        "san": "Bc2"
+      },
+      "score": {
+        "type": "cp",
+        "value": 41,
+        "perspective": "white"
+      },
+      "depth": 12
+    },
+    {
+      "ply": 50,
+      "played": "Ne6",
+      "best": {
+        "uci": "d5e4",
+        "san": "dxe4"
+      },
+      "score": {
+        "type": "cp",
+        "value": 37,
+        "perspective": "white"
+      },
+      "depth": 13
+    },
+    {
+      "ply": 51,
+      "played": "Rd1",
+      "best": {
+        "uci": "e4e5",
+        "san": "e5"
+      },
+      "score": {
+        "type": "cp",
+        "value": 45,
+        "perspective": "white"
+      },
+      "depth": 14
+    },
+    {
+      "ply": 52,
+      "played": "Qe7",
+      "best": {
+        "uci": "f7f6",
+        "san": "f6"
+      },
+      "score": {
+        "type": "cp",
+        "value": -15,
+        "perspective": "white"
+      },
+      "depth": 12
+    },
+    {
+      "ply": 53,
+      "played": "a3",
+      "best": {
+        "uci": "g3h3",
+        "san": "Rh3"
+      },
+      "score": {
+        "type": "cp",
+        "value": 1,
+        "perspective": "white"
+      },
+      "depth": 16
+    },
+    {
+      "ply": 54,
+      "played": "Rd7",
+      "best": {
+        "uci": "e7h4",
+        "san": "Qh4"
+      },
+      "score": {
+        "type": "cp",
+        "value": 1,
+        "perspective": "white"
+      },
+      "depth": 12
+    },
+    {
+      "ply": 55,
+      "played": "b4",
+      "best": {
+        "uci": "g3h3",
+        "san": "Rh3"
+      },
+      "score": {
+        "type": "cp",
+        "value": 18,
+        "perspective": "white"
+      },
+      "depth": 13
+    },
+    {
+      "ply": 56,
+      "played": "Nf6",
+      "best": {
+        "uci": "e7h4",
+        "san": "Qh4"
+      },
+      "score": {
+        "type": "cp",
+        "value": -18,
+        "perspective": "white"
+      },
+      "depth": 12
+    },
+    {
+      "ply": 57,
+      "played": "Rh3",
+      "best": {
+        "uci": "d1g1",
+        "san": "Rdg1"
+      },
+      "score": {
+        "type": "cp",
+        "value": 1,
+        "perspective": "white"
+      },
+      "depth": 13
+    },
+    {
+      "ply": 58,
+      "played": "Ng8",
+      "best": {
+        "uci": "f6h5",
+        "san": "Nh5"
+      },
+      "score": {
+        "type": "cp",
+        "value": 4,
+        "perspective": "white"
+      },
+      "depth": 12
+    },
+    {
+      "ply": 59,
+      "played": "Rg1",
+      "best": {
+        "uci": "e4e5",
+        "san": "e5"
+      },
+      "score": {
+        "type": "cp",
+        "value": 70,
+        "perspective": "white"
+      },
+      "depth": 14
+    },
+    {
+      "ply": 60,
+      "played": "dxe4",
+      "best": {
+        "uci": "d5e4",
+        "san": "dxe4"
+      },
+      "score": {
+        "type": "cp",
+        "value": 37,
+        "perspective": "white"
+      },
+      "depth": 13
+    },
+    {
+      "ply": 61,
+      "played": "fxe4",
+      "best": {
+        "uci": "f3e4",
+        "san": "fxe4"
+      },
+      "score": {
+        "type": "cp",
+        "value": 28,
+        "perspective": "white"
+      },
+      "depth": 13
+    },
+    {
+      "ply": 62,
+      "played": "Rfd8",
+      "best": {
+        "uci": "f8d8",
+        "san": "Rfd8"
+      },
+      "score": {
+        "type": "cp",
+        "value": 30,
+        "perspective": "white"
+      },
+      "depth": 14
+    },
+    {
+      "ply": 63,
+      "played": "Rd1",
+      "best": {
+        "uci": "g1d1",
+        "san": "Rd1"
+      },
+      "score": {
+        "type": "cp",
+        "value": 37,
+        "perspective": "white"
+      },
+      "depth": 13
+    },
+    {
+      "ply": 64,
+      "played": "Kg7",
+      "best": {
+        "uci": "e7f6",
+        "san": "Qf6"
+      },
+      "score": {
+        "type": "cp",
+        "value": 31,
+        "perspective": "white"
+      },
+      "depth": 14
+    },
+    {
+      "ply": 65,
+      "played": "f4",
+      "best": {
+        "uci": "d1d2",
+        "san": "Rd2"
+      },
+      "score": {
+        "type": "cp",
+        "value": 49,
+        "perspective": "white"
+      },
+      "depth": 10
+    },
+    {
+      "ply": 66,
+      "played": "Nc7",
+      "best": {
+        "uci": "f7f5",
+        "san": "f5"
+      },
+      "score": {
+        "type": "cp",
+        "value": 30,
+        "perspective": "white"
+      },
+      "depth": 16
+    },
+    {
+      "ply": 67,
+      "played": "f5",
+      "best": {
+        "uci": "f4f5",
+        "san": "f5"
+      },
+      "score": {
+        "type": "cp",
+        "value": 245,
+        "perspective": "white"
+      },
+      "depth": 16
+    },
+    {
+      "ply": 68,
+      "played": "f6",
+      "best": {
+        "uci": "a6a5",
+        "san": "a5"
+      },
+      "score": {
+        "type": "cp",
+        "value": 249,
+        "perspective": "white"
+      },
+      "depth": 15
+    },
+    {
+      "ply": 69,
+      "played": "fxg6",
+      "best": {
+        "uci": "f5g6",
+        "san": "fxg6"
+      },
+      "score": {
+        "type": "cp",
+        "value": 407,
+        "perspective": "white"
+      },
+      "depth": 15
+    },
+    {
+      "ply": 70,
+      "played": "hxg6",
+      "best": {
+        "uci": "h7g6",
+        "san": "hxg6"
+      },
+      "score": {
+        "type": "cp",
+        "value": 415,
+        "perspective": "white"
+      },
+      "depth": 12
+    },
+    {
+      "ply": 71,
+      "played": "Rg1",
+      "best": {
+        "uci": "d1g1",
+        "san": "Rg1"
+      },
+      "score": {
+        "type": "cp",
+        "value": 451,
+        "perspective": "white"
+      },
+      "depth": 15
+    },
+    {
+      "ply": 72,
+      "played": "Ne6",
+      "best": {
+        "uci": "g6g5",
+        "san": "g5"
+      },
+      "score": {
+        "type": "cp",
+        "value": 427,
+        "perspective": "white"
+      },
+      "depth": 13
+    },
+    {
+      "ply": 73,
+      "played": "e5",
+      "best": {
+        "uci": "e4e5",
+        "san": "e5"
+      },
+      "score": {
+        "type": "cp",
+        "value": 451,
+        "perspective": "white"
+      },
+      "depth": 14
+    },
+    {
+      "ply": 74,
+      "played": "Nf8",
+      "best": {
+        "uci": "g7f8",
+        "san": "Kf8"
+      },
+      "score": {
+        "type": "cp",
+        "value": 553,
+        "perspective": "white"
+      },
+      "depth": 15
+    },
+    {
+      "ply": 75,
+      "played": "Bxg6",
+      "best": {
+        "uci": "e2f4",
+        "san": "Nf4"
+      },
+      "score": {
+        "type": "cp",
+        "value": 533,
+        "perspective": "white"
+      },
+      "depth": 16
+    },
+    {
+      "ply": 76,
+      "played": "Nxg6",
+      "best": {
+        "uci": "f8g6",
+        "san": "Nxg6"
+      },
+      "score": {
+        "type": "cp",
+        "value": 570,
+        "perspective": "white"
+      },
+      "depth": 14
+    },
+    {
+      "ply": 77,
+      "played": "Nf4",
+      "best": {
+        "uci": "e2f4",
+        "san": "Nf4"
+      },
+      "score": {
+        "type": "cp",
+        "value": 630,
+        "perspective": "white"
+      },
+      "depth": 16
+    },
+    {
+      "ply": 78,
+      "played": "Qf7",
+      "best": {
+        "uci": "e7f7",
+        "san": "Qf7"
+      },
+      "score": {
+        "type": "cp",
+        "value": 643,
+        "perspective": "white"
+      },
+      "depth": 15
+    },
+    {
+      "ply": 79,
+      "played": "e6",
+      "best": {
+        "uci": "e5e6",
+        "san": "e6"
+      },
+      "score": {
+        "type": "cp",
+        "value": 706,
+        "perspective": "white"
+      },
+      "depth": 17
+    },
+    {
+      "ply": 80,
+      "played": "Re7",
+      "best": {
+        "uci": "d7e7",
+        "san": "Re7"
+      },
+      "score": {
+        "type": "cp",
+        "value": 706,
+        "perspective": "white"
+      },
+      "depth": 15
+    },
+    {
+      "ply": 81,
+      "played": "exf7",
+      "best": {
+        "uci": "f4g6",
+        "san": "Nxg6"
+      },
+      "score": {
+        "type": "cp",
+        "value": 745,
+        "perspective": "white"
+      },
+      "depth": 13
+    },
+    {
+      "ply": 82,
+      "played": "Rxe3",
+      "best": {
+        "uci": "e7e3",
+        "san": "Rxe3"
+      },
+      "score": {
+        "type": "cp",
+        "value": 654,
+        "perspective": "white"
+      },
+      "depth": 18
+    },
+    {
+      "ply": 83,
+      "played": "fxg8=Q+",
+      "best": {
+        "uci": "f7g8q",
+        "san": "fxg8=Q+"
+      },
+      "score": {
+        "type": "cp",
+        "value": 614,
+        "perspective": "white"
+      },
+      "depth": 14
+    }
+  ]
+}

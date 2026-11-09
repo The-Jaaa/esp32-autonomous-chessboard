@@ -13,6 +13,7 @@ University of Moratuwa in 2026.
 
 - Detects all 64 squares through Hall-effect sensors and four 16-channel multiplexers.
 - Guides the player with 256 addressable LEDs, four per square.
+- Offers idle Exhibition lighting, an eight-column music Spectrum, and autonomous demonstration playback with placement recovery.
 - Uses Stockfish for engine play and `chess.js` for game-state validation.
 - Moves magnetic pieces with two NEMA17 motors, a CoreXY gantry, and an electromagnet.
 - Provides a React control surface for games, calibration, and physical-board status.
@@ -96,9 +97,23 @@ tools/                   Verification, setup, and audio-relay scripts
 docs/                    Architecture, acceptance notes, and presentation
 ```
 
+## Chess Engine
+
+All game and Mentor analysis uses the full native Windows Stockfish 19 engine.
+Run `./tools/setup-stockfish.ps1` once before starting the backend. The script
+verifies the pinned official archive and tests the executable. An optional
+`STOCKFISH_PATH` overrides the executable location.
+
+The companion page offers **Ultra Mode** for virtual and ordinary physical games:
+a fixed three-second search, with no deliberate weakening. The virtual preference
+is remembered in that browser; physical changes apply to the current session.
+Normal levels 1-15 remain available. Mentor activities retain normal difficulty.
+See [engine setup and Ultra](docs/stockfish-ultra.md).
+
 ## Companion App
 
-Requirements: Node.js 20 or newer, a local Stockfish-compatible environment,
+Requirements: Windows x64 for the provided engine setup, Node.js 22.13 or newer
+(the Mentor store uses built-in SQLite),
 and credentials supplied through an ignored `.env` file.
 
 ```powershell
@@ -130,9 +145,19 @@ local Wi-Fi and backend values, and compile for an ESP32-S3 N16R8 using:
 - PSRAM: OPI PSRAM
 - Partition scheme: 3 MB app / 9 MB filesystem
 
-The board and laptop server must be on the same private Wi-Fi network.
+The board and laptop server must be on the same private Wi-Fi network. Use the
+laptop's current Wi-Fi IPv4 address in both `app/.env` and
+`esp32_firmware/firmware_secrets.h`. Hotspot addresses can change after reconnecting;
+update both configurations, rebuild/upload the firmware, and restart the backend
+when that happens. A DHCP reservation can keep the server address stable.
 
 ## Verification
+
+Browser regressions use Microsoft Edge on Windows and `playwright-core`
+(`npm install --no-save playwright-core` from `app/` if it is not available).
+Portable firmware tests require a C++17 compiler (`g++` on PATH, or set `CXX`).
+Build the client before running browser checks; avoid rebuilding it while those
+checks are running.
 
 Run the backend regression suites from `app/`:
 
@@ -140,6 +165,10 @@ Run the backend regression suites from `app/`:
 npm run test:foundation
 npm run test:mentor
 npm run test:spotify
+npm run test:ultra
+npm run test:autonomous
+npm run test:exhibition
+npm run test:music-spectrum
 ```
 
 Hardware acceptance and recovery procedures are documented in

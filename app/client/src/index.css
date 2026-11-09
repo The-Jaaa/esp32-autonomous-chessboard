@@ -372,3 +372,14 @@ h2 {
   color: white;
   box-shadow: 0 0 10px var(--glow-color);
 }
+
+.exhibition-panel label { display: block; margin: 12px 0; font-size: .85rem; }
+.exhibition-panel select, .exhibition-panel input { display: block; width: 100%; margin-top: 6px; }
+.exhibition-panel select { background: var(--bg-color, #0f172a); color: var(--text-primary); padding: 8px; border: 1px solid var(--panel-border); border-radius: 6px; }
+.exhibition-panel p, .physical-end-control p { font-size: .8rem; line-height: 1.5; }
+.physical-end-control { margin-bottom: 12px; }
+
+.autonomous-panel p, .autonomous-panel label { font-size: .8rem; line-height: 1.5; }
+.autonomous-panel label { display: block; margin: 10px 0; }
+.autonomous-panel button { width: 100%; margin: 5px 0; }
+.autonomous-panel a { color: #93c5fd; font-size: .8rem; }

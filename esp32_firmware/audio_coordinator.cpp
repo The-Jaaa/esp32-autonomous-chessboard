@@ -1,4 +1,5 @@
 #include "audio_coordinator.h"
+#include "music_spectrum.h"
 
 #include <Audio.h>
 #include <freertos/semphr.h>
@@ -44,6 +45,7 @@ void setStatus(const char* mode, const char* state, const char* error = nullptr)
 }
 
 void stopRelay() {
+  setMusicSpectrumPlayback(false);
   if (!relayAudio) return;
   relayAudio->stopSong();
   delete relayAudio;
@@ -84,6 +86,7 @@ bool startRelay(const char* url) {
   );
   relayAudio->setVolume(coordinatorConfig.relayVolume);
   relayAudio->forceMono(true);
+  relayAudio->setOutput48KHz(false);
   relayAudio->setConnectionTimeout(2500, 2500);
   if (!relayAudio->connecttohost(url, "esp32", coordinatorConfig.token)) {
     stopRelay();
@@ -147,6 +150,7 @@ void audioCoordinatorTask(void*) {
       continue;
     }
 
+    setMusicSpectrumPlayback(relayAudio->isRunning(), relayAudio->getSampleRate());
     relayAudio->loop();
     const uint32_t now = millis();
     if (relayAudio->isRunning()) {
@@ -168,6 +172,7 @@ void audioCoordinatorTask(void*) {
 bool beginBoardAudioCoordinator(const BoardAudioCoordinatorConfig& config) {
   if (coordinatorTaskHandle) return true;
   if (!config.mentor.host || !config.mentor.token || !config.token) return false;
+  if (!beginMusicSpectrum()) return false;
   coordinatorConfig = config;
   stateMutex = xSemaphoreCreateMutex();
   if (!stateMutex) return false;

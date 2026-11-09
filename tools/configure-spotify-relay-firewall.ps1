@@ -17,7 +17,8 @@ if (!$isAdmin) { throw "Run this script from an Administrator PowerShell window.
 
 $rules = @(
   "UoM Chessboard Spotify discovery",
-  "UoM Chessboard audio stream"
+  "UoM Chessboard audio stream",
+  "UoM Chessboard control and mentor audio"
 )
 $rules | ForEach-Object {
   Get-NetFirewallRule -DisplayName $_ -ErrorAction SilentlyContinue | Remove-NetFirewallRule
@@ -38,4 +39,13 @@ New-NetFirewallRule `
   -Protocol TCP `
   -LocalPort $Port | Out-Null
 
-Write-Host "Private-network firewall rules created for librespot and TCP $Port."
+New-NetFirewallRule `
+  -DisplayName $rules[2] `
+  -Direction Inbound `
+  -Action Allow `
+  -Profile Private `
+  -Protocol TCP `
+  -LocalPort 3000,3001 `
+  -RemoteAddress LocalSubnet | Out-Null
+
+Write-Host "Private-network firewall rules created for librespot, TCP $Port, and local-subnet TCP 3000/3001."

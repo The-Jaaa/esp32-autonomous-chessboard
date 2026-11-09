@@ -10,6 +10,10 @@ const fs = require('fs');
 const { randomUUID } = require('crypto');
 const { createMentorFeature, MentorSpeakerService } = require('./mentor');
 const { SpotifyRelayService } = require('./audio/spotify-relay-service');
+const { ExhibitionService } = require('./exhibition-service');
+const { AutonomousService } = require('./exhibition/autonomous-service');
+const { compileScript } = require('./exhibition/script');
+const { createAutonomousPlanner } = require('./exhibition/planner');
 
 const app = express();
 const server = http.createServer(app);
@@ -180,6 +184,7 @@ app.get('/api/led-calibration/poll', (req, res) => {
 });
 
 app.post('/api/led-calibration', (req, res) => {
+  if (exhibition.ownsBoard() || autonomous.ownsBoard()) return res.status(409).json({ error: 'Stop the light show before LED calibration.' });
   const clear = req.body?.clear === true;
   const pixelNumber = Number(req.body?.pixelNumber);
   if (!clear && (!Number.isInteger(pixelNumber) || pixelNumber < 1 || pixelNumber > LED_CALIBRATION_PIXEL_COUNT)) {
@@ -204,6 +209,7 @@ app.post('/api/led-calibration', (req, res) => {
 
 // Endpoint to queue a command from the frontend
 app.post('/api/command', (req, res) => {
+  if (exhibition.ownsBoard() || autonomous.ownsBoard()) return res.status(409).json({ error: 'Stop the light show before gantry diagnostics.' });
   const { type, x, y, index, val } = req.body;
   
   let cmdStr = "";
@@ -376,76 +382,24 @@ You are a Grandmaster chess coach. The user is playing White. They just played $
 });
 
 
-const { spawn } = require('child_process');
 const { Chess } = require('chess.js');
+const { MentorEngineService } = require('./mentor/engine-service');
+const gameEngine = new MentorEngineService({ threads: 4, hashMb: 256, maxWaitingJobs: 2 });
+server.on('close', () => gameEngine.close());
+const closeMentor = mentorFeature.close.bind(mentorFeature);
+mentorFeature.close = async () => { gameEngine.close(); await closeMentor(); };
 
-// Helper to run Stockfish locally via Node child process
-function runLocalEngine(fen, depth = 5) {
-  return new Promise((resolve, reject) => {
-    const enginePath = path.join(__dirname, 'node_modules', 'stockfish', 'bin', 'stockfish-18-lite-single.js');
-    if (!fs.existsSync(enginePath)) {
-      return reject(new Error('stockfish engine JS not found.'));
-    }
-
-    const engine = spawn('node', [enginePath]);
-    let buffer = '';
-    let lastScore = 0.0;
-    let lastMate = null;
-
-    engine.stdout.on('data', (data) => {
-      buffer += data.toString();
-      const lines = buffer.split('\n');
-      buffer = lines.pop();
-
-      for (let line of lines) {
-        line = line.trim();
-
-        // Parse evaluation info (e.g., "info depth X ... score cp 35 ...")
-        if (line.startsWith('info') && line.includes('score')) {
-          const parts = line.split(' ');
-          const scoreIdx = parts.indexOf('score');
-          if (scoreIdx !== -1) {
-            const scoreType = parts[scoreIdx + 1]; // "cp" or "mate"
-            const scoreVal = parseInt(parts[scoreIdx + 2], 10);
-            
-            // Stockfish UCI returns score relative to the side to move.
-            // Flip it if it's Black's turn to keep evaluation relative to White.
-            const isBlackToMove = fen.includes(' b ');
-            const multiplier = isBlackToMove ? -1 : 1;
-
-            if (scoreType === 'cp') {
-              lastScore = (scoreVal / 100.0) * multiplier;
-              lastMate = null;
-            } else if (scoreType === 'mate') {
-              lastMate = scoreVal * multiplier;
-            }
-          }
-        }
-
-        if (line.startsWith('bestmove')) {
-          const parts = line.split(' ');
-          resolve({
-            success: true,
-            bestmove: `bestmove ${parts[1]}`,
-            evaluation: lastScore,
-            mate: lastMate
-          });
-          engine.kill();
-          return;
-        }
-      }
-    });
-
-    engine.on('error', (err) => {
-      reject(err);
-    });
-
-    // Send UCI commands
-    engine.stdin.write('uci\n');
-    engine.stdin.write('isready\n');
-    engine.stdin.write(`position fen ${fen}\n`);
-    engine.stdin.write(`go depth ${depth}\n`);
+async function runLocalEngine(fen, depth = 5, options = {}) {
+  const result = await gameEngine.analyzeFen(fen, {
+    depth, multiPv: 1, priority: 'move', ...options
   });
+  return {
+    success: true,
+    bestmove: `bestmove ${result.bestMove?.uci || '(none)'}`,
+    evaluation: result.score?.type === 'cp' ? result.score.value / 100 : 0,
+    mate: result.score?.type === 'mate' ? result.score.value : null,
+    telemetry: result.telemetry
+  };
 }
 
 const PROFILE_KEYS = new Set(['balanced', 'aggressive', 'defensive', 'trickster', 'chaotic', 'solid']);
@@ -680,10 +634,10 @@ function getCandidateConfig(level, profile) {
   };
 }
 
-async function scoreCandidateMove(fen, move, sideToMove, scoreDepth) {
+async function scoreCandidateMove(fen, move, sideToMove, scoreDepth, options) {
   const nextGame = new Chess(fen);
   nextGame.move({ from: move.from, to: move.to, promotion: move.promotion || 'q' });
-  const engineResult = await runLocalEngine(nextGame.fen(), scoreDepth);
+  const engineResult = await runLocalEngine(nextGame.fen(), scoreDepth, options);
   const whiteScore = scoreForWhite(engineResult);
   const sideScore = sideToMove === 'w' ? whiteScore : -whiteScore;
 
@@ -696,15 +650,16 @@ async function scoreCandidateMove(fen, move, sideToMove, scoreDepth) {
   };
 }
 
-async function scoreCandidateMoves(fen, moves, sideToMove, scoreDepth, concurrency = 4) {
+async function scoreCandidateMoves(fen, moves, sideToMove, scoreDepth, options = {}, concurrency = 1) {
   const scored = [];
 
   for (let index = 0; index < moves.length; index += concurrency) {
     const batch = moves.slice(index, index + concurrency);
     const results = await Promise.all(batch.map(async (move) => {
       try {
-        return await scoreCandidateMove(fen, move, sideToMove, scoreDepth);
+        return await scoreCandidateMove(fen, move, sideToMove, scoreDepth, options);
       } catch (err) {
+        if (err.name === 'AbortError' || err.code === 'engine_busy') throw err;
         console.warn(`[Engine Move] Failed to score candidate ${moveToUci(move)}:`, err.message);
         return null;
       }
@@ -716,7 +671,7 @@ async function scoreCandidateMoves(fen, moves, sideToMove, scoreDepth, concurren
   return scored;
 }
 
-async function chooseEngineMove(fen, levelInput, profileInput) {
+async function chooseEngineMove(fen, levelInput, profileInput, options = {}) {
   const level = clampLevel(levelInput);
   const profile = normalizeProfile(profileInput);
   const game = new Chess(fen);
@@ -735,10 +690,11 @@ async function chooseEngineMove(fen, levelInput, profileInput) {
   const config = getCandidateConfig(level, profile);
 
   if (level >= 12) {
-    const result = await runLocalEngine(fen, level);
+    const result = await runLocalEngine(fen, level, options);
     const bestUci = result.bestmove ? result.bestmove.split(' ')[1] : null;
     const legalBest = legalMoves.find((move) => moveToUci(move) === bestUci);
-    const selected = legalBest || legalMoves[0];
+    if (!legalBest) throw new Error('Stockfish returned an illegal move.');
+    const selected = legalBest;
 
     return {
       success: true,
@@ -755,7 +711,7 @@ async function chooseEngineMove(fen, levelInput, profileInput) {
     let selected;
 
     if (profile === 'solid' && Math.random() < config.bestChance) {
-      const best = await runLocalEngine(fen, 1);
+      const best = await runLocalEngine(fen, 1, options);
       const bestUci = best.bestmove ? best.bestmove.split(' ')[1] : null;
       selected = legalMoves.find((move) => moveToUci(move) === bestUci);
     }
@@ -778,7 +734,7 @@ async function chooseEngineMove(fen, levelInput, profileInput) {
   const sideToMove = game.turn();
   const orderedMoves = shuffle(legalMoves).sort((a, b) => featureMoveWeight(b, profile, level) - featureMoveWeight(a, profile, level));
   const sampledMoves = orderedMoves.slice(0, Math.min(config.sampleSize, orderedMoves.length));
-  const scored = await scoreCandidateMoves(fen, sampledMoves, sideToMove, config.scoreDepth);
+  const scored = await scoreCandidateMoves(fen, sampledMoves, sideToMove, config.scoreDepth, options);
 
   if (scored.length === 0) {
     const fallback = weightedPick(legalMoves, (move) => featureMoveWeight(move, profile, level));
@@ -832,7 +788,8 @@ app.get('/api/evaluate', async (req, res) => {
   }
 
   try {
-    const result = await runLocalEngine(fen, parseInt(depth, 10));
+    const signal = engineRequestSignal(res);
+    const result = await runLocalEngine(fen, undefined, { depth: undefined, movetimeMs: 500, priority: 'evaluation', signal });
     return res.json(result);
   } catch (err) {
     console.error('[Stockfish Engine Error]', err.message);
@@ -840,23 +797,38 @@ app.get('/api/evaluate', async (req, res) => {
   }
 });
 
+async function chooseUltraMove(fen, profile = 'balanced', signal) {
+  const analysis = await gameEngine.analyzeFen(fen, { movetimeMs: 3000, multiPv: 1, priority: 'move', signal });
+  const uci = analysis.bestMove?.uci;
+  const move = new Chess(fen).move({ from: uci?.slice(0, 2), to: uci?.slice(2, 4), promotion: uci?.[4] });
+  if (!move) throw new Error('Stockfish returned an illegal move.');
+  return { success: true, move: uci, san: move.san, profile, difficultyLabel: 'Ultra',
+    selectionStyle: 'ultra-stockfish-best', telemetry: analysis.telemetry };
+}
+
 // Endpoint: Select an engine move using difficulty and personality rules
+function engineRequestSignal(res) {
+  const controller = new AbortController();
+  res.once('close', () => { if (!res.writableEnded) controller.abort(); });
+  return controller.signal;
+}
 app.post('/api/engine-move', async (req, res) => {
-  const { fen, level = 1, profile = 'balanced' } = req.body || {};
-
-  if (!fen) {
-    return res.status(400).json({ success: false, error: 'Missing fen.' });
-  }
-
+  const { fen, level = 1, profile = 'balanced', difficultyMode = 'normal' } = req.body || {};
+  if (!fen || !['normal', 'ultra'].includes(difficultyMode))
+    return res.status(400).json({ success: false, error: 'Provide a FEN and difficultyMode normal or ultra.' });
+  const signal = engineRequestSignal(res);
   try {
-    const result = await chooseEngineMove(fen, level, profile);
-    if (!result.success) {
-      return res.status(400).json(result);
-    }
-    return res.json(result);
-  } catch (err) {
-    console.error('[Engine Move Error]', err.message);
-    return res.status(500).json({ success: false, error: err.message });
+    let game;
+    try { game = new Chess(fen); } catch { return res.status(400).json({ success: false, error: 'Invalid FEN.' }); }
+    if (game.isGameOver()) return res.status(400).json({ success: false, error: 'The game is over.' });
+    let result;
+    if (difficultyMode === 'ultra') {
+      result = await chooseUltraMove(fen, profile, signal);
+    } else result = await chooseEngineMove(fen, level, profile, { signal });
+    if (!res.destroyed) res.status(result.success ? 200 : 400).json({ ...result, difficultyMode });
+  } catch (error) {
+    if (!res.destroyed) res.status(error.code === 'engine_busy' ? 503 : error.code === 'invalid_fen' ? 400 : 500)
+      .json({ success: false, code: error.code, error: error.message });
   }
 });
 
@@ -965,6 +937,8 @@ const physicalSession = {
   robotColor: 'black',
   level: 1,
   activeSearchLevel: null,
+  difficultyMode: 'normal',
+  activeSearchMode: null,
   profile: 'balanced',
   graveyardSlots: [],
   nextGraveyardSlot: 0,
@@ -991,9 +965,106 @@ const physicalSession = {
   lastMove: null
 };
 
+function endPhysicalSession(reason) {
+  physicalSession.active = false;
+  physicalSession.phase = 'idle';
+  physicalSession.autoRobotReply = false;
+  physicalSession.commands = [];
+  physicalSession.selectedSource = null;
+  physicalSession.pendingCaptureTarget = null;
+  physicalSession.pendingCastleMove = null;
+  physicalSession.pendingPromotion = null;
+  physicalSession.legalTargets = [];
+  physicalSession.pendingRobotJob = null;
+  physicalSession.pendingUndo = null;
+  physicalSession.pendingRedo = null;
+  physicalSession.mentorOpeningDrill = null;
+  physicalSession.mentorOpeningLock = false;
+  physicalSession.activeSearchLevel = null;
+  physicalSession.statusText = 'Physical game ended. Start another activity when ready.';
+  physicalSession.stateRevision += 1;
+  logPhysicalEvent('physical_game_ended', physicalSession.statusText, {
+    details: { reason }
+  });
+  emitPhysicalState();
+  clearPhysicalLeds();
+  return { success: true, state: serializePhysicalState() };
+}
+
 function normalizeHumanColor(value) {
   return String(value || 'white').toLowerCase() === 'black' ? 'black' : 'white';
 }
+
+const exhibition = new ExhibitionService({
+  board: () => ({ active: physicalSession.active,
+    pending: Boolean(physicalSession.pendingRobotJob || physicalSession.pendingUndo || physicalSession.pendingRedo
+      || physicalSession.pendingPromotion || physicalSession.commands.some(c => c.type !== 'led')) }),
+  emit: status => io.emit('exhibition-status', status)
+});
+const autonomousPlanner = createAutonomousPlanner({ session: physicalSession, squareToIndex, occupancyFromFen,
+  withPhysicalPlanningContext, buildRobotMoveCommand, planPhysicalTransfer, buildBoardTransferPlan,
+  squareTarget, coordinateTarget, makeTransferSteps });
+const autonomous = new AutonomousService({
+  compile: () => compileScript(autonomousPlanner, normalizeGraveyardSlots(DEFAULT_GRAVEYARD_SLOTS)),
+  enqueue: command => queuePhysicalCommand(command),
+  runtime: () => ({ ...exhibition.runtime, fresh: exhibition.fresh() }),
+  available: () => !physicalSession.active && !activePhysicalMentorConversationId()
+    && !physicalSession.commands.some(command => command.type !== 'led'),
+  emit: status => {
+    io.emit('autonomous-status', status);
+    logPhysicalEvent('autonomous_state', status.message, { details: { ...status, tokens: undefined } });
+  }
+});
+autonomous.setOccupancyMapper(autonomousPlanner.occupancy, indexToSquare);
+exhibition.concurrentAllowed = () => autonomous.ownsBoard();
+exhibition.recoveryActive = () => autonomous.state === 'recovery' || Boolean(autonomous.waitingForSync);
+app.post('/api/exhibition/autonomous/start', (req, res) => {
+  try { res.json({ success: true, autonomous: autonomous.start(req.body || {}) }); }
+  catch (error) { res.status(error.statusCode || 400).json({ success: false, error: error.message }); }
+});
+app.post('/api/exhibition/autonomous/control', (req, res) => {
+  try {
+    const status = autonomous.control(req.body || {});
+    if (req.body?.action === 'prepare-manual-reset') exhibition.stop();
+    res.json({ success: true, autonomous: status });
+  }
+  catch (error) { res.status(error.statusCode || 400).json({ success: false, error: error.message }); }
+});
+app.get('/api/exhibition/autonomous/script', (req, res) => res.type('text/plain').sendFile(require('./exhibition/script').PGN_PATH));
+app.get('/api/exhibition/autonomous/status', (req, res) => res.json({ success: true, autonomous: autonomous.status() }));
+let exhibitionConnection = false;
+const exhibitionTimer = setInterval(() => {
+  const connected = exhibition.fresh();
+  if (connected !== exhibitionConnection) { exhibitionConnection = connected; exhibition.publish(); }
+}, 1000);
+exhibitionTimer.unref();
+
+app.get('/api/exhibition/status', (req, res) => res.json({ success: true, ...exhibition.status(), autonomous: autonomous.status() }));
+app.post('/api/exhibition/light-show', (req, res) => {
+  try {
+    const status = exhibition.change(req.body || {});
+    if (status.desired.enabled) physicalSession.commands = physicalSession.commands.filter(command => command.type !== 'led');
+    res.json({ success: true, ...status });
+  }
+  catch (error) { res.status(error.statusCode || 500).json({ success: false, code: error.code, error: error.message }); }
+});
+
+app.post('/api/physical/end', (req, res) => {
+  try {
+    const body = req.body || {};
+    if (body.expectedSessionGeneration !== physicalSession.sessionGeneration
+      || body.expectedRevision !== physicalSession.stateRevision) exhibition.fail('The game changed. Refresh and try again.', 'stale_physical_session');
+    if (activePhysicalMentorConversationId()) exhibition.fail('End this game from its Mentor page.', 'mentor_owned_game');
+    if (!physicalSession.active) return res.json({ success: true, state: serializePhysicalState() });
+    if (!['ready', 'game_over'].includes(physicalSession.phase) || !exhibition.idle()
+      || physicalSession.pendingRobotJob || physicalSession.pendingUndo || physicalSession.pendingRedo
+      || physicalSession.pendingPromotion || physicalSession.commands.some(c => c.type !== 'led')
+      || !physicalSession.lastSnapshotAt || Date.now() - physicalSession.lastSnapshotAt > PHYSICAL_SENSOR_FRESH_MS
+      || !serializePhysicalState().board.ready) exhibition.fail('Wait for the current move or board recovery to finish.');
+    endPhysicalSession('user_ended');
+    res.json({ success: true, state: serializePhysicalState() });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, code: error.code, error: error.message }); }
+});
 
 function oppositeHumanColor(color) {
   return normalizeHumanColor(color) === 'white' ? 'black' : 'white';
@@ -1619,6 +1690,8 @@ function serializePhysicalState() {
     lastMove: physicalSession.lastMove,
     level: physicalSession.level,
     configuredLevel: physicalSession.level,
+    difficultyMode: physicalSession.difficultyMode,
+    activeSearchMode: physicalSession.activeSearchMode,
     activeSearchLevel: physicalSession.activeSearchLevel,
     difficultyPending: Number.isInteger(physicalSession.activeSearchLevel)
       ? physicalSession.activeSearchLevel !== physicalSession.level
@@ -1878,30 +1951,7 @@ mentorFeature.physicalObserver.setAdapter({
       setupMode: 'full'
     });
   },
-  endGame: () => {
-    physicalSession.active = false;
-    physicalSession.phase = 'idle';
-    physicalSession.autoRobotReply = false;
-    physicalSession.commands = [];
-    physicalSession.selectedSource = null;
-    physicalSession.pendingCaptureTarget = null;
-    physicalSession.pendingCastleMove = null;
-    physicalSession.pendingPromotion = null;
-    physicalSession.legalTargets = [];
-    physicalSession.pendingRobotJob = null;
-    physicalSession.pendingUndo = null;
-    physicalSession.pendingRedo = null;
-    physicalSession.mentorOpeningDrill = null;
-    physicalSession.mentorOpeningLock = false;
-    physicalSession.activeSearchLevel = null;
-    physicalSession.statusText = 'Physical game ended. Start another activity when ready.';
-    physicalSession.stateRevision += 1;
-    logPhysicalEvent('physical_game_ended', physicalSession.statusText, {
-      details: { reason: 'mentor_activity_ended' }
-    });
-    emitPhysicalState();
-    return { success: true, state: serializePhysicalState() };
-  },
+  endGame: () => endPhysicalSession('mentor_activity_ended'),
   setOpeningDrill: setOpeningDrillPolicy,
   playActivityMove: ({ activityId, generation, requestId, uci, expectedRevision, fallback = false, signal = null }) => {
     const policy = physicalSession.mentorOpeningDrill;
@@ -5178,13 +5228,18 @@ function rollbackPendingRobotMove(pending) {
 async function queueRobotReply(options = {}) {
   const forcedUci = options.forcedUci || null;
   const guidedPhysicalMove = Boolean(options.guidedPhysicalMove);
+  const searchMode = physicalSession.mentorOpeningDrill || physicalSession.mentorOpeningLock || guidedPhysicalMove
+    ? 'normal' : physicalSession.difficultyMode;
+  const searchGeneration = physicalSession.sessionGeneration;
+  const searchFen = physicalSession.game.fen();
   const searchLevel = physicalSession.level;
+  physicalSession.activeSearchMode = forcedUci ? null : searchMode;
   const searchProfile = physicalSession.profile;
   physicalSession.activeSearchLevel = forcedUci ? null : searchLevel;
   physicalSession.phase = 'robot_thinking';
   physicalSession.statusText = forcedUci
     ? `Preparing reviewed opening reply ${forcedUci}.`
-    : 'Engine is choosing a physical reply.';
+    : searchMode === 'ultra' ? 'Ultra is thinking (3 seconds).' : 'Engine is choosing a physical reply.';
   logPhysicalEvent(forcedUci ? 'mentor_opening_robot_thinking' : 'robot_thinking', physicalSession.statusText, {
     details: {
       forcedUci,
@@ -5224,7 +5279,9 @@ async function queueRobotReply(options = {}) {
 
     const result = forcedUci
       ? { success: true, move: forcedUci }
-      : await chooseEngineMove(physicalSession.game.fen(), searchLevel, searchProfile);
+      : searchMode === 'ultra' ? await chooseUltraMove(searchFen, searchProfile)
+      : await chooseEngineMove(searchFen, searchLevel, searchProfile);
+    if (!physicalSession.active || physicalSession.sessionGeneration !== searchGeneration || physicalSession.game.fen() !== searchFen) return;
     if (!result.success || !result.move) {
       throw new Error(result.error || 'Engine did not return a move.');
     }
@@ -5280,7 +5337,7 @@ async function queueRobotReply(options = {}) {
       const plannedResult = planPhysicalRobotCandidates(candidateMoves);
       planningFailures = plannedResult.failures;
       const preferredPlan = plannedResult.planned.find((plan) => legalMoveMatchesUci(plan.move, result.move)) || null;
-      selectedPlan = searchLevel >= 12
+      selectedPlan = searchMode === 'ultra' ? preferredPlan : searchLevel >= 12
         ? preferredPlan || await chooseBestRoutablePhysicalMove(physicalSession.game.fen(), plannedResult.planned, searchLevel)
         : plannedResult.planned[0] || null;
     }
@@ -5375,14 +5432,18 @@ async function queueRobotReply(options = {}) {
     });
     emitPhysicalState();
   } catch (err) {
+    if (!physicalSession.active || physicalSession.sessionGeneration !== searchGeneration) return;
     if (physicalSession.pendingRobotJob?.applied) {
       rollbackPendingRobotMove(physicalSession.pendingRobotJob);
     }
     physicalSession.pendingRobotJob = null;
     setPhysicalError(err.message);
   } finally {
-    physicalSession.activeSearchLevel = null;
-    emitPhysicalState();
+    if (physicalSession.sessionGeneration === searchGeneration) {
+      physicalSession.activeSearchMode = null;
+      physicalSession.activeSearchLevel = null;
+      emitPhysicalState();
+    }
   }
 }
 
@@ -6924,6 +6985,17 @@ async function processPhysicalSnapshot(occupancy, metadata = {}) {
   physicalSession.lastSnapshotAt = Date.now();
   physicalSession.occupancy = occupancy;
 
+  if (!physicalSession.active && autonomous.state === 'manual_ready' && autonomous.resetGuidance) {
+    const expected = physicalStartOccupancy();
+    const key = `manual-reset|${occupancy.map(Number).join('')}`;
+    if (physicalSession.lastCalibrationKey !== key) {
+      physicalSession.lastCalibrationKey = key;
+      queueLedCommand('calibration', occupancy.map((occupied, index) => makeLedSquare(index,
+        expected[index] ? (occupied ? 'correct' : 'missing') : (occupied ? 'extra' : 'off'),
+        expected[index] !== occupied ? 'pulse' : 'solid')));
+    }
+  }
+
   if (!physicalSession.active || physicalSession.phase === 'idle') {
     emitPhysicalState('physical-board');
     return;
@@ -7069,10 +7141,15 @@ function startPhysicalSession({
   humanColor = 'white',
   level = 1,
   profile = 'balanced',
+  difficultyMode = 'normal',
   graveyardSlots = [],
   setupMode = 'full',
   initialFen = null
 } = {}) {
+  if (!['normal', 'ultra'].includes(difficultyMode)) throw new Error('Unknown difficulty mode.');
+  if (autonomous.ownsBoard()) throw Object.assign(new Error('End autonomous playback before starting a physical game.'), { statusCode: 409 });
+  autonomous.resetGuidance = false;
+  exhibition.stop();
   const normalizedSetupMode = ['partial', 'custom'].includes(setupMode) ? setupMode : 'full';
   const normalizedInitialFen = normalizedSetupMode === 'custom'
     ? validatePhysicalCustomFen(initialFen)
@@ -7094,6 +7171,7 @@ function startPhysicalSession({
   physicalSession.legalTargets = [];
   physicalSession.humanColor = normalizeHumanColor(humanColor);
   physicalSession.robotColor = oppositeHumanColor(physicalSession.humanColor);
+  physicalSession.difficultyMode = difficultyMode;
   physicalSession.level = clampLevel(level);
   physicalSession.activeSearchLevel = null;
   physicalSession.profile = normalizeProfile(profile);
@@ -7177,6 +7255,17 @@ app.patch('/api/physical/settings', (req, res) => {
   } catch (error) {
     return sendGameSettingsError(res, error);
   }
+});
+
+app.patch('/api/physical/difficulty-mode', (req, res) => {
+  const { difficultyMode, expectedSessionGeneration } = req.body || {};
+  if (!['normal', 'ultra'].includes(difficultyMode)) return res.status(400).json({ success: false, error: 'Unknown difficulty mode.' });
+  if (!physicalSession.active || expectedSessionGeneration !== physicalSession.sessionGeneration
+    || autonomous.ownsBoard() || physicalSession.mentorOpeningDrill || physicalSession.mentorOpeningLock)
+    return res.status(409).json({ success: false, error: 'This physical session cannot change Ultra mode. Refresh the board state.' });
+  physicalSession.difficultyMode = difficultyMode;
+  emitPhysicalState();
+  return res.json({ success: true, state: serializePhysicalState() });
 });
 
 app.post('/api/physical/start', (req, res) => {
@@ -7483,6 +7572,8 @@ app.post('/api/physical/snapshot', async (req, res) => {
       );
     }
     const commandIdsBefore = new Set(physicalSession.commands.map((command) => command.id));
+    exhibition.report(req.body?.boardRuntime || { exhibitionSupported: false });
+    autonomous.snapshot(occupancy, req.body?.boardRuntime || {}, { seq: req.body?.seq });
     await processPhysicalSnapshot(occupancy, {
       seq: req.body?.seq,
       stable: req.body?.stable,
@@ -7507,6 +7598,9 @@ app.get('/api/physical/poll', (req, res) => {
     phase: physicalSession.phase,
     commands,
     audio: physicalAudioControl,
+    exhibition: { ...exhibition.desired, concurrentMotion: autonomous.ownsBoard(), recovery: autonomous.state === 'recovery' || Boolean(autonomous.waitingForSync),
+      recoverySquares: [...new Set([...(autonomous.recovery?.missing || []), ...(autonomous.recovery?.extra || [])])],
+      recoveryProtected: autonomous.recovery?.protectedSquares || [], recoveryExpected: autonomous.recovery?.expected || null },
     state: serializePhysicalState()
   });
 });
@@ -7514,6 +7608,10 @@ app.get('/api/physical/poll', (req, res) => {
 app.post('/api/physical/job-result', (req, res) => {
   const { id, success, error, failedPhase = null, failedStep = null } = req.body || {};
   const occupancy = normalizeOccupancyPayload(req.body);
+  if (String(id || '').startsWith(autonomous.runId + ':')) {
+    try { return res.json(autonomous.result(req.body, occupancy)); }
+    catch (err) { return res.status(err.statusCode || 409).json({ success: false, error: err.message }); }
+  }
   const pending = physicalSession.pendingRobotJob;
 
   if (!pending) {
@@ -7799,6 +7897,7 @@ function startHttpServer(port = process.env.PORT || 3000) {
 }
 
 function startServers() {
+  Promise.all([gameEngine.ensureProcess(), mentorFeature.engineService.ensureProcess()]).catch(error => console.error('[Stockfish setup]', error.message));
   startAudioServer(3001);
   startHttpServer();
   return { server, audioServer };
@@ -7823,6 +7922,8 @@ module.exports = {
   mentorFeature,
   spotifyRelayService,
   startServers,
+  gameEngine,
+  chooseEngineMove,
   physicalPlanner: {
     PHYSICAL_START_FEN,
     DEFAULT_Z_GRAVEYARD_SLOTS,
@@ -7878,6 +7979,11 @@ module.exports = {
     normalizeProfile,
     clampLevel
   },
+  exhibition,
+  autonomous,
+  autonomousPlannerHelpers: { session: physicalSession, squareToIndex, occupancyFromFen,
+    withPhysicalPlanningContext, buildRobotMoveCommand, planPhysicalTransfer,
+    buildBoardTransferPlan, squareTarget, coordinateTarget, makeTransferSteps, normalizeGraveyardSlots, DEFAULT_GRAVEYARD_SLOTS },
   physicalProtocolTest: {
     protocolVersion: PHYSICAL_PROTOCOL_VERSION,
     serverInstanceId: PHYSICAL_SERVER_INSTANCE_ID

@@ -1,5 +1,9 @@
 # ChessProject Demo Readiness
 
+## Exhibition additions — 2026-11-02
+
+Milestone 1 adds the motionless light show and guarded ordinary physical-game End action. See [Exhibition modes](exhibition-modes.md) for operation, the remaining roadmap, software evidence, and the mandatory real-board gate. Exhibition hardware acceptance is pending; historical gameplay acceptance below does not validate the new firmware.
+
 ## Baseline Status
 
 Milestone 0 was accepted on 2026-08-03 on `codex/demo-baseline`, based on

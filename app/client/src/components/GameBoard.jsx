@@ -1,3 +1,5 @@
+import { AutonomousPanel } from './AutonomousPanel';
+import { ExhibitionPanel, PhysicalEndButton } from './ExhibitionPanel';
 import React, { useState, useEffect, useRef, useCallback, useMemo, useLayoutEffect } from 'react';
 import { Chess } from 'chess.js';
 import { Chessboard } from 'react-chessboard';
@@ -154,12 +156,15 @@ function physicalLogDiffSummary(entry) {
 
 export default function GameBoard() {
   const socket = useSocket();
+  const [exhibitionOwnsBoard, setExhibitionOwnsBoard] = useState(false);
   const gameSettings = useGameSettings();
 
   // ── Authoritative game state lives in a ref, NEVER in useState ──
   // This is the key architectural decision that eliminates all stale-closure bugs.
   // Functions read directly from gameRef.current so they are always current.
   const gameRef = useRef(new Chess());
+  const autonomousModeRef = useRef(false);
+  const [autonomousOwnsBoard, setAutonomousOwnsBoard] = useState(false);
 
   // ── UI-only state (triggers re-renders for display) ──
   const [fen, setFen] = useState(gameRef.current.fen());
@@ -212,6 +217,15 @@ export default function GameBoard() {
   const [physicalMoveSubmitting, setPhysicalMoveSubmitting] = useState(false);
 
   // ── Mutable refs for values needed inside stable callbacks ──
+  const [ultraEnabled, setUltraEnabled] = useState(() => {
+    try { return localStorage.getItem('chess.ultraMode') === 'true'; } catch { return false; }
+  });
+  const ultraRef = useRef(ultraEnabled);
+  const [engineTurnMode, setEngineTurnMode] = useState('normal');
+  const [ultraError, setUltraError] = useState('');
+  const engineAbortRef = useRef(null);
+  const evaluationAbortRef = useRef(null);
+  useEffect(() => () => { engineAbortRef.current?.abort(); evaluationAbortRef.current?.abort(); }, []);
   const depthRef = useRef(1);
   const opponentProfileRef = useRef('balanced');
   const bestMoveRef = useRef(null);
@@ -243,10 +257,13 @@ export default function GameBoard() {
   // ── Evaluation via Stockfish ──
   const updateEvaluation = useCallback(async (fen, overrideDepth) => {
     const d = overrideDepth ?? depthRef.current;
+    evaluationAbortRef.current?.abort();
+    const controller = new AbortController(); evaluationAbortRef.current = controller;
+    const generation = gameGenerationRef.current;
     try {
-      const response = await fetch(`/api/evaluate?fen=${encodeURIComponent(fen)}&depth=${d}`);
+      const response = await fetch(`/api/evaluate?fen=${encodeURIComponent(fen)}&depth=${d}`, { signal: controller.signal });
       const data = await response.json();
-      if (!data.success) return;
+      if (!data.success || controller.signal.aborted || generation !== gameGenerationRef.current || fen !== gameRef.current.fen()) return;
 
       const best = data.bestmove ? data.bestmove.split(' ')[1] : null;
       bestMoveRef.current = best;
@@ -275,13 +292,13 @@ export default function GameBoard() {
       evalScoreRef.current = displayStr;
       setPercentFill(pct);
     } catch (err) {
-      console.error('Stockfish eval error:', err);
+      if (err.name !== 'AbortError') console.error('Stockfish eval error:', err);
     }
   }, []);
 
   // ── Engine move ──
   const makeEngineMove = useCallback(async (expectedGeneration = gameGenerationRef.current) => {
-    if (physicalModeRef.current) {
+    if (physicalModeRef.current || autonomousModeRef.current) {
       isThinkingRef.current = false;
       setIsEngineThinking(false);
       return;
@@ -319,19 +336,24 @@ export default function GameBoard() {
     };
 
     const requestedFen = g.fen();
+    const difficultyMode = ultraRef.current ? 'ultra' : 'normal';
+    engineAbortRef.current?.abort();
+    const controller = new AbortController(); engineAbortRef.current = controller;
+    setUltraError(''); setEngineTurnMode(difficultyMode);
+    isThinkingRef.current = true; setIsEngineThinking(true);
     try {
       const response = await fetch('/api/engine-move', {
-        method: 'POST',
+        method: 'POST', signal: controller.signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           fen: requestedFen,
           level: depthRef.current,
-          profile: opponentProfileRef.current
+          profile: opponentProfileRef.current, difficultyMode
         })
       });
       const data = await response.json();
 
-      if (expectedGeneration !== gameGenerationRef.current
+      if (controller.signal.aborted || expectedGeneration !== gameGenerationRef.current
         || physicalModeRef.current
         || gameRef.current !== g
         || g.fen() !== requestedFen) {
@@ -347,11 +369,17 @@ export default function GameBoard() {
       g.move(parsed);
       console.log(`[Engine Move] ${data.move} (${data.difficultyLabel}, ${data.profile}, ${data.selectionStyle})`);
     } catch (err) {
+      if (controller.signal.aborted || err.name === 'AbortError') return;
       console.error('Engine move selection error:', err);
       if (expectedGeneration === gameGenerationRef.current
         && !physicalModeRef.current
         && gameRef.current === g
         && g.fen() === requestedFen) {
+        if (difficultyMode === 'ultra') {
+          setUltraError(err.message || 'Ultra could not choose a move.');
+          isThinkingRef.current = false; setIsEngineThinking(false);
+          return;
+        }
         playFallbackMove();
       } else {
         return;
@@ -360,7 +388,7 @@ export default function GameBoard() {
 
     syncDisplay();
     const newFen = g.fen();
-    await updateEvaluation(newFen);
+    updateEvaluation(newFen);
 
     if (g.isGameOver()) {
       isThinkingRef.current = false;
@@ -385,7 +413,7 @@ export default function GameBoard() {
     setUndoStack([]); // clear redo on new move
 
     console.log('[onUserMove] Awaiting updateEvaluation');
-    await updateEvaluation(currentFen);
+    updateEvaluation(currentFen);
     console.log('[onUserMove] updateEvaluation done');
 
     if (g.isGameOver()) {
@@ -399,7 +427,7 @@ export default function GameBoard() {
     if (g.turn() !== humanColorCode) {
       console.log('[onUserMove] Scheduling engine move');
       const generation = gameGenerationRef.current;
-      setTimeout(() => makeEngineMove(generation), 600);
+      queueMicrotask(() => makeEngineMove(generation));
     } else {
       console.log('[onUserMove] Not black turn? Turn is:', g.turn());
       isThinkingRef.current = false;
@@ -409,6 +437,7 @@ export default function GameBoard() {
 
   const startNewVirtualGame = useCallback((humanColor = gameSettings.defaults.humanColor) => {
     if (physicalModeRef.current) return;
+    engineAbortRef.current?.abort(); evaluationAbortRef.current?.abort(); setUltraError('');
     gameGenerationRef.current += 1;
     const generation = gameGenerationRef.current;
     const normalizedColor = humanColor === 'black' ? 'black' : 'white';
@@ -427,7 +456,7 @@ export default function GameBoard() {
     syncDisplay();
     updateEvaluation(gameRef.current.fen());
     if (normalizedColor === 'black') {
-      setTimeout(() => makeEngineMove(generation), 400);
+      queueMicrotask(() => makeEngineMove(generation));
     }
   }, [gameSettings.defaults.humanColor, makeEngineMove, syncDisplay, updateEvaluation]);
 
@@ -494,6 +523,7 @@ export default function GameBoard() {
   }, [physicalState.sessionGeneration, physicalState.stateRevision]);
 
   const onDrop = useCallback((args) => {
+    if (autonomousModeRef.current) return false;
     setOptionSquares({});
     // react-chessboard v5 passes an object
     const { sourceSquare, targetSquare } = args;
@@ -590,6 +620,7 @@ export default function GameBoard() {
   }, [onUserMove, pendingVirtualPromotion, submitPhysicalMove, syncDisplay]);
 
   const onSquareClick = useCallback(({ square }) => {
+    if (autonomousModeRef.current) return;
     const g = gameRef.current;
     const physicalInteraction = physicalModeRef.current;
     if (g.isGameOver()
@@ -652,9 +683,33 @@ export default function GameBoard() {
     onSquareClick({ square });
   }, [onSquareClick]);
 
+  const applyAutonomousState = useCallback((state) => {
+    const active = !['available', 'manual_ready'].includes(state.state);
+    const wasActive = autonomousModeRef.current;
+    if (active && !wasActive) {
+      engineAbortRef.current?.abort(); evaluationAbortRef.current?.abort();
+      gameGenerationRef.current += 1; setUltraError('');
+      isThinkingRef.current = false; setIsEngineThinking(false);
+    }
+    autonomousModeRef.current = active;
+    setAutonomousOwnsBoard(active);
+    if ((active || wasActive) && state.fen) {
+      gameRef.current = new Chess(state.fen);
+      setFen(state.fen);
+      setHistory(state.history || []);
+      setOptionSquares({});
+    }
+  }, []);
+
   const applyPhysicalState = useCallback((nextState = {}) => {
     setPhysicalState(prev => ({ ...prev, ...nextState }));
+    if (autonomousModeRef.current) return;
     const active = Boolean(nextState.active);
+    if (active && !physicalModeRef.current) {
+      engineAbortRef.current?.abort(); evaluationAbortRef.current?.abort();
+      gameGenerationRef.current += 1; setUltraError('');
+      isThinkingRef.current = false; setIsEngineThinking(false);
+    }
     physicalModeRef.current = active;
     if (active && nextState.humanColor) {
       activeHumanColorRef.current = nextState.humanColor;
@@ -678,6 +733,7 @@ export default function GameBoard() {
   }, [updateEvaluation]);
 
   const handleStartPhysicalGame = useCallback(async () => {
+    if (autonomousModeRef.current) return;
     try {
       const graveyardSlots = parseGraveyardSlots(graveyardText);
       const initialFen = physicalSetupMode === 'custom'
@@ -690,6 +746,7 @@ export default function GameBoard() {
             humanColor: gameSettings.defaults.humanColor,
             level: gameSettings.defaults.difficultyLevel,
             profile: opponentProfileRef.current,
+            difficultyMode: ultraRef.current ? 'ultra' : 'normal',
             setupMode: physicalSetupMode,
             initialFen,
             graveyardSlots
@@ -750,6 +807,7 @@ export default function GameBoard() {
 
   // ── Undo ──
   const handleUndo = useCallback(async () => {
+    if (autonomousModeRef.current) return;
     if (physicalModeRef.current) {
       try {
         const response = await fetch('/api/physical/undo-turn', {
@@ -792,6 +850,7 @@ export default function GameBoard() {
 
   // ── Redo ──
   const handleRedo = useCallback(async () => {
+    if (autonomousModeRef.current) return;
     if (physicalModeRef.current) {
       try {
         const response = await fetch('/api/physical/redo-turn', {
@@ -1257,18 +1316,43 @@ export default function GameBoard() {
             <div className="mode-info" style={{ width: '100%' }}>
               <GameSettingsControls
                 defaults={gameSettings.defaults}
+                difficultyDisabled={physicalState.active ? physicalState.difficultyMode === 'ultra' : ultraEnabled}
                 activeHumanColor={currentHumanColor}
                 activeGame
                 activeSearch={Boolean(physicalState.active && (physicalState.activeSearchLevel || physicalState.difficultyPending))}
                 onColorChange={handleSharedColorChange}
                 onLevelChange={handleSharedLevelChange}
               />
+              <button type="button" className={`btn ${ultraEnabled ? 'btn-primary' : 'btn-secondary'}`}
+                aria-pressed={physicalState.active ? physicalState.difficultyMode === 'ultra' : ultraEnabled} disabled={autonomousOwnsBoard || Boolean(physicalState.mentorOpeningDrill || physicalState.mentorOpeningLock)}
+                onClick={async () => {
+                  if (physicalState.active) {
+                    try {
+                      const response = await fetch('/api/physical/difficulty-mode', { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ difficultyMode: physicalState.difficultyMode === 'ultra' ? 'normal' : 'ultra', expectedSessionGeneration: physicalState.sessionGeneration }) });
+                      const data = await response.json();
+                      if (!response.ok) throw new Error(data.error);
+                      applyPhysicalState(data.state);
+                      setUltraError('');
+                    } catch (error) { setUltraError(error.message); }
+                    return;
+                  }
+                  const enabled = !ultraRef.current;
+                  ultraRef.current = enabled; setUltraEnabled(enabled);
+                  try { localStorage.setItem('chess.ultraMode', String(enabled)); } catch { /* Storage may be unavailable. */ }
+                }} style={{ width: '100%', marginTop: '10px' }}>Ultra Mode</button>
+              <p className="shared-setting-note">{physicalState.active ? `Physical ${physicalState.difficultyMode === 'ultra' ? 'Ultra: 3 seconds per move' : 'normal difficulty'}. Changes apply next engine turn.`
+                : ultraEnabled ? 'Ultra: 3 seconds per move. Opponent style does not change Ultra moves.' : 'Enable Ultra for maximum-strength play.'}
+                {isEngineThinking && ' Changes apply next engine turn.'}</p>
+              {isEngineThinking && !physicalState.active && <p role="status">{engineTurnMode === 'ultra' ? 'Ultra is thinking…' : 'Engine is thinking…'}</p>}
+              {ultraError && <div role="alert"><p>{ultraError}</p>
+                {!physicalState.active && <button type="button" className="btn btn-secondary" disabled={isEngineThinking} onClick={() => makeEngineMove()}>Retry engine move</button>}</div>}
               {gameSettings.error && <p className="shared-setting-note">{gameSettings.error}</p>}
               <button
                 type="button"
                 className="btn btn-secondary"
                 onClick={() => startNewVirtualGame(gameSettings.defaults.humanColor)}
-                disabled={physicalState.active}
+                disabled={physicalState.active || autonomousOwnsBoard}
                 style={{ width: '100%', marginTop: '12px' }}
               >
                 New Virtual Game
@@ -1332,8 +1416,18 @@ export default function GameBoard() {
           <div className="classification-badge" style={{ color: classColor }}>{classification}</div>
         </div>
 
+        <AutonomousPanel onState={applyAutonomousState} />
+
+        <ExhibitionPanel physicalActive={physicalState.active} onOwnershipChange={setExhibitionOwnsBoard} />
+
         <div className="controls-section">
           <h2>Physical Board</h2>
+          {autonomousOwnsBoard && <p role="status">
+            Autonomous Game currently owns the board. End that session before starting physical play.
+            {' '}If it is in recovery, use Home for Manual Reset to home the gantry and show placement lights in the{' '}
+            <a href="#autonomous-game">Autonomous Game panel</a>.
+          </p>}
+          <PhysicalEndButton state={physicalState} onState={applyPhysicalState} />
           <label htmlFor="physicalSetupMode" style={{ display: 'block', fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '6px', fontWeight: 600 }}>
             Setup Mode
           </label>
@@ -1341,7 +1435,7 @@ export default function GameBoard() {
             id="physicalSetupMode"
             value={physicalSetupMode}
             onChange={(event) => setPhysicalSetupMode(event.target.value)}
-            disabled={physicalState.robotBusy}
+            disabled={physicalState.robotBusy || autonomousOwnsBoard}
             style={{
               width: '100%',
               marginBottom: '10px',
@@ -1363,7 +1457,7 @@ export default function GameBoard() {
               type="button"
               className="btn btn-secondary"
               onClick={() => { setCustomFenError(''); setCustomFenDialogOpen(true); }}
-              disabled={physicalState.robotBusy}
+              disabled={physicalState.robotBusy || autonomousOwnsBoard}
               style={{ width: '100%', marginBottom: '10px' }}
             >
               Configure Custom Position
@@ -1372,7 +1466,7 @@ export default function GameBoard() {
           <button
             onClick={handleStartPhysicalGame}
             className="btn btn-primary"
-            disabled={physicalState.robotBusy}
+            disabled={physicalState.robotBusy || autonomousOwnsBoard}
             style={{ width: '100%', marginBottom: '10px' }}
           >
             {physicalState.active ? 'Recalibrate Board' : physicalSetupMode === 'partial' ? 'Start Partial Game' : physicalSetupMode === 'custom' ? 'Start Custom Position' : 'Start Physical Game'}
@@ -1525,6 +1619,8 @@ export default function GameBoard() {
 
         <div className="controls-section">
           <h2>Gantry Diagnostics</h2>
+          {autonomousOwnsBoard ? <p>End the autonomous game before using diagnostics.</p> : exhibitionOwnsBoard && <p>Stop the light show before using diagnostics.</p>}
+          <fieldset disabled={exhibitionOwnsBoard || autonomousOwnsBoard} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '10px' }}>
             <button onClick={handleHomeGantry} className="btn btn-secondary" style={{ padding: '8px', fontSize: '0.85rem' }}>Home Gantry</button>
             <button onClick={handleToggleMagnet} className={`btn ${magnetState === 1 ? 'btn-primary' : 'btn-secondary'}`} style={{ padding: '8px', fontSize: '0.85rem' }}>
@@ -1616,6 +1712,7 @@ export default function GameBoard() {
               {diagStatus}
             </p>
           )}
+          </fieldset>
         </div>
 
         <div className="connection-status">

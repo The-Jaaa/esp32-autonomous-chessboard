@@ -1,4 +1,5 @@
 #include <WiFi.h>
+
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <AccelStepper.h>
@@ -143,7 +144,7 @@ void scanSensors();
 void handleWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info);
 void markSnapshotDirty();
 bool postSnapshot(bool force);
-bool postJson(const String& endpoint, const String& payload, String* responseOut = nullptr);
+bool postJson(const String& endpoint, const String& payload, String* responseOut = nullptr, int* statusOut = nullptr);
 void applyImmediateLedCommands(const String& response);
 void networkTask(void* parameter);
 void pollPhysicalCommands();
@@ -157,7 +158,7 @@ void setMotionProfile(bool dragging);
 void goToXY(long targetX, long targetY, bool dragging);
 void goToSquare(int index, bool dragging);
 void goToSquareWithDragOvershoot(int index);
-void homeGantry();
+bool homeGantry();
 bool movePieceBetweenSquares(int fromIndex, int toIndex);
 bool movePieceToCoordinate(int fromIndex, long targetX, long targetY);
 bool verifySquareState(int index, bool expectedOccupied, uint32_t timeoutMs);
@@ -176,6 +177,9 @@ void applyHumanMoveConfirm(JsonObject command);
 void applyCaptureStart(JsonObject step);
 void runLedRunway(JsonObject step);
 bool enqueueMotionCommand(const String& commandJson);
+
+#include "autonomous_runtime.h"
+#include "exhibition.h"
 
 void setup() {
   pinMode(MAGNET_PIN, OUTPUT);
@@ -211,6 +215,7 @@ void setup() {
 
   Serial.println("[BOOT] Physical board firmware started.");
 
+  boardLedTaskReady = xTaskCreatePinnedToCore(ledTask, "boardLeds", 6144, nullptr, 1, nullptr, 0) == pdPASS;
   xTaskCreatePinnedToCore(networkTask, "networkTask", 12288, nullptr, 1, nullptr, 0);
   BoardAudioCoordinatorConfig audioConfig;
   audioConfig.mentor.host = AUDIO_SERVER_HOST;
@@ -243,9 +248,7 @@ void handleWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
 
 void loop() {
   scanSensors();
-  serviceLedCommandQueue();
-  servicePromotionLedDisplay(millis());
-  updateLedAnimation();
+  detectAutonomousLift();
 
   String commandJson;
   bool shouldExecute = false;
@@ -255,12 +258,18 @@ void loop() {
       pendingMotionCommandJson = "";
       hasPendingMotionCommand = false;
       shouldExecute = true;
+      exhibitionMotionBusy = true;
     }
     xSemaphoreGive(sharedMutex);
   }
 
   if (shouldExecute) {
     executeMotionCommand(commandJson);
+    if (xSemaphoreTake(sharedMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+      exhibitionMotionBusy = false;
+      xSemaphoreGive(sharedMutex);
+    }
+    markSnapshotDirty();
   }
 
   delay(2);
@@ -285,15 +294,18 @@ void networkTask(void* parameter) {
       if (xSemaphoreTake(sharedMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
         if (hasPendingJobResult) {
           resultJson = pendingJobResultJson;
-          pendingJobResultJson = "";
-          hasPendingJobResult = false;
           shouldPostResult = true;
         }
         xSemaphoreGive(sharedMutex);
       }
 
       if (shouldPostResult) {
-        postJson("/api/physical/job-result", resultJson);
+        int resultStatus = 0;
+        const bool posted = postJson("/api/physical/job-result", resultJson, nullptr, &resultStatus);
+        if ((posted || (resultStatus >= 400 && resultStatus < 500)) && xSemaphoreTake(sharedMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+          if (pendingJobResultJson == resultJson) { pendingJobResultJson = ""; hasPendingJobResult = false; }
+          xSemaphoreGive(sharedMutex);
+        }
       }
 
       postSnapshot(false);
@@ -341,6 +353,7 @@ void scanSensors() {
       }
     }
   }
+  detectAutonomousLift();
 }
 
 void markSnapshotDirty() {
@@ -349,17 +362,42 @@ void markSnapshotDirty() {
 
 bool postSnapshot(bool force) {
   const uint32_t now = millis();
-  if (!force && (!snapshotDirty || now - lastSnapshotPostMs < SNAPSHOT_MIN_INTERVAL_MS)) {
+  if (!force && ((!snapshotDirty && now - lastSnapshotPostMs < 1000) || now - lastSnapshotPostMs < SNAPSHOT_MIN_INTERVAL_MS)) {
     return false;
   }
 
-  StaticJsonDocument<2048> doc;
+  StaticJsonDocument<3072> doc;
   doc["seq"] = snapshotSeq++;
   doc["stable"] = true;
   doc["source"] = "esp32";
   JsonArray occupancy = doc.createNestedArray("occupancy");
   for (int i = 0; i < 64; i++) {
     occupancy.add(stableOccupancy[i]);
+  }
+  if (xSemaphoreTake(sharedMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    JsonObject runtime = doc.createNestedObject("boardRuntime");
+    runtime["concurrentSpectrumSupported"] = boardLedTaskReady;
+    runtime["controlledTakeoverSupported"] = true;
+    runtime["acknowledgedHomingSupported"] = true;
+    runtime["placementRecoverySupported"] = true; runtime["homingFault"] = homingFault;
+    runtime["autonomousRunId"] = autonomousRunId;
+    runtime["takeoverRequested"] = autonomousTakeover;
+    runtime["autonomousInterference"] = autonomousInterference;
+    runtime["exhibitionSupported"] = boardLedTaskReady;
+    runtime["musicSpectrumSupported"] = musicSpectrumAvailable();
+    const SpectrumRuntime spectrum = musicSpectrumRuntime();
+    runtime["spectrumFrames"] = spectrum.frames;
+    runtime["spectrumDroppedWindows"] = spectrum.droppedWindows;
+    runtime["spectrumMaxAnalysisUs"] = spectrum.maxAnalysisUs;
+    JsonArray spectrumLevels = runtime.createNestedArray("spectrumLevels");
+    for (float level : spectrum.levels) spectrumLevels.add(level);
+    runtime["motionBusy"] = exhibitionMotionBusy;
+    runtime["motionPending"] = hasPendingMotionCommand;
+    runtime["magnetOn"] = digitalRead(MAGNET_PIN) == HIGH;
+    runtime["exhibitionEnabled"] = exhibitionApplied.enabled;
+    runtime["exhibitionRevision"] = exhibitionApplied.revision;
+    runtime["exhibitionServerInstanceId"] = exhibitionApplied.server;
+    xSemaphoreGive(sharedMutex);
   }
   JsonObject audioStatus = doc.createNestedObject("audioStatus");
   audioStatus["mode"] = boardAudioMode();
@@ -416,13 +454,15 @@ void applyImmediateLedCommands(const String& response) {
   }
 }
 
-bool postJson(const String& endpoint, const String& payload, String* responseOut) {
+bool postJson(const String& endpoint, const String& payload, String* responseOut, int* statusOut) {
+  if (statusOut) *statusOut = 0;
   if (WiFi.status() != WL_CONNECTED) return false;
 
   HTTPClient http;
   http.begin(String(SERVER_BASE_URL) + endpoint);
   http.addHeader("Content-Type", "application/json");
   const int code = http.POST(payload);
+  if (statusOut) *statusOut = code;
   const String response = http.getString();
   http.end();
 
@@ -456,6 +496,9 @@ void pollPhysicalCommands() {
     return;
   }
 
+  lastSuccessfulPollMs = millis();
+  receiveExhibition(doc["exhibition"].as<JsonObject>());
+
   JsonObject audio = doc["audio"].as<JsonObject>();
   if (!audio.isNull()) {
     const char* mode = audio["mode"] | "mentor";
@@ -470,11 +513,15 @@ void pollPhysicalCommands() {
   }
 
   JsonArray commands = doc["commands"].as<JsonArray>();
+  const bool exhibitionOwnsPoll = doc["exhibition"]["enabled"] | false;
   for (JsonObject command : commands) {
+    JsonObject autoContext = command["autonomous"].as<JsonObject>();
+    if (!autoContext.isNull() && strcmp(autoContext["runId"] | "", autonomousRunId) == 0
+      && (autoContext["revision"] | uint32_t(0)) <= autonomousAcceptedRevision) continue;
     const char* type = command["type"] | "";
 
     if (strcmp(type, "led") == 0) {
-      enqueueLedCommand(command);
+      if (!exhibitionOwnsPoll) enqueueLedCommand(command);
     } else if (strcmp(type, "request-snapshot") == 0) {
       markSnapshotDirty();
       postSnapshot(true);
@@ -492,7 +539,7 @@ void pollPhysicalCommands() {
           queueJobResult(id, false, "ESP32 motion queue is busy.");
         }
       }
-    } else if (strcmp(type, "home") == 0 || strcmp(type, "move") == 0) {
+    } else if (strcmp(type, "home") == 0 || strcmp(type, "move") == 0 || strcmp(type, "autonomous-reconcile") == 0) {
       String commandJson;
       serializeJson(command, commandJson);
       if (!enqueueMotionCommand(commandJson)) {
@@ -507,6 +554,11 @@ bool enqueueMotionCommand(const String& commandJson) {
   bool queued = false;
   if (xSemaphoreTake(sharedMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
     if (!hasPendingMotionCommand) {
+      DynamicJsonDocument context(12288);
+      if (deserializeJson(context, commandJson) || !acceptAutonomousCommand(context.as<JsonObject>())) {
+        xSemaphoreGive(sharedMutex);
+        return false;
+      }
       pendingMotionCommandJson = commandJson;
       hasPendingMotionCommand = true;
       queued = true;
@@ -528,8 +580,46 @@ void executeMotionCommand(const String& commandJson) {
   const char* type = command["type"] | "";
   const String id = command["id"] | "unknown";
 
+  const bool autonomousCommand = !command["autonomous"].isNull();
+  if (!autonomousCommand && !waitForMotionLeds()) {
+    queueJobResult(id, false, "LED feedback did not finish before motion.");
+    return;
+  }
+  if (homingFault && strcmp(type, "home") != 0) {
+    queueJobResult(id, false, "Homing previously failed; re-home before movement.");
+    return;
+  }
+  if (autonomousCommand) {
+    for (const String& completed : autonomousCompletedIds) {
+      if (completed == id) { queueJobResult(id, true, "Already completed."); return; }
+    }
+    if (millis() - lastSuccessfulPollMs > 5000) {
+      queueJobResult(id, false, "Backend connection is stale; movement held.");
+      return;
+    }
+  }
+  if (strcmp(type, "autonomous-reconcile") == 0) {
+    JsonArray expected = command["autonomous"]["expectedOccupancy"].as<JsonArray>();
+    bool corrected[64] = {};
+    for(int i=0;i<64 && expected.size()==64;i++) corrected[i]=expected[i].as<bool>();
+    bool ok = expected.size() == 64;
+    if(xSemaphoreTake(sharedMutex,pdMS_TO_TICKS(10)) == pdTRUE) {
+      ok = ok && autonomousGuard.reconcile(stableOccupancy, corrected, digitalRead(MAGNET_PIN)==LOW, !homingFault);
+      if(ok) {
+        autonomousCompletedIds[autonomousCompletedCursor++ % 16]=id;
+      }
+      xSemaphoreGive(sharedMutex);
+    } else ok=false;
+    queueJobResult(id,ok,ok ? "" : "Correction baseline did not verify.");
+    markSnapshotDirty(); return;
+  }
   if (strcmp(type, "home") == 0) {
-    homeGantry();
+    const bool ok = homeGantry();
+    homingFault = !ok;
+    if (autonomousCommand) {
+      if (ok) autonomousCompletedIds[autonomousCompletedCursor++ % 16] = id;
+      queueJobResult(id, ok, ok ? "" : "Homing timed out; movement stopped.");
+    }
     markSnapshotDirty();
     return;
   }
@@ -545,6 +635,7 @@ void executeMotionCommand(const String& commandJson) {
     lastMotionFailedPhase = "";
     lastMotionFailedStep = -1;
     const bool ok = executeRobotMove(command, error);
+    if (ok && autonomousCommand) autonomousCompletedIds[autonomousCompletedCursor++ % 16] = id;
     queueJobResult(id, ok, error);
     markSnapshotDirty();
   }
@@ -614,6 +705,11 @@ bool executeMotionPlan(JsonObject command, String& error) {
 
   int stepIndex = 0;
   for (JsonObject step : plan) {
+    if (!command["autonomous"].isNull() && autonomousInterference) {
+      digitalWrite(MAGNET_PIN, LOW);
+      error = "Unexpected piece placement; autonomous motion held.";
+      return false;
+    }
     const char* action = step["action"] | "";
     const char* phase = step["phase"] | action;
     lastMotionFailedPhase = String(phase);
@@ -677,13 +773,13 @@ bool executeMotionPlan(JsonObject command, String& error) {
     }
 
     if (strcmp(action, "led-capture-start") == 0) {
-      applyCaptureStart(step);
+      queueMotionLed(step, "capture-start");
       stepIndex++;
       continue;
     }
 
     if (strcmp(action, "led-runway") == 0) {
-      runLedRunway(step);
+      queueMotionLed(step, "led-runway");
       stepIndex++;
       continue;
     }
@@ -768,6 +864,9 @@ void queueJobResult(const String& id, bool success, const String& error) {
   StaticJsonDocument<1536> doc;
   doc["id"] = id;
   doc["success"] = success;
+  doc["magnetOn"] = digitalRead(MAGNET_PIN) == HIGH;
+  doc["takeoverRequested"] = autonomousTakeover;
+  doc["autonomousInterference"] = autonomousInterference;
   if (!success) doc["error"] = error;
   if (!success && lastMotionFailedPhase.length() > 0) doc["failedPhase"] = lastMotionFailedPhase;
   if (!success && lastMotionFailedStep >= 0) doc["failedStep"] = lastMotionFailedStep;
@@ -804,6 +903,13 @@ void goToXY(long targetX, long targetY, bool dragging) {
 
   uint32_t lastScanMs = 0;
   while (motorA.distanceToGo() != 0 || motorB.distanceToGo() != 0) {
+    if (autonomousInterference && autonomousRunId[0]) {
+      motorA.moveTo(motorA.currentPosition());
+      motorB.moveTo(motorB.currentPosition());
+      digitalWrite(MAGNET_PIN, LOW);
+      homingFault = true;
+      return;
+    }
     motorA.run();
     motorB.run();
 
@@ -842,7 +948,7 @@ void goToSquareWithDragOvershoot(int index) {
   goToXY(overshootX, overshootY, true);
 }
 
-void homeGantry() {
+bool homeGantry() {
   Serial.println("[MOTION] Homing gantry.");
   setMotionProfile(false);
   digitalWrite(MAGNET_PIN, LOW);
@@ -855,7 +961,9 @@ void homeGantry() {
 
   motorA.move(1000000);
   motorB.move(-1000000);
+  uint32_t axisStart = millis();
   while (digitalRead(LIMIT_X_PIN) == SWITCH_UNPRESSED) {
+    if (millis() - axisStart > 15000) { motorA.setCurrentPosition(0); motorB.setCurrentPosition(0); digitalWrite(MAGNET_PIN, LOW); return false; }
     motorA.run();
     motorB.run();
     scanSensors();
@@ -869,7 +977,9 @@ void homeGantry() {
 
   motorA.move(-1000000);
   motorB.move(-1000000);
+  axisStart = millis();
   while (digitalRead(LIMIT_Y_PIN) == SWITCH_UNPRESSED) {
+    if (millis() - axisStart > 15000) { motorA.setCurrentPosition(0); motorB.setCurrentPosition(0); digitalWrite(MAGNET_PIN, LOW); return false; }
     motorA.run();
     motorB.run();
     scanSensors();
@@ -885,6 +995,7 @@ void homeGantry() {
   motorB.setCurrentPosition(0);
   currentX = 0;
   currentY = 0;
+  return true;
 }
 
 bool movePieceBetweenSquares(int fromIndex, int toIndex) {
@@ -973,6 +1084,7 @@ void serviceLedCommandQueue() {
       pendingLedCommands[pendingLedCommandHead] = "";
       pendingLedCommandHead = (pendingLedCommandHead + 1) % LED_COMMAND_QUEUE_CAPACITY;
       pendingLedCommandCount--;
+      ledCommandBusy = true;
     }
     xSemaphoreGive(sharedMutex);
   }
@@ -980,9 +1092,13 @@ void serviceLedCommandQueue() {
   DynamicJsonDocument doc(12288);
   if (deserializeJson(doc, commandJson)) {
     Serial.println("[LED] queued command parse failed.");
-    return;
+  } else {
+    applyLedCommand(doc.as<JsonObject>());
   }
-  applyLedCommand(doc.as<JsonObject>());
+  if (xSemaphoreTake(sharedMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    ledCommandBusy = false;
+    xSemaphoreGive(sharedMutex);
+  }
 }
 
 int promotionMatrixPixelToStrip(int row, int column) {
@@ -1099,7 +1215,9 @@ void servicePromotionLedDisplay(uint32_t now) {
 }
 
 void applyLedCommand(JsonObject command) {
+  stopExhibitionRendering();
   const char* mode = command["mode"] | "";
+  if (strcmp(mode, "capture-start") == 0) { applyCaptureStart(command); return; }
   if (strcmp(mode, "promotion-display") == 0) {
     applyPromotionLedCommand(command);
     return;

@@ -128,8 +128,8 @@ try {
         Pop-Location
     }
 
-    $foundationArgs = @()
-    if ($SkipFirmware) { $foundationArgs += '-SkipFirmware' }
+    $foundationArgs = @{}
+    if ($SkipFirmware) { $foundationArgs.SkipFirmware = $true }
     Invoke-Checked 'Complete foundation verification' {
         & (Join-Path $PSScriptRoot 'verify-foundation.ps1') @foundationArgs
     }

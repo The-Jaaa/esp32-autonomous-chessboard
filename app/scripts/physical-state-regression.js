@@ -50,6 +50,7 @@ function resetPhysicalSession(fen = PHYSICAL_START_FEN) {
   physicalSession.legalTargets = [];
   physicalSession.humanColor = 'white';
   physicalSession.robotColor = 'black';
+  physicalSession.difficultyMode = 'normal';
   physicalSession.level = clampLevel(1);
   physicalSession.activeSearchLevel = null;
   physicalSession.profile = normalizeProfile('balanced');
@@ -367,6 +368,33 @@ async function run() {
   assert.strictEqual(state.configuredLevel, 9, 'the session should retain the newly configured level');
   assert.strictEqual(state.pendingRobotJob?.engineLevel, 2, 'the running engine transaction should retain its original level');
   assert.strictEqual(state.difficultyPending, true, 'status should show that the new level is waiting for the next robot turn');
+
+  // Exercise the actual physical Ultra path without issuing any hardware motion.
+  resetPhysicalSession(robotTurn.fen());
+  physicalSession.difficultyMode = 'ultra';
+  const engine = require('../server').gameEngine;
+  const originalAnalyze = engine.analyzeFen;
+  let releaseUltra;
+  engine.analyzeFen = async (fen, options) => {
+    assert.strictEqual(fen, robotTurn.fen());
+    assert.strictEqual(options.movetimeMs, 3000);
+    assert.strictEqual(options.multiPv, 1);
+    assert.strictEqual(options.priority, 'move');
+    await new Promise(resolve => { releaseUltra = resolve; });
+    return { bestMove: { uci: 'e7e5' }, telemetry: { timeMs: 3000 } };
+  };
+  try {
+    const reply = queueRobotReply();
+    assert.strictEqual(physicalSession.activeSearchMode, 'ultra');
+    physicalSession.difficultyMode = 'normal';
+    releaseUltra();await reply;
+    assert.strictEqual(physicalSession.pendingRobotJob?.uci, 'e7e5', 'changing mode must preserve the in-flight Ultra move');
+    assert.strictEqual(physicalSession.difficultyMode, 'normal');
+    resetPhysicalSession(robotTurn.fen());physicalSession.difficultyMode = 'ultra';
+    const stale = queueRobotReply();physicalSession.sessionGeneration += 1;
+    releaseUltra();await stale;
+    assert.strictEqual(physicalSession.pendingRobotJob, null, 'stale Ultra reply must not schedule motion');
+  } finally { engine.analyzeFen = originalAnalyze; }
 
   const fen = 'rnbqkbnr/2pppppp/p7/1p6/6P1/2P5/PP1PPP1P/RNBQKBNR w KQkq - 0 3';
   resetPhysicalSession(fen);

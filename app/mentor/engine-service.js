@@ -1,5 +1,5 @@
 const { spawn } = require('child_process');
-const path = require('path');
+const { resolveStockfishPath, requireStockfish } = require('../stockfish-runtime');
 const { Chess } = require('chess.js');
 
 const QUICK_TIME_MS = 1000;
@@ -140,10 +140,12 @@ function terminalAnalysis(fen) {
 
 class MentorEngineService {
   constructor({
-    stockfishPath = path.join(__dirname, '..', 'node_modules', 'stockfish', 'bin', 'stockfish-18-lite-single.js'),
+    stockfishPath = resolveStockfishPath(),
     processFactory,
     maxWaitingJobs = MAX_WAITING_JOBS,
     hashMb = 32,
+    threads = 1,
+    validateIdentity = !processFactory,
     startupTimeoutMs = 5000,
     watchdogGraceMs = 750,
     stopGraceMs = 300,
@@ -151,11 +153,15 @@ class MentorEngineService {
     now = () => Date.now()
   } = {}) {
     this.stockfishPath = stockfishPath;
-    this.processFactory = processFactory || (() => spawn(process.execPath, [this.stockfishPath], {
+    this.processFactory = processFactory || (() => spawn(requireStockfish(this.stockfishPath), [], {
       stdio: ['pipe', 'pipe', 'pipe']
     }));
     this.maxWaitingJobs = maxWaitingJobs;
     this.hashMb = hashMb;
+    this.threads = threads;
+    this.validateIdentity = validateIdentity;
+    this.identity = null;
+    this.options = new Set();
     this.startupTimeoutMs = startupTimeoutMs;
     this.watchdogGraceMs = watchdogGraceMs;
     this.stopGraceMs = stopGraceMs;
@@ -191,6 +197,9 @@ class MentorEngineService {
   handleLine(line) {
     const trimmed = line.trim();
     if (!trimmed) return;
+    if (trimmed.startsWith('id name ')) this.identity = trimmed.slice(8);
+    const option = trimmed.match(/^option name (.*?) type /);
+    if (option) this.options.add(option[1]);
     for (const waiter of [...this.waiters]) {
       if (!waiter.predicate(trimmed)) continue;
       clearTimeout(waiter.timer);
@@ -239,10 +248,12 @@ class MentorEngineService {
       const child = this.processFactory();
       this.process = child;
       this.expectedExit = false;
-      child.stdout.on('data', (chunk) => this.handleData(chunk));
+      this.identity = null; this.options.clear();
+      child.stdout.on('data', (chunk) => { if (this.process === child) this.handleData(chunk); });
       child.stderr?.on('data', () => {});
-      child.on('error', (error) => this.handleProcessFailure(error));
+      child.on('error', (error) => { if (this.process === child) this.handleProcessFailure(error); });
       child.on('exit', (code) => {
+        if (this.process !== child) return;
         if (!this.expectedExit) {
           this.handleProcessFailure(new MentorEngineError(`Stockfish exited with code ${code}.`, 'engine_crashed'));
         } else {
@@ -254,9 +265,15 @@ class MentorEngineService {
       const uciOk = this.waitForLine((line) => line === 'uciok', this.startupTimeoutMs, 'uciok');
       this.send('uci');
       await uciOk;
-      this.send('setoption name Threads value 1');
+      if (this.validateIdentity && (!/^Stockfish 19\b/.test(this.identity || '') ||
+          ['Threads','Hash','MultiPV','Skill Level','UCI_LimitStrength','UCI_ShowWDL'].some(name => !this.options.has(name)))) {
+        throw new MentorEngineError('Expected native Stockfish 19 with supported UCI options. Run tools/setup-stockfish.ps1.', 'engine_setup');
+      }
+      this.send(`setoption name Threads value ${this.threads}`);
       this.send(`setoption name Hash value ${this.hashMb}`);
       this.send('setoption name UCI_ShowWDL value true');
+      this.send('setoption name Skill Level value 20');
+      this.send('setoption name UCI_LimitStrength value false');
       const ready = this.waitForLine((line) => line === 'readyok', this.startupTimeoutMs, 'readyok');
       this.send('isready');
       await ready;
@@ -269,7 +286,7 @@ class MentorEngineService {
     return this.readyPromise;
   }
 
-  analyzeFen(fen, { mode = 'quick', movetimeMs, multiPv = 3, signal } = {}) {
+  analyzeFen(fen, { mode = 'quick', movetimeMs, depth, multiPv = 3, signal, priority = 'analysis' } = {}) {
     let game;
     try {
       game = new Chess(fen);
@@ -284,7 +301,13 @@ class MentorEngineService {
       : analysisTimeMs(normalizedMode);
     const requestedPv = Math.max(1, Math.min(3, Number(multiPv) || 1, game.moves().length));
     if (signal?.aborted) return Promise.reject(makeAbortError());
-    if (this.queue.length >= this.maxWaitingJobs) {
+    if (depth !== undefined && (!Number.isInteger(depth) || depth < 1 || depth > 30))
+      return Promise.reject(new MentorEngineError('Search depth must be from 1 to 30.', 'invalid_depth'));
+    if (priority === 'evaluation') {
+      for (const old of [...this.queue, this.currentJob].filter(Boolean))
+        if (old.priority === 'evaluation') old.abortListener();
+    } else if (priority === 'move' && this.currentJob?.priority === 'evaluation') this.currentJob.abortListener();
+    if (this.queue.filter(job => job.priority !== 'evaluation').length >= this.maxWaitingJobs) {
       return Promise.reject(new MentorEngineError('Stockfish analysis queue is full.', 'engine_busy'));
     }
 
@@ -294,6 +317,7 @@ class MentorEngineService {
         turn: game.turn(),
         mode: normalizedMode,
         movetimeMs: requestedTime,
+        depth, priority, cancelled: false,
         multiPv: requestedPv,
         signal,
         resolve,
@@ -303,19 +327,24 @@ class MentorEngineService {
         running: false
       };
       job.abortListener = () => {
+        if (job.cancelled) return;
+        job.cancelled = true;
         if (!job.running) {
           this.queue = this.queue.filter((candidate) => candidate !== job);
+          signal?.removeEventListener('abort', job.abortListener);
           reject(makeAbortError());
           return;
         }
         if (this.currentJob === job && this.searchContext) {
-          this.searchContext.cancelled = true;
-          try { this.send('stop'); } catch { this.terminateProcess(); }
-          this.searchContext.killTimer = setTimeout(() => this.terminateProcess(), this.abortGraceMs);
+          const context = this.searchContext;
+          context.cancelled = true;
+          try { this.send('stop'); } catch { this.terminateProcess(); return; }
+          context.killTimer = setTimeout(() => this.terminateProcess(), this.abortGraceMs);
         }
       };
       signal?.addEventListener('abort', job.abortListener, { once: true });
       this.queue.push(job);
+      this.queue.sort((a, b) => Number(b.priority === 'move') - Number(a.priority === 'move'));
       this.pump();
     });
   }
@@ -327,7 +356,7 @@ class MentorEngineService {
     job.running = true;
     try {
       await this.ensureProcess();
-      if (job.signal?.aborted) throw makeAbortError();
+      if (job.cancelled || job.signal?.aborted) throw makeAbortError();
       const result = await this.executeSearch(job);
       job.resolve(result);
     } catch (error) {
@@ -355,12 +384,13 @@ class MentorEngineService {
       this.searchContext = context;
       context.watchdog = setTimeout(() => {
         if (this.searchContext !== context) return;
+        context.timedOut = true;
         try { this.send('stop'); } catch { this.terminateProcess(); return; }
         context.killTimer = setTimeout(() => this.terminateProcess(), this.stopGraceMs);
-      }, job.movetimeMs + this.watchdogGraceMs);
+      }, (job.depth ? 30000 : job.movetimeMs) + this.watchdogGraceMs);
       this.send(`setoption name MultiPV value ${job.multiPv}`);
       this.send(`position fen ${job.fen}`);
-      this.send(`go movetime ${job.movetimeMs}`);
+      this.send(job.depth ? `go depth ${job.depth}` : `go movetime ${job.movetimeMs}`);
     });
   }
 
@@ -370,10 +400,11 @@ class MentorEngineService {
     this.searchContext = null;
     clearTimeout(context.watchdog);
     clearTimeout(context.killTimer);
-    if (context.cancelled || context.job.signal?.aborted) {
+    if (context.cancelled || context.job.cancelled || context.job.signal?.aborted) {
       context.reject(makeAbortError());
       return;
     }
+    if (context.timedOut) { context.reject(new MentorEngineError('Stockfish search exceeded its deadline.', 'engine_timeout')); return; }
     const lines = [...context.lines.values()]
       .sort((left, right) => left.multipv - right.multipv)
       .map((info) => serializeLine(context.job.fen, context.job.turn, info));

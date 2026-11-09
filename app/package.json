@@ -34,7 +34,18 @@
     "test:mentor-browser": "node scripts/mentor-browser-regression.js",
     "test:mentor": "npm run test:game-settings && npm run test:mentor-foundation && npm run test:mentor-chess && npm run test:mentor-tools && npm run test:mentor-engine && npm run test:mentor-live && npm run test:mentor-live-recovery && npm run test:mentor-speaker && npm run test:mentor-physical && npm run test:mentor-physical-intent && npm run test:mentor-activity && npm run test:mentor-curriculum && npm run test:mentor-physical-opening && npm run test:mentor-physical-curriculum && npm run test:mentor-physical-handoff && npm run test:mentor-grounded-coaching && npm run test:mentor-browser",
     "test:online-foundation": "npm run test:physical && npm run test:game-settings",
-    "test:foundation": "npm run test:online-foundation"
+    "test:foundation": "npm run test:online-foundation",
+    "test:music-spectrum": "node scripts/music-spectrum-regression.js",
+    "test:exhibition-state": "node scripts/exhibition-regression.js",
+    "test:exhibition-browser": "node scripts/exhibition-browser-regression.js",
+    "test:exhibition": "npm run test:exhibition-state && npm run test:exhibition-browser",
+    "test:autonomous-state": "node scripts/autonomous-regression.js",
+    "test:autonomous-firmware": "node scripts/autonomous-firmware-regression.js",
+    "test:autonomous-browser": "node scripts/autonomous-browser-regression.js",
+    "test:autonomous": "npm run test:autonomous-state && npm run test:autonomous-firmware && npm run test:autonomous-browser",
+    "test:ultra-engine": "node scripts/ultra-regression.js",
+    "test:ultra-browser": "node scripts/ultra-browser-regression.js",
+    "test:ultra": "npm run test:ultra-engine && npm run test:ultra-browser"
   },
   "dependencies": {
     "@google/genai": "1.44.0",
@@ -44,7 +55,6 @@
     "express": "^4.21.2",
     "google-tts-api": "^2.0.2",
     "socket.io": "^4.8.1",
-    "stockfish": "^18.0.8",
     "ws": "^8.21.0"
   },
   "devDependencies": {

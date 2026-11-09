@@ -95,3 +95,6 @@ desktop.ini
 # Codex/local automation workspace state
 .agents/
 .codex/
+
+# Native Stockfish distribution (includes upstream source and license)
+/tools/stockfish/

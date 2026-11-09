@@ -11,8 +11,8 @@ $root = Split-Path -Parent $PSScriptRoot
 $firmware = Join-Path $root 'esp32_firmware'
 $outputDirectory = Join-Path $root 'tmp\mentor-speaker-production'
 $fqbn = 'esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=default,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,UploadMode=default,UploadSpeed=921600,LoopCore=1,EventsCore=1'
-$expectedFlashBytes = 1894091
-$expectedRamBytes = 58888
+$expectedFlashBytes = 1908183
+$expectedRamBytes = 101464
 
 function Get-ArduinoCliPath {
     $command = Get-Command arduino-cli -ErrorAction SilentlyContinue
